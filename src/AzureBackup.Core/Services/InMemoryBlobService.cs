@@ -152,6 +152,33 @@ public partial class InMemoryBlobService : IBlobStorageService
         return blobName;
     }
 
+    /// <summary>
+    /// Uploads an encrypted chunk directly without checking if it exists.
+    /// For InMemoryBlobService, this behaves the same as UploadChunkAsync but skips the dedup check.
+    /// </summary>
+    public async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentNullException.ThrowIfNull(chunkData);
+        ValidateChunkHash(chunkHash);
+        
+        await SimulateLatencyAsync(cancellationToken);
+        SimulateFailure("Upload chunk direct");
+
+        var blobName = $"chunks/{chunkHash}";
+        
+        // Direct upload - no deduplication check (for new files)
+        var encryptedData = _encryptionService.Encrypt(chunkData);
+        _blobs[blobName] = encryptedData;
+        
+        TotalBytesUploaded += encryptedData.Length;
+        TotalOperations++;
+        progress?.Report(encryptedData.Length);
+
+        return blobName;
+    }
+
     public async Task UploadFileMetadataAsync(BackedUpFile fileInfo, CancellationToken cancellationToken = default)
     {
         EnsureConnected();

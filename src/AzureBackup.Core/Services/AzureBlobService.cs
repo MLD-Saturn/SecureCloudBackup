@@ -275,6 +275,48 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     /// <summary>
+    /// Uploads an encrypted chunk directly without checking if it exists.
+    /// Use this for new files where all chunks are guaranteed to be new.
+    /// This reduces API calls by 50% for new file uploads.
+    /// </summary>
+    public async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentNullException.ThrowIfNull(chunkData);
+        ValidateChunkHash(chunkHash);
+        Log($"UploadChunkDirectAsync: Direct upload chunk {chunkHash[..8]}... ({chunkData.Length} bytes)");
+
+        // Encrypt the chunk before upload
+        var encryptedData = _encryptionService.Encrypt(chunkData);
+        
+        // Use hash as blob name (content-addressable storage)
+        var blobName = $"chunks/{chunkHash}";
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+
+        // Upload directly without existence check - for new files this saves an API call per chunk
+        var options = new BlobUploadOptions
+        {
+            AccessTier = AccessTier.Cool,
+            HttpHeaders = new BlobHttpHeaders
+            {
+                ContentType = "application/octet-stream"
+            },
+            TransferOptions = DefaultTransferOptions
+        };
+
+        await using var stream = new MemoryStream(encryptedData);
+        await blobClient.UploadAsync(stream, options, cancellationToken);
+        
+        TotalBytesUploaded += encryptedData.Length;
+        TotalOperations++;
+        progress?.Report(encryptedData.Length);
+        Log($"UploadChunkDirectAsync: Chunk uploaded successfully ({encryptedData.Length} bytes encrypted)");
+
+        return blobName;
+    }
+
+    /// <summary>
     /// Uploads file metadata (encrypted).
     /// </summary>
     public async Task UploadFileMetadataAsync(BackedUpFile fileInfo, CancellationToken cancellationToken = default)

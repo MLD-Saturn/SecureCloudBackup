@@ -59,8 +59,17 @@ public interface IBlobStorageService : IAsyncDisposable
 
     /// <summary>
     /// Uploads an encrypted chunk to blob storage.
+    /// Checks if chunk already exists for deduplication (use for modified files).
     /// </summary>
     Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Uploads an encrypted chunk directly without checking if it exists.
+    /// Use this for new files where all chunks are guaranteed to be new.
+    /// This reduces API calls by 50% for new file uploads.
+    /// </summary>
+    Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
         IProgress<long>? progress = null, CancellationToken cancellationToken = default);
 
     /// <summary>
