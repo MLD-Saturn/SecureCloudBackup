@@ -74,8 +74,12 @@ public class PasswordValidationTests : IAsyncLifetime
     [Theory]
     [InlineData("alllowercase1234")]  // Only lowercase and digits (2 types)
     [InlineData("ALLUPPERCASE1234")]  // Only uppercase and digits (2 types)
-    [InlineData("NoDigitsHere")]      // Only upper and lower (2 types)
+    [InlineData("NoDigitsHere!@")]    // Missing digits (3 types)
     [InlineData("!!!!!!!!!!!!")]      // Only special chars (1 type)
+    [InlineData("MySecurePass123")]   // Missing special chars (3 types)
+    [InlineData("mysecurepass1!")]    // Missing uppercase (3 types)
+    [InlineData("MYSECUREPASS1!")]    // Missing lowercase (3 types)
+    [InlineData("MySecurePass!@#")]   // Missing digits (3 types)
     public async Task Initialize_WithWeakCharacterMix_ThrowsSecurityPolicyException(string weakPassword)
     {
         // Act & Assert
@@ -83,14 +87,14 @@ public class PasswordValidationTests : IAsyncLifetime
             _orchestrator.InitializeAsync(weakPassword));
         
         Assert.Equal(SecurityPolicyType.WeakPassword, ex.PolicyType);
-        Assert.Contains("3 of", ex.Message);
+        Assert.Contains("all of", ex.Message);
     }
 
     [Theory]
     [InlineData("StrongPassword1!")]     // Upper, lower, digit, special
-    [InlineData("MySecurePass123")]      // Upper, lower, digit (3 types)
     [InlineData("SECURE!pass123")]       // Upper, lower, digit, special
     [InlineData("Complex!Password1")]    // All 4 types
+    [InlineData("MyP@ssw0rd1234")]       // All 4 types
     public async Task Initialize_WithStrongPassword_Succeeds(string strongPassword)
     {
         // Act

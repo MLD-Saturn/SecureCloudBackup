@@ -87,7 +87,7 @@ public class BackupOrchestrator : IAsyncDisposable
 
     /// <summary>
     /// Validates password strength for new setups.
-    /// Requires minimum 12 characters with mixed character types.
+    /// Requires minimum 12 characters with all four character types.
     /// </summary>
     private static void ValidatePasswordStrength(string password)
     {
@@ -103,13 +103,11 @@ public class BackupOrchestrator : IAsyncDisposable
         var hasDigit = password.Any(char.IsDigit);
         var hasSpecial = password.Any(c => !char.IsLetterOrDigit(c));
 
-        // Require at least 3 of 4 character types
-        var typesCount = (hasUpper ? 1 : 0) + (hasLower ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
-        
-        if (typesCount < 3)
+        // Require all 4 character types for maximum security
+        if (!hasUpper || !hasLower || !hasDigit || !hasSpecial)
         {
             throw new SecurityPolicyException(
-                "Password must contain at least 3 of: uppercase, lowercase, digits, special characters.",
+                "Password must contain all of: uppercase, lowercase, digits, and special characters.",
                 SecurityPolicyType.WeakPassword);
         }
     }

@@ -122,7 +122,7 @@ public partial class InMemoryBlobService : IBlobStorageService
 
     #region Blob Operations
 
-    public async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+    public virtual async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
@@ -156,7 +156,7 @@ public partial class InMemoryBlobService : IBlobStorageService
     /// Uploads an encrypted chunk directly without checking if it exists.
     /// For InMemoryBlobService, this behaves the same as UploadChunkAsync but skips the dedup check.
     /// </summary>
-    public async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+    public virtual async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         EnsureConnected();

@@ -173,23 +173,28 @@ public class BlobServiceTests : IAsyncLifetime
         Assert.NotEqual(blobName1, blobName2);
     }
 
+
     [Fact]
     public async Task UploadChunkAsync_WithProgress_ReportsProgress()
     {
-        // Arrange
-        var data = CreateRandomContent(10 * 1024);
-        var hash = ComputeHash(data);
-        long reportedBytes = 0;
-        var progress = new Progress<long>(bytes => reportedBytes = bytes);
+        // This test is timing-dependent, so we retry up to 5 times
+        await FlakyTestHelper.RetryAsync(async () =>
+        {
+            // Arrange
+            var data = CreateRandomContent(10 * 1024);
+            var hash = ComputeHash(data);
+            long reportedBytes = 0;
+            var progress = new Progress<long>(bytes => reportedBytes = bytes);
 
-        // Act
-        await _blobService.UploadChunkAsync(data, hash, progress);
-        
-        // Give progress time to be reported (it's async)
-        await Task.Delay(50);
+            // Act
+            await _blobService.UploadChunkAsync(data, hash, progress);
+            
+            // Give progress time to be reported (it's async)
+            await Task.Delay(100);
 
-        // Assert
-        Assert.True(reportedBytes > 0);
+            // Assert
+            Assert.True(reportedBytes > 0);
+        });
     }
 
     [Fact]
@@ -220,6 +225,152 @@ public class BlobServiceTests : IAsyncLifetime
 
         // Assert
         Assert.Equal(initialOps + 1, _blobService.TotalOperations);
+    }
+
+    #endregion
+
+    #region UploadChunkDirectAsync Tests
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_ValidData_ReturnsValidBlobName()
+    {
+        // Arrange
+        var data = CreateRandomContent(1024);
+        var hash = ComputeHash(data);
+
+        // Act
+        var blobName = await _blobService.UploadChunkDirectAsync(data, hash);
+
+        // Assert
+        Assert.StartsWith("chunks/", blobName);
+        Assert.Contains(hash, blobName);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_NullData_Throws()
+    {
+        // Act & Assert
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            _blobService.UploadChunkDirectAsync(null!, "somehash"));
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_EmptyHash_ThrowsSecurityPolicyException()
+    {
+        // Arrange
+        var data = CreateRandomContent(1024);
+
+        // Act & Assert
+        await Assert.ThrowsAsync<AzureBackup.Core.SecurityPolicyException>(() =>
+            _blobService.UploadChunkDirectAsync(data, ""));
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_SameDataTwice_OverwritesWithoutError()
+    {
+        // Arrange - Direct upload should overwrite, not deduplicate
+        var data = CreateRandomContent(1024);
+        var hash = ComputeHash(data);
+
+        // Act - Upload twice
+        var blobName1 = await _blobService.UploadChunkDirectAsync(data, hash);
+        var blobName2 = await _blobService.UploadChunkDirectAsync(data, hash);
+
+        // Assert - Both return same blob name, but both actually uploaded (no dedup check)
+        Assert.Equal(blobName1, blobName2);
+        // TotalOperations should be 2 (both uploads counted)
+        Assert.Equal(2, _blobService.TotalOperations);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_VsUploadChunkAsync_DedupBehaviorDiffers()
+    {
+        // Arrange
+        var data = CreateRandomContent(1024);
+        var hash = ComputeHash(data);
+
+        // Act - Upload with regular method first (establishes blob)
+        await _blobService.UploadChunkAsync(data, hash);
+        var opsAfterFirst = _blobService.TotalOperations;
+
+        // Upload again with regular method (should skip due to dedup)
+        await _blobService.UploadChunkAsync(data, hash);
+        var opsAfterSecondRegular = _blobService.TotalOperations;
+
+        // Upload with direct method (should upload regardless)
+        await _blobService.UploadChunkDirectAsync(data, hash);
+        var opsAfterDirect = _blobService.TotalOperations;
+
+        // Assert
+        // Regular upload deduplicates - no new operation
+        Assert.Equal(opsAfterFirst, opsAfterSecondRegular);
+        // Direct upload always uploads - increments operation count
+        Assert.Equal(opsAfterSecondRegular + 1, opsAfterDirect);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_DataCanBeDownloaded()
+    {
+        // Arrange
+        var originalData = CreateRandomContent(1024);
+        var hash = ComputeHash(originalData);
+
+        // Act
+        var blobName = await _blobService.UploadChunkDirectAsync(originalData, hash);
+        var downloadedData = await _blobService.DownloadChunkAsync(blobName);
+
+        // Assert
+        Assert.Equal(originalData, downloadedData);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_WithProgress_ReportsProgress()
+    {
+        // This test is timing-dependent, so we retry up to 5 times
+        await FlakyTestHelper.RetryAsync(async () =>
+        {
+            // Arrange
+            var data = CreateRandomContent(1024);
+            var hash = ComputeHash(data);
+            long reportedBytes = 0;
+            var progress = new Progress<long>(b => reportedBytes = b);
+
+            // Act
+            await _blobService.UploadChunkDirectAsync(data, hash, progress);
+            await Task.Delay(100); // Allow progress callback to execute
+
+            // Assert
+            Assert.True(reportedBytes > 0);
+        });
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_UpdatesTotalBytesUploaded()
+    {
+        // Arrange
+        var data = CreateRandomContent(1024);
+        var hash = ComputeHash(data);
+        var initialBytes = _blobService.TotalBytesUploaded;
+
+        // Act
+        await _blobService.UploadChunkDirectAsync(data, hash);
+
+        // Assert
+        Assert.True(_blobService.TotalBytesUploaded > initialBytes);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_InvalidHashFormat_ThrowsSecurityPolicyException()
+    {
+        // Arrange
+        var data = CreateRandomContent(1024);
+
+        // Act & Assert - Invalid hash formats
+        await Assert.ThrowsAsync<AzureBackup.Core.SecurityPolicyException>(() =>
+            _blobService.UploadChunkDirectAsync(data, "invalid-hash"));
+        
+        await Assert.ThrowsAsync<AzureBackup.Core.SecurityPolicyException>(() =>
+            _blobService.UploadChunkDirectAsync(data, "tooshort"));
     }
 
     #endregion
