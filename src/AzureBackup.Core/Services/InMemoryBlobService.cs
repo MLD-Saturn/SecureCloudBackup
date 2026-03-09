@@ -1,0 +1,357 @@
+using System.Collections.Concurrent;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Azure.Core;
+using AzureBackup.Core.Models;
+
+namespace AzureBackup.Core.Services;
+
+/// <summary>
+/// In-memory implementation of IBlobStorageService for testing without Azure.
+/// Simulates blob storage behavior including deduplication, metadata storage,
+/// and security validation matching AzureBlobService behavior.
+/// Supports both connection string and Entra ID authentication (simulated).
+/// </summary>
+public partial class InMemoryBlobService : IBlobStorageService
+{
+    private readonly EncryptionService _encryptionService;
+    private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
+    private bool _isConnected;
+    
+    // Simulated latency for more realistic testing (milliseconds)
+    private readonly int _simulatedLatencyMs;
+    
+    // Simulated failure rate for resilience testing (0.0 to 1.0)
+    private readonly double _failureRate;
+    
+    // Thread-safe random number generator lock
+    private readonly object _randomLock = new();
+    private readonly Random _random = new();
+    
+    // Regex for validating chunk hash (SHA-256 hex string) - same as AzureBlobService
+    [GeneratedRegex(@"^[A-Fa-f0-9]{64}$", RegexOptions.Compiled)]
+    private static partial Regex ValidHashPattern();
+
+    public bool IsConnected => _isConnected;
+    public long TotalBytesUploaded { get; private set; }
+    public int TotalOperations { get; private set; }
+    
+    /// <summary>
+    /// Gets all stored blob names (for test verification).
+    /// </summary>
+    public IReadOnlyCollection<string> StoredBlobNames => _blobs.Keys.ToList();
+    
+    /// <summary>
+    /// Gets the total storage used (for test verification).
+    /// </summary>
+    public long TotalStorageUsed => _blobs.Values.Sum(b => (long)b.Length);
+
+    public InMemoryBlobService(EncryptionService encryptionService, int simulatedLatencyMs = 0, double failureRate = 0.0)
+    {
+        ArgumentNullException.ThrowIfNull(encryptionService);
+        _encryptionService = encryptionService;
+        _simulatedLatencyMs = simulatedLatencyMs;
+        _failureRate = Math.Clamp(failureRate, 0.0, 1.0);
+    }
+    
+    /// <summary>
+    /// Validates a chunk hash to prevent path traversal attacks.
+    /// Matches AzureBlobService validation.
+    /// </summary>
+    private static void ValidateChunkHash(string hash)
+    {
+        if (string.IsNullOrWhiteSpace(hash))
+            throw new SecurityPolicyException("Chunk hash cannot be empty", SecurityPolicyType.InvalidBlobName);
+        
+        if (!ValidHashPattern().IsMatch(hash))
+            throw new SecurityPolicyException($"Invalid chunk hash format: {hash}", SecurityPolicyType.InvalidBlobName);
+    }
+
+
+    #region Connection String Authentication
+
+    public Task ConnectAsync(string connectionString, string containerName)
+    {
+        // For in-memory, we just validate inputs and mark as connected
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        
+        _isConnected = true;
+        return Task.CompletedTask;
+    }
+
+    public Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return Task.FromResult((false, "Connection string is required"));
+        if (string.IsNullOrWhiteSpace(containerName))
+            return Task.FromResult((false, "Container name is required"));
+            
+        return Task.FromResult((true, "In-memory connection successful"));
+    }
+
+    #endregion
+
+    #region Entra ID Authentication
+
+    public Task ConnectWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential)
+    {
+        // For in-memory, we just validate inputs and mark as connected
+        ArgumentNullException.ThrowIfNull(blobServiceUri);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentNullException.ThrowIfNull(credential);
+        
+        _isConnected = true;
+        return Task.CompletedTask;
+    }
+
+    public Task<(bool success, string message)> TestConnectionWithEntraIdAsync(
+        Uri blobServiceUri, string containerName, TokenCredential credential)
+    {
+        if (blobServiceUri == null)
+            return Task.FromResult((false, "Blob service URI is required"));
+        if (string.IsNullOrWhiteSpace(containerName))
+            return Task.FromResult((false, "Container name is required"));
+        if (credential == null)
+            return Task.FromResult((false, "Credential is required"));
+            
+        return Task.FromResult((true, "In-memory connection successful (Entra ID simulated)"));
+    }
+
+    #endregion
+
+    #region Blob Operations
+
+    public async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentNullException.ThrowIfNull(chunkData);
+        ValidateChunkHash(chunkHash);
+        
+        await SimulateLatencyAsync(cancellationToken);
+        SimulateFailure("Upload chunk");
+
+        var blobName = $"chunks/{chunkHash}";
+        
+        // Check for deduplication
+        if (_blobs.ContainsKey(blobName))
+        {
+            progress?.Report(chunkData.Length);
+            return blobName;
+        }
+
+        // Encrypt and store
+        var encryptedData = _encryptionService.Encrypt(chunkData);
+        _blobs[blobName] = encryptedData;
+        
+        TotalBytesUploaded += encryptedData.Length;
+        TotalOperations++;
+        progress?.Report(encryptedData.Length);
+
+        return blobName;
+    }
+
+    public async Task UploadFileMetadataAsync(BackedUpFile fileInfo, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentNullException.ThrowIfNull(fileInfo);
+        
+        await SimulateLatencyAsync(cancellationToken);
+        SimulateFailure("Upload metadata");
+
+        var metadata = JsonSerializer.Serialize(new
+        {
+            fileInfo.LocalPath,
+            fileInfo.FileSize,
+            fileInfo.LastModified,
+            fileInfo.FileHash,
+            Chunks = fileInfo.Chunks.Select(c => new { c.Index, c.Hash, c.Offset, c.Length }),
+            fileInfo.MetadataVersion
+        });
+        
+        var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
+        
+        var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(fileInfo.LocalPath)));
+        var blobName = $"metadata/{metadataHash}";
+        
+        _blobs[blobName] = encryptedMetadata;
+        TotalOperations++;
+    }
+
+    public virtual async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        
+        // Validate blob name format - must start with "chunks/" (same as AzureBlobService)
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+        
+        await SimulateLatencyAsync(cancellationToken);
+        SimulateFailure("Download chunk");
+
+        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        {
+            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName);
+        }
+
+        TotalOperations++;
+        return _encryptionService.Decrypt(encryptedData);
+    }
+
+    public Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        
+        var metadataBlobs = _blobs.Keys
+            .Where(k => k.StartsWith("metadata/"))
+            .ToList();
+        
+        TotalOperations++;
+        return Task.FromResult(metadataBlobs);
+    }
+
+    public async Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        
+        await SimulateLatencyAsync(cancellationToken);
+
+        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        {
+            return null;
+        }
+
+        try
+        {
+            var decryptedData = _encryptionService.Decrypt(encryptedData);
+            var json = System.Text.Encoding.UTF8.GetString(decryptedData);
+            
+            var metadata = JsonSerializer.Deserialize<MetadataDto>(json);
+            if (metadata == null) return null;
+
+            TotalOperations++;
+            
+            return new BackedUpFile
+            {
+                LocalPath = metadata.LocalPath,
+                FileSize = metadata.FileSize,
+                LastModified = metadata.LastModified,
+                FileHash = metadata.FileHash,
+                MetadataVersion = metadata.Version,
+                Chunks = metadata.Chunks.Select(c => new ChunkInfo
+                {
+                    Index = c.Index,
+                    Hash = c.Hash,
+                    Offset = c.Offset,
+                    Length = c.Length,
+                    BlobName = $"chunks/{c.Hash}"
+                }).ToList(),
+                Status = BackupStatus.Completed
+            };
+        }
+        catch (Exception ex) when (ex is not DataIntegrityException)
+        {
+            throw new DataIntegrityException($"Failed to read metadata: {blobName}", blobName, ex);
+        }
+    }
+
+    public Task DeleteBlobAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        
+        _blobs.TryRemove(blobName, out _);
+        TotalOperations++;
+        
+        return Task.CompletedTask;
+    }
+
+    public Task<(long totalBytes, decimal estimatedMonthlyCost)> GetStorageStatsAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        
+        var totalBytes = _blobs.Values.Sum(b => (long)b.Length);
+        var gbStored = totalBytes / (1024m * 1024m * 1024m);
+        var estimatedCost = gbStored * 0.0115m; // Cool tier pricing
+        
+        return Task.FromResult((totalBytes, estimatedCost));
+    }
+
+    public decimal GetEstimatedOperationsCost()
+    {
+        return TotalOperations * 0.00001m;
+    }
+
+    #endregion
+
+    public ValueTask DisposeAsync()
+    {
+        _blobs.Clear();
+        _isConnected = false;
+        return ValueTask.CompletedTask;
+    }
+    
+    /// <summary>
+    /// Clears all stored data (for test cleanup).
+    /// </summary>
+    public void Clear()
+    {
+        _blobs.Clear();
+        TotalBytesUploaded = 0;
+        TotalOperations = 0;
+    }
+    
+    /// <summary>
+    /// Gets raw encrypted blob data (for test verification).
+    /// </summary>
+    public byte[]? GetRawBlob(string blobName)
+    {
+        _blobs.TryGetValue(blobName, out var data);
+        return data;
+    }
+
+    private void EnsureConnected()
+    {
+        if (!_isConnected)
+            throw new InvalidOperationException("Not connected. Call ConnectAsync or ConnectWithEntraIdAsync first.");
+    }
+
+    private async Task SimulateLatencyAsync(CancellationToken cancellationToken)
+    {
+        if (_simulatedLatencyMs > 0)
+        {
+            await Task.Delay(_simulatedLatencyMs, cancellationToken);
+        }
+    }
+
+    private void SimulateFailure(string operation)
+    {
+        if (_failureRate > 0)
+        {
+            double randomValue;
+            lock (_randomLock)
+            {
+                randomValue = _random.NextDouble();
+            }
+            
+            if (randomValue < _failureRate)
+            {
+                throw new InvalidOperationException($"Simulated failure during: {operation}");
+            }
+        }
+    }
+
+    private record MetadataDto(
+        string LocalPath,
+        long FileSize,
+        DateTime LastModified,
+        string FileHash,
+        List<ChunkDto> Chunks,
+        int Version = 1);
+
+    private record ChunkDto(int Index, string Hash, long Offset, int Length);
+}

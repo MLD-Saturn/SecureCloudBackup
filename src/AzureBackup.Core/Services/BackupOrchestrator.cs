@@ -1,0 +1,1496 @@
+using System.Security.Cryptography;
+using Azure.Core;
+using Azure.Identity;
+using AzureBackup.Core.Models;
+
+namespace AzureBackup.Core.Services;
+
+/// <summary>
+/// Orchestrates the backup process, coordinating between all services.
+/// Handles the main backup loop, cost monitoring, and status reporting.
+/// Supports both Microsoft Entra ID and Connection String authentication.
+/// Uses parallel uploads for optimal bandwidth utilization.
+/// </summary>
+public class BackupOrchestrator : IAsyncDisposable
+{
+    private readonly LocalDatabaseService _databaseService;
+    private readonly EncryptionService _encryptionService;
+    private readonly ChunkingService _chunkingService;
+    private readonly IBlobStorageService _blobService;
+    private readonly FileWatcherService _fileWatcherService;
+
+    private CancellationTokenSource? _backupCts;
+    private Task? _backupTask;
+    private readonly object _stateLock = new();
+    private volatile bool _isRunning;
+    private volatile bool _isPaused;
+    
+    // Entra ID credential (cached after authentication)
+    private TokenCredential? _credential;
+
+    // Budget monitoring
+    private decimal _monthlyBudget = 150m;
+    private decimal _budgetWarningThreshold = 0.9m; // 90%
+    
+    // Rate limiting for password attempts
+    private const int MaxFailedAttempts = 5;
+    private const int LockoutMinutesBase = 15;
+    
+    // Parallel upload settings - balance between bandwidth and memory usage
+    // For a file with many chunks, upload up to 4 chunks simultaneously
+    private const int MaxParallelChunkUploads = 4;
+
+    public event EventHandler<BackupProgressEventArgs>? ProgressChanged;
+    public event EventHandler<string>? StatusChanged;
+    public event EventHandler<string>? ErrorOccurred;
+    public event EventHandler? BudgetExceeded;
+    
+    /// <summary>
+    /// Event for detailed debug/diagnostic logging.
+    /// Subscribe to this event to capture detailed operation logs.
+    /// </summary>
+    public event EventHandler<string>? DiagnosticLog;
+
+    public bool IsRunning => _isRunning;
+    public bool IsPaused => _isPaused;
+    
+    // Password strength requirements
+    private const int MinPasswordLength = 12;
+
+    public BackupOrchestrator(
+        LocalDatabaseService databaseService,
+        EncryptionService encryptionService,
+        ChunkingService chunkingService,
+        IBlobStorageService blobService,
+        FileWatcherService fileWatcherService)
+    {
+        _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
+        _encryptionService = encryptionService ?? throw new ArgumentNullException(nameof(encryptionService));
+        _chunkingService = chunkingService ?? throw new ArgumentNullException(nameof(chunkingService));
+        _blobService = blobService ?? throw new ArgumentNullException(nameof(blobService));
+        _fileWatcherService = fileWatcherService ?? throw new ArgumentNullException(nameof(fileWatcherService));
+
+        _fileWatcherService.FileChanged += OnFileChanged;
+        _fileWatcherService.Error += (s, e) => ErrorOccurred?.Invoke(this, e);
+        
+        Log("BackupOrchestrator initialized");
+    }
+    
+    /// <summary>
+    /// Logs a diagnostic message.
+    /// </summary>
+    private void Log(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        DiagnosticLog?.Invoke(this, $"[{timestamp}] [Orchestrator] {message}");
+    }
+
+    /// <summary>
+    /// Validates password strength for new setups.
+    /// Requires minimum 12 characters with mixed character types.
+    /// </summary>
+    private static void ValidatePasswordStrength(string password)
+    {
+        if (password.Length < MinPasswordLength)
+        {
+            throw new SecurityPolicyException(
+                $"Password must be at least {MinPasswordLength} characters long.",
+                SecurityPolicyType.WeakPassword);
+        }
+
+        var hasUpper = password.Any(char.IsUpper);
+        var hasLower = password.Any(char.IsLower);
+        var hasDigit = password.Any(char.IsDigit);
+        var hasSpecial = password.Any(c => !char.IsLetterOrDigit(c));
+
+        // Require at least 3 of 4 character types
+        var typesCount = (hasUpper ? 1 : 0) + (hasLower ? 1 : 0) + (hasDigit ? 1 : 0) + (hasSpecial ? 1 : 0);
+        
+        if (typesCount < 3)
+        {
+            throw new SecurityPolicyException(
+                "Password must contain at least 3 of: uppercase, lowercase, digits, special characters.",
+                SecurityPolicyType.WeakPassword);
+        }
+    }
+
+    /// <summary>
+    /// Initializes the orchestrator with a password.
+    /// Includes rate limiting to prevent brute force attacks.
+    /// </summary>
+    public async Task<bool> InitializeAsync(string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        Log("InitializeAsync: Starting initialization");
+        
+        var config = _databaseService.GetConfiguration();
+        Log($"InitializeAsync: Config loaded, AuthMethod={config.AuthMethod}, HasSalt={config.PasswordSalt != null}");
+
+        // Check for lockout
+        if (config.LockoutUntilUtc.HasValue && DateTime.UtcNow < config.LockoutUntilUtc.Value)
+        {
+            var remaining = config.LockoutUntilUtc.Value - DateTime.UtcNow;
+            throw new SecurityPolicyException(
+                $"Account locked due to too many failed attempts. Try again in {remaining.TotalMinutes:F0} minutes.",
+                SecurityPolicyType.AccountLocked);
+        }
+
+        if (config.PasswordSalt == null)
+        {
+            // First time setup - enforce password strength
+            Log("InitializeAsync: First time setup - validating password strength");
+            ValidatePasswordStrength(password);
+            
+            // First time setup - create new salt
+            config.PasswordSalt = EncryptionService.GenerateSalt();
+            config.PasswordVerificationHash = await _encryptionService.CreatePasswordVerificationHashAsync(
+                password, config.PasswordSalt);
+            config.FailedLoginAttempts = 0;
+            config.LockoutUntilUtc = null;
+            _databaseService.SaveConfiguration(config);
+            Log("InitializeAsync: New password configured and saved");
+        }
+        else
+        {
+            // Verify password
+            Log("InitializeAsync: Verifying existing password");
+            var isValid = await _encryptionService.VerifyPasswordAsync(
+                password, config.PasswordSalt, config.PasswordVerificationHash!);
+            
+            if (!isValid)
+            {
+                // Record failed attempt
+                config.FailedLoginAttempts++;
+                Log($"InitializeAsync: Password verification failed, attempt #{config.FailedLoginAttempts}");
+                
+                if (config.FailedLoginAttempts >= MaxFailedAttempts)
+                {
+                    // Calculate exponential backoff lockout
+                    var lockoutMinutes = LockoutMinutesBase * Math.Pow(2, config.FailedLoginAttempts - MaxFailedAttempts);
+                    config.LockoutUntilUtc = DateTime.UtcNow.AddMinutes(lockoutMinutes);
+                    Log($"InitializeAsync: Account locked for {lockoutMinutes} minutes");
+                }
+                
+                _databaseService.SaveConfiguration(config);
+                return false;
+            }
+            
+            // Successful login - reset failed attempts
+            Log("InitializeAsync: Password verified successfully");
+            if (config.FailedLoginAttempts > 0)
+            {
+                config.FailedLoginAttempts = 0;
+                config.LockoutUntilUtc = null;
+                _databaseService.SaveConfiguration(config);
+                Log("InitializeAsync: Reset failed login counter");
+            }
+        }
+
+        // Derive and set encryption key, then zero the key array
+        Log("InitializeAsync: Deriving encryption key");
+        var key = await _encryptionService.DeriveKeyAsync(password, config.PasswordSalt);
+        try
+        {
+            _encryptionService.Initialize(key);
+            Log("InitializeAsync: Encryption service initialized");
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
+        }
+
+        // Connect to Azure based on configured auth method
+        Log("InitializeAsync: Connecting to Azure storage");
+        await ConnectToAzureAsync(config);
+        Log("InitializeAsync: Initialization complete");
+
+        return true;
+    }
+    
+    /// <summary>
+    /// Connects to Azure based on the configured authentication method.
+    /// </summary>
+    private async Task ConnectToAzureAsync(BackupConfiguration config)
+    {
+        var containerName = config.ContainerName ?? "backup";
+        Log($"ConnectToAzureAsync: AuthMethod={config.AuthMethod}, Container={containerName}");
+        
+        if (config.AuthMethod == AzureAuthMethod.EntraId)
+        {
+            // Entra ID authentication
+            if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _credential != null)
+            {
+                Log($"ConnectToAzureAsync: Connecting with Entra ID to {config.BlobServiceUri}");
+                await _blobService.ConnectWithEntraIdAsync(
+                    config.BlobServiceUri, 
+                    containerName, 
+                    _credential);
+                Log("ConnectToAzureAsync: Entra ID connection established");
+            }
+            else
+            {
+                Log("ConnectToAzureAsync: Skipping Entra ID connection - not fully configured");
+            }
+        }
+        else
+        {
+            // Connection String authentication
+            if (config.EncryptedConnectionString != null && _encryptionService.IsInitialized)
+            {
+                Log("ConnectToAzureAsync: Decrypting and connecting with connection string");
+                var decrypted = _encryptionService.Decrypt(config.EncryptedConnectionString);
+                try
+                {
+                    var connectionString = System.Text.Encoding.UTF8.GetString(decrypted);
+                    await _blobService.ConnectAsync(connectionString, containerName);
+                    Log("ConnectToAzureAsync: Connection string connection established");
+                }
+                finally
+                {
+                    // Clear decrypted connection string from memory
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(decrypted);
+                }
+            }
+            else
+            {
+                Log("ConnectToAzureAsync: Skipping connection string connection - not configured");
+            }
+        }
+    }
+
+    #region Entra ID Authentication
+    
+    /// <summary>
+    /// Authenticates with Microsoft Entra ID using interactive browser flow.
+    /// Opens the system's default browser for seamless sign-in.
+    /// Use this for organizational/work accounts only.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
+    /// <param name="timeoutSeconds">Timeout in seconds for the authentication (default: 120 seconds)</param>
+    public async Task<(bool success, string message)> AuthenticateWithEntraIdAsync(
+        CancellationToken cancellationToken = default,
+        int timeoutSeconds = 120)
+    {
+        Log($"AuthenticateWithEntraIdAsync: Starting browser authentication (timeout={timeoutSeconds}s)");
+        try
+        {
+            var options = new InteractiveBrowserCredentialOptions
+            {
+                // Use the system's default browser
+                TokenCachePersistenceOptions = new TokenCachePersistenceOptions
+                {
+                    Name = "AzureBackup",
+                    UnsafeAllowUnencryptedStorage = false
+                },
+                // Redirect to localhost after auth completes
+                RedirectUri = new Uri("http://localhost"),
+                // Set a reasonable timeout for browser interaction
+                BrowserCustomization = new BrowserCustomizationOptions
+                {
+                    UseEmbeddedWebView = false
+                }
+            };
+            
+            _credential = new InteractiveBrowserCredential(options);
+            Log("AuthenticateWithEntraIdAsync: Opening browser for authentication");
+            
+            // Create a timeout cancellation token
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
+            
+            // Force a token request to trigger the browser login
+            var tokenRequest = new TokenRequestContext(
+                ["https://storage.azure.com/.default"]);
+            
+            var token = await _credential.GetTokenAsync(tokenRequest, linkedCts.Token);
+            
+            if (!string.IsNullOrEmpty(token.Token))
+            {
+                Log("AuthenticateWithEntraIdAsync: Token obtained successfully");
+                // Update config to mark as authenticated
+                var config = _databaseService.GetConfiguration();
+                config.IsEntraIdAuthenticated = true;
+                _databaseService.SaveConfiguration(config);
+                
+                return (true, "Successfully authenticated with Microsoft Entra ID!");
+            }
+            
+            Log("AuthenticateWithEntraIdAsync: No token returned");
+            _credential = null;
+            return (false, "Authentication did not return a valid token.");
+        }
+        catch (AuthenticationFailedException ex)
+        {
+            Log($"AuthenticateWithEntraIdAsync: AuthenticationFailedException - {ex.Message}");
+            _credential = null;
+            // Provide more user-friendly messages for common errors
+            if (ex.Message.Contains("canceled", StringComparison.OrdinalIgnoreCase) ||
+                ex.Message.Contains("cancelled", StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, "Sign-in was cancelled. Please try again.");
+            }
+            if (ex.Message.Contains("AADSTS", StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, $"Microsoft sign-in error: {ex.Message}");
+            }
+            return (false, $"Authentication failed: {ex.Message}");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            Log("AuthenticateWithEntraIdAsync: Cancelled by user");
+            _credential = null;
+            return (false, "Sign-in was cancelled.");
+        }
+        catch (OperationCanceledException)
+        {
+            // Timeout occurred
+            Log($"AuthenticateWithEntraIdAsync: Timeout after {timeoutSeconds} seconds");
+            _credential = null;
+            return (false, $"Sign-in timed out after {timeoutSeconds} seconds. Please try again.");
+        }
+        catch (Exception ex)
+        {
+            Log($"AuthenticateWithEntraIdAsync: Exception - {ex.GetType().Name}: {ex.Message}");
+            _credential = null;
+            // Handle browser-related errors
+            if (ex.Message.Contains("browser", StringComparison.OrdinalIgnoreCase))
+            {
+                return (false, "Could not open browser for sign-in. Please ensure a browser is available.");
+            }
+            return (false, $"Authentication error: {ex.Message}");
+        }
+    }
+    
+    /// <summary>
+    /// Tests the connection to Azure storage using the current Entra ID credential.
+    /// </summary>
+    public async Task<(bool success, string message)> TestAzureConnectionAsync(
+        string storageAccountName, string containerName)
+    {
+        Log($"TestAzureConnectionAsync: Testing Entra ID connection to {storageAccountName}/{containerName}");
+        ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        
+        if (_credential == null)
+        {
+            Log("TestAzureConnectionAsync: No credential available");
+            return (false, "Not authenticated with Entra ID. Please sign in first.");
+        }
+        
+        var blobServiceUri = new Uri($"https://{storageAccountName}.blob.core.windows.net");
+        var result = await _blobService.TestConnectionWithEntraIdAsync(blobServiceUri, containerName, _credential);
+        Log($"TestAzureConnectionAsync: Result success={result.success}");
+        return result;
+    }
+    
+    /// <summary>
+    /// Saves the Azure storage account configuration (uses Entra ID, no connection string needed).
+    /// </summary>
+    public async Task SaveStorageAccountAsync(string storageAccountName, string containerName)
+    {
+        Log($"SaveStorageAccountAsync: Saving Entra ID config for {storageAccountName}/{containerName}");
+        ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        
+        if (_credential == null)
+            throw new InvalidOperationException("Must authenticate with Entra ID first.");
+        
+        var config = _databaseService.GetConfiguration();
+        config.StorageAccountName = storageAccountName;
+        config.ContainerName = containerName;
+        config.IsEntraIdAuthenticated = true;
+        config.AuthMethod = AzureAuthMethod.EntraId;
+        _databaseService.SaveConfiguration(config);
+        Log("SaveStorageAccountAsync: Configuration saved");
+        
+        // Connect immediately
+        await _blobService.ConnectWithEntraIdAsync(
+            config.BlobServiceUri!, 
+            containerName, 
+            _credential);
+        Log("SaveStorageAccountAsync: Connected to Azure storage");
+    }
+    
+    /// <summary>
+    /// Gets whether the user is currently authenticated with Entra ID.
+    /// </summary>
+    public bool IsEntraIdAuthenticated => _credential != null;
+
+    #endregion
+
+    #region Connection String Authentication
+
+    /// <summary>
+    /// Tests the connection using a connection string.
+    /// Use this for personal Microsoft accounts.
+    /// </summary>
+    public async Task<(bool success, string message)> TestConnectionStringAsync(
+        string connectionString, string containerName)
+    {
+        Log($"TestConnectionStringAsync: Testing connection string to container {containerName}");
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        
+        var result = await _blobService.TestConnectionAsync(connectionString, containerName);
+        Log($"TestConnectionStringAsync: Result success={result.success}");
+        return result;
+    }
+
+    /// <summary>
+    /// Saves and connects using a connection string (encrypts it before storing).
+    /// Use this for personal Microsoft accounts.
+    /// </summary>
+    public async Task SaveConnectionStringAsync(string connectionString, string containerName)
+    {
+        Log($"SaveConnectionStringAsync: Saving connection string config for container {containerName}");
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        
+        if (!_encryptionService.IsInitialized)
+            throw new InvalidOperationException("Encryption service must be initialized before saving connection string.");
+        
+        var config = _databaseService.GetConfiguration();
+        config.EncryptedConnectionString = _encryptionService.Encrypt(
+            System.Text.Encoding.UTF8.GetBytes(connectionString));
+        config.ContainerName = containerName;
+        config.AuthMethod = AzureAuthMethod.ConnectionString;
+        config.IsEntraIdAuthenticated = false;
+        _databaseService.SaveConfiguration(config);
+        Log("SaveConnectionStringAsync: Encrypted connection string saved");
+        
+        // Connect immediately
+        await _blobService.ConnectAsync(connectionString, containerName);
+        Log("SaveConnectionStringAsync: Connected to Azure storage");
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Securely resets all application data and settings.
+    /// This will clear the encryption key, credentials, and file records.
+    /// The user will need to set up a new password and re-authenticate.
+    /// </summary>
+    public async Task ResetApplicationAsync()
+    {
+        // Stop any running backup operations first
+        if (_isRunning)
+        {
+            await StopAsync();
+        }
+
+        // Clear the encryption key from memory
+        _encryptionService.ClearKey();
+        
+        // Clear Entra ID credential
+        _credential = null;
+
+        // Securely delete all database data
+        _databaseService.SecureReset();
+
+        StatusChanged?.Invoke(this, "Application reset complete. Please set up a new password and configure Azure connection.");
+    }
+
+    /// <summary>
+    /// Sets the monthly budget and warning threshold.
+    /// </summary>
+    public void SetBudget(decimal monthlyBudget, decimal warningThreshold = 0.9m)
+    {
+        if (monthlyBudget < 0)
+            throw new ArgumentOutOfRangeException(nameof(monthlyBudget), "Budget cannot be negative");
+        if (warningThreshold < 0 || warningThreshold > 1)
+            throw new ArgumentOutOfRangeException(nameof(warningThreshold), "Threshold must be between 0 and 1");
+            
+        _monthlyBudget = monthlyBudget;
+        _budgetWarningThreshold = warningThreshold;
+    }
+
+    /// <summary>
+    /// Starts the backup service.
+    /// </summary>
+    public void Start()
+    {
+        lock (_stateLock)
+        {
+            if (_isRunning) return;
+
+            _backupCts = new CancellationTokenSource();
+            _fileWatcherService.Start();
+            _backupTask = RunBackupLoopAsync(_backupCts.Token);
+            _isRunning = true;
+            _isPaused = false;
+        }
+
+        StatusChanged?.Invoke(this, "Backup service started");
+    }
+
+    /// <summary>
+    /// Stops the backup service.
+    /// </summary>
+    public async Task StopAsync()
+    {
+        CancellationTokenSource? cts;
+        Task? task;
+        
+        lock (_stateLock)
+        {
+            if (!_isRunning) return;
+            
+            cts = _backupCts;
+            task = _backupTask;
+            _backupCts = null;
+            _backupTask = null;
+        }
+
+        cts?.Cancel();
+        _fileWatcherService.Stop();
+
+        if (task != null)
+        {
+            try
+            {
+                await task;
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected
+            }
+        }
+        
+        cts?.Dispose();
+
+        lock (_stateLock)
+        {
+            _isRunning = false;
+            _isPaused = false;
+        }
+        
+        StatusChanged?.Invoke(this, "Backup service stopped");
+    }
+
+    /// <summary>
+    /// Pauses the backup service.
+    /// </summary>
+    public void Pause()
+    {
+        _isPaused = true;
+        StatusChanged?.Invoke(this, "Backup service paused");
+    }
+
+    /// <summary>
+    /// Resumes the backup service.
+    /// </summary>
+    public void Resume()
+    {
+        _isPaused = false;
+        StatusChanged?.Invoke(this, "Backup service resumed");
+    }
+
+    /// <summary>
+    /// Performs a full scan and backup of all watched folders.
+    /// Queues ALL files found regardless of their current backup status.
+    /// Use PerformInitialSyncAsync for smarter syncing that skips already-backed-up files.
+    /// </summary>
+    public async Task PerformFullScanAsync(IProgress<(int current, int total, string file)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var config = _databaseService.GetConfiguration();
+        var allFiles = new List<string>();
+
+        StatusChanged?.Invoke(this, "Scanning folders...");
+        Log("PerformFullScanAsync: Starting full scan of all watched folders");
+
+        // Scan all watched folders
+        foreach (var folder in config.WatchedFolders.Where(f => f.IsEnabled))
+        {
+            var files = await _fileWatcherService.ScanFolderAsync(folder, cancellationToken);
+            allFiles.AddRange(files);
+            Log($"PerformFullScanAsync: Found {files.Count} files in {folder.Path}");
+        }
+
+        StatusChanged?.Invoke(this, $"Found {allFiles.Count} files to process");
+
+        // Queue all files for backup
+        for (var i = 0; i < allFiles.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            
+            var file = allFiles[i];
+            progress?.Report((i + 1, allFiles.Count, file));
+
+            _databaseService.QueueFileChange(new FileChangeEvent
+            {
+                FilePath = file,
+                ChangeType = FileChangeType.Created,
+                DetectedAt = DateTime.UtcNow
+            });
+        }
+
+        StatusChanged?.Invoke(this, $"Queued {allFiles.Count} files for backup");
+        Log($"PerformFullScanAsync: Complete - queued {allFiles.Count} files");
+    }
+
+    /// <summary>
+    /// Performs an initial sync of all watched folders with Azure storage.
+    /// Only queues files that are new or have changed since last backup.
+    /// This is more efficient than PerformFullScanAsync for subsequent syncs.
+    /// </summary>
+    /// <param name="progress">Progress reporter for UI updates</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Summary of sync results (total files, new files queued, unchanged files skipped)</returns>
+    public async Task<InitialSyncResult> PerformInitialSyncAsync(
+        IProgress<(int current, int total, string file, string status)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        Log("PerformInitialSyncAsync: Starting initial sync");
+        var config = _databaseService.GetConfiguration();
+        var result = new InitialSyncResult();
+        var allFiles = new List<string>();
+
+        StatusChanged?.Invoke(this, "Scanning watched folders for sync...");
+
+        // Phase 1: Scan all watched folders to find files
+        foreach (var folder in config.WatchedFolders.Where(f => f.IsEnabled))
+        {
+            Log($"PerformInitialSyncAsync: Scanning folder {folder.Path}");
+            var files = await _fileWatcherService.ScanFolderAsync(folder, cancellationToken);
+            allFiles.AddRange(files);
+        }
+
+        result.TotalFilesScanned = allFiles.Count;
+        StatusChanged?.Invoke(this, $"Found {allFiles.Count} files - checking which need backup...");
+        Log($"PerformInitialSyncAsync: Found {allFiles.Count} total files to check");
+
+        // Phase 2: Compare each file with existing backup records
+        for (var i = 0; i < allFiles.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            
+            var filePath = allFiles[i];
+            var fileName = Path.GetFileName(filePath);
+            
+            try
+            {
+                // Check if file is already pending
+                if (_databaseService.IsFileChangePending(filePath))
+                {
+                    result.AlreadyPending++;
+                    progress?.Report((i + 1, allFiles.Count, fileName, "Already queued"));
+                    continue;
+                }
+
+                // Get existing backup record
+                var existingBackup = _databaseService.GetBackedUpFile(filePath);
+                
+                if (existingBackup == null)
+                {
+                    // New file - never backed up
+                    _databaseService.QueueFileChange(new FileChangeEvent
+                    {
+                        FilePath = filePath,
+                        ChangeType = FileChangeType.Created,
+                        DetectedAt = DateTime.UtcNow
+                    });
+                    result.NewFilesQueued++;
+                    progress?.Report((i + 1, allFiles.Count, fileName, "New - queued"));
+                    Log($"PerformInitialSyncAsync: New file queued: {fileName}");
+                }
+                else if (existingBackup.Status == BackupStatus.Completed)
+                {
+                    // File was previously backed up - check if it changed
+                    var fileInfo = new FileInfo(filePath);
+                    
+                    // Quick check: compare last modified time and size
+                    if (fileInfo.LastWriteTimeUtc > existingBackup.LastModified || 
+                        fileInfo.Length != existingBackup.FileSize)
+                    {
+                        // File appears changed - queue for backup (hash will be verified during backup)
+                        _databaseService.QueueFileChange(new FileChangeEvent
+                        {
+                            FilePath = filePath,
+                            ChangeType = FileChangeType.Modified,
+                            DetectedAt = DateTime.UtcNow
+                        });
+                        result.ModifiedFilesQueued++;
+                        progress?.Report((i + 1, allFiles.Count, fileName, "Modified - queued"));
+                        Log($"PerformInitialSyncAsync: Modified file queued: {fileName}");
+                    }
+                    else
+                    {
+                        // File unchanged
+                        result.UnchangedFiles++;
+                        progress?.Report((i + 1, allFiles.Count, fileName, "Unchanged"));
+                    }
+                }
+                else if (existingBackup.Status == BackupStatus.Failed)
+                {
+                    // Retry previously failed file
+                    _databaseService.QueueFileChange(new FileChangeEvent
+                    {
+                        FilePath = filePath,
+                        ChangeType = FileChangeType.Modified,
+                        DetectedAt = DateTime.UtcNow
+                    });
+                    result.RetriedFiles++;
+                    progress?.Report((i + 1, allFiles.Count, fileName, "Retrying failed"));
+                    Log($"PerformInitialSyncAsync: Retrying failed file: {fileName}");
+                }
+                else
+                {
+                    // Excluded or other status - skip
+                    result.SkippedFiles++;
+                    progress?.Report((i + 1, allFiles.Count, fileName, "Skipped"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"PerformInitialSyncAsync: Error checking file {fileName}: {ex.Message}");
+                result.ErrorFiles++;
+                progress?.Report((i + 1, allFiles.Count, fileName, $"Error: {ex.Message}"));
+            }
+        }
+
+        var queuedCount = result.NewFilesQueued + result.ModifiedFilesQueued + result.RetriedFiles;
+        StatusChanged?.Invoke(this, 
+            $"Sync complete: {queuedCount} files queued for backup, {result.UnchangedFiles} unchanged");
+        Log($"PerformInitialSyncAsync: Complete - {queuedCount} queued, {result.UnchangedFiles} unchanged");
+
+
+        return result;
+    }
+
+    /// <summary>
+    /// Backs up a single file.
+    /// </summary>
+    public Task<bool> BackupFileAsync(string filePath, CancellationToken cancellationToken = default)
+    {
+        return BackupFileAsync(filePath, progress: null, cancellationToken);
+    }
+
+    /// <summary>
+    /// Backs up a single file with progress reporting.
+    /// </summary>
+    /// <param name="filePath">Path to the file to backup</param>
+    /// <param name="progress">Reports byte-level progress (bytes completed, total bytes)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task<bool> BackupFileAsync(
+        string filePath, 
+        IProgress<(long current, long total)>? progress,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+            {
+                // File was deleted - update record
+                var existingRecord = _databaseService.GetBackedUpFile(filePath);
+                if (existingRecord != null)
+                {
+                    existingRecord.Status = BackupStatus.Excluded;
+                    _databaseService.SaveBackedUpFile(existingRecord);
+                }
+                return true;
+            }
+
+            // Wait for file to be available
+            if (FileWatcherService.IsFileLocked(filePath))
+            {
+                StatusChanged?.Invoke(this, $"Waiting for file: {Path.GetFileName(filePath)}");
+                var available = await FileWatcherService.WaitForFileAsync(filePath, TimeSpan.FromMinutes(5), cancellationToken);
+                if (!available)
+                {
+                    ErrorOccurred?.Invoke(this, $"File locked, skipping: {filePath}");
+                    return false;
+                }
+            }
+
+
+            // Get file info
+            var fileInfo = new FileInfo(filePath);
+            var fileHash = await _chunkingService.ComputeFileHashAsync(filePath, cancellationToken);
+
+            // Check if file has changed
+            var existingFile = _databaseService.GetBackedUpFile(filePath);
+            if (existingFile != null && existingFile.FileHash == fileHash)
+            {
+                // File unchanged - report as complete
+                progress?.Report((fileInfo.Length, fileInfo.Length));
+                return true;
+            }
+
+            StatusChanged?.Invoke(this, $"Backing up: {Path.GetFileName(filePath)}");
+
+            // Chunk the file
+            var chunks = await _chunkingService.ChunkFileAsync(filePath, cancellationToken);
+
+            // Determine which chunks need uploading
+            var existingChunks = existingFile?.Chunks ?? [];
+            var chunksToUpload = _chunkingService.GetChangedChunks(existingChunks, chunks);
+
+            // Upload changed chunks with parallel processing for better bandwidth utilization
+            long bytesUploaded = 0;
+            var totalFileSize = fileInfo.Length;
+            var uploadLock = new object();
+            
+            // Use parallel uploads for files with multiple chunks
+            if (chunksToUpload.Count > 1)
+            {
+                // Parallel upload with semaphore to limit concurrency
+                using var semaphore = new SemaphoreSlim(MaxParallelChunkUploads);
+                var uploadTasks = chunksToUpload.Select(async chunk =>
+                {
+                    await semaphore.WaitAsync(cancellationToken);
+                    try
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        
+                        var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
+                        chunk.BlobName = await _blobService.UploadChunkAsync(chunkData, chunk.Hash,
+                            new Progress<long>(b =>
+                            {
+                                lock (uploadLock)
+                                {
+                                    bytesUploaded += b;
+                                    progress?.Report((bytesUploaded, totalFileSize));
+                                }
+                            }),
+                            cancellationToken);
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }).ToList();
+                
+                await Task.WhenAll(uploadTasks);
+            }
+            else
+            {
+                // Single chunk - upload directly without parallelization overhead
+                foreach (var chunk in chunksToUpload)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
+                    chunk.BlobName = await _blobService.UploadChunkAsync(chunkData, chunk.Hash, 
+                        new Progress<long>(b => 
+                        {
+                            bytesUploaded += b;
+                            progress?.Report((bytesUploaded, totalFileSize));
+                        }), 
+                        cancellationToken);
+                }
+            }
+
+            // Update blob names for existing chunks
+            foreach (var chunk in chunks.Where(c => !chunksToUpload.Contains(c)))
+            {
+                chunk.BlobName = $"chunks/{chunk.Hash}";
+            }
+
+            // Save file metadata
+            var backedUpFile = new BackedUpFile
+            {
+                LocalPath = filePath,
+                BlobName = $"files/{Guid.NewGuid()}",
+                FileSize = fileInfo.Length,
+                LastModified = fileInfo.LastWriteTimeUtc,
+                FileHash = fileHash,
+                Chunks = chunks,
+                BackedUpAt = DateTime.UtcNow,
+                Status = BackupStatus.Completed
+            };
+
+            await _blobService.UploadFileMetadataAsync(backedUpFile, cancellationToken);
+            _databaseService.SaveBackedUpFile(backedUpFile);
+
+            // Update config stats
+            var config = _databaseService.GetConfiguration();
+            config.TotalBytesUploaded += bytesUploaded;
+            config.LastBackupTime = DateTime.UtcNow;
+            _databaseService.SaveConfiguration(config);
+
+            // Report final progress
+            progress?.Report((totalFileSize, totalFileSize));
+
+            ProgressChanged?.Invoke(this, new BackupProgressEventArgs
+            {
+                FilePath = filePath,
+                BytesUploaded = bytesUploaded,
+                ChunksUploaded = chunksToUpload.Count,
+                TotalChunks = chunks.Count
+            });
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorOccurred?.Invoke(this, $"Failed to backup {filePath}: {ex.Message}");
+            
+            var failedFile = _databaseService.GetBackedUpFile(filePath) ?? new BackedUpFile { LocalPath = filePath };
+            failedFile.Status = BackupStatus.Failed;
+            _databaseService.SaveBackedUpFile(failedFile);
+            
+            return false;
+        }
+    }
+
+    private async Task RunBackupLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (_isPaused)
+                {
+                    await Task.Delay(1000, cancellationToken);
+                    continue;
+                }
+
+                // Check budget
+                if (!await CheckBudgetAsync(cancellationToken))
+                {
+                    Pause();
+                    BudgetExceeded?.Invoke(this, EventArgs.Empty);
+                    continue;
+                }
+
+                // Process pending changes
+                var pendingChanges = _databaseService.GetPendingChanges(10);
+                
+                if (pendingChanges.Count == 0)
+                {
+                    await Task.Delay(1000, cancellationToken);
+                    continue;
+                }
+
+                foreach (var change in pendingChanges)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (change.ChangeType == FileChangeType.Deleted)
+                    {
+                        // Mark as deleted but don't remove from Azure (for potential restore)
+                        var existingFile = _databaseService.GetBackedUpFile(change.FilePath);
+                        if (existingFile != null)
+                        {
+                            existingFile.Status = BackupStatus.Excluded;
+                            _databaseService.SaveBackedUpFile(existingFile);
+                        }
+                    }
+                    else
+                    {
+                        await BackupFileAsync(change.FilePath, cancellationToken);
+                    }
+
+                    _databaseService.RemovePendingChange(change.FilePath);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                ErrorOccurred?.Invoke(this, $"Backup loop error: {ex.Message}");
+                await Task.Delay(5000, cancellationToken);
+            }
+        }
+    }
+
+    private async Task<bool> CheckBudgetAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var (totalBytes, estimatedCost) = await _blobService.GetStorageStatsAsync(cancellationToken);
+            var operationsCost = _blobService.GetEstimatedOperationsCost();
+            var totalCost = estimatedCost + operationsCost;
+
+            // Update config
+            var config = _databaseService.GetConfiguration();
+            config.EstimatedMonthlyCost = totalCost;
+            _databaseService.SaveConfiguration(config);
+
+            if (totalCost >= _monthlyBudget)
+            {
+                StatusChanged?.Invoke(this, $"Budget exceeded: ${totalCost:F2} / ${_monthlyBudget:F2}");
+                return false;
+            }
+
+            if (totalCost >= _monthlyBudget * _budgetWarningThreshold)
+            {
+                StatusChanged?.Invoke(this, $"Budget warning: ${totalCost:F2} / ${_monthlyBudget:F2}");
+            }
+
+            return true;
+        }
+        catch
+        {
+            // If we can't check budget, assume it's okay and continue
+            return true;
+        }
+    }
+
+    private void OnFileChanged(object? sender, FileChangeEvent e)
+    {
+        StatusChanged?.Invoke(this, $"Detected change: {Path.GetFileName(e.FilePath)}");
+    }
+
+    /// <summary>
+    /// Performs a mirror sync from a local folder to Azure backup.
+    /// This will:
+    /// 1. Backup files that are new or modified locally
+    /// 2. Mark files in Azure as deleted if they no longer exist locally
+    /// 3. Skip files that are identical
+    /// </summary>
+    /// <param name="localFolder">Local folder to sync from</param>
+    /// <param name="progress">Progress reporter</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task<MirrorSyncResult> MirrorSyncToAzureAsync(
+        WatchedFolder localFolder,
+        IProgress<(int current, int total, string file, string action)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(localFolder);
+        
+        Log($"MirrorSyncToAzureAsync: Starting mirror sync from '{localFolder.Path}' to Azure");
+        var result = new MirrorSyncResult();
+
+        StatusChanged?.Invoke(this, $"Mirror sync: scanning {localFolder.Path}");
+
+        // Phase 1: Scan local folder for files
+        var localFiles = await _fileWatcherService.ScanFolderAsync(localFolder, cancellationToken);
+        var localFilePaths = new HashSet<string>(localFiles, StringComparer.OrdinalIgnoreCase);
+
+        Log($"MirrorSyncToAzureAsync: Found {localFiles.Count} local files");
+
+        // Phase 2: Get existing backups for this folder
+        var existingBackups = _databaseService.GetAllBackedUpFiles()
+            .Where(f => f.LocalPath.StartsWith(localFolder.Path, StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(f => f.LocalPath, StringComparer.OrdinalIgnoreCase);
+
+        var totalOperations = localFiles.Count + existingBackups.Count;
+        var currentOp = 0;
+
+        // Phase 3: Backup new and modified files
+        foreach (var localFilePath in localFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            currentOp++;
+
+            var fileName = Path.GetFileName(localFilePath);
+
+            try
+            {
+                if (existingBackups.TryGetValue(localFilePath, out var existingBackup))
+                {
+                    // File exists in backup - check if modified
+                    var fileInfo = new FileInfo(localFilePath);
+                    
+                    if (fileInfo.Length == existingBackup.FileSize &&
+                        Math.Abs((fileInfo.LastWriteTimeUtc - existingBackup.LastModified).TotalSeconds) < 2)
+                    {
+                        // Quick check suggests file is unchanged
+                        result.FilesUnchanged++;
+                        progress?.Report((currentOp, totalOperations, fileName, "Unchanged"));
+                        continue;
+                    }
+                }
+
+                // File is new or modified - backup it
+                progress?.Report((currentOp, totalOperations, fileName, "Backing up"));
+                var success = await BackupFileAsync(localFilePath, cancellationToken);
+
+                if (success)
+                {
+                    result.FilesTransferred++;
+                    var fileInfo = new FileInfo(localFilePath);
+                    result.BytesTransferred += fileInfo.Length;
+                }
+                else
+                {
+                    result.FilesErrored++;
+                    result.Errors.Add($"Failed to backup: {localFilePath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                result.FilesErrored++;
+                result.Errors.Add($"Error backing up {localFilePath}: {ex.Message}");
+                Log($"MirrorSyncToAzureAsync: Error backing up {localFilePath}: {ex.Message}");
+            }
+        }
+
+        // Phase 4: Mark deleted files (files in backup but not locally)
+        foreach (var (backupPath, backupFile) in existingBackups)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            currentOp++;
+
+            if (!localFilePaths.Contains(backupPath))
+            {
+                try
+                {
+                    progress?.Report((currentOp, totalOperations, Path.GetFileName(backupPath), "Marking deleted"));
+                    
+                    // Mark as excluded (deleted) but keep in Azure for potential restore
+                    backupFile.Status = BackupStatus.Excluded;
+                    _databaseService.SaveBackedUpFile(backupFile);
+                    result.FilesDeleted++;
+                    
+                    Log($"MirrorSyncToAzureAsync: Marked as deleted: {backupPath}");
+                }
+                catch (Exception ex)
+                {
+                    result.Errors.Add($"Failed to mark deleted: {backupPath}: {ex.Message}");
+                }
+            }
+        }
+
+        StatusChanged?.Invoke(this, 
+            $"Mirror sync complete: {result.FilesTransferred} backed up, {result.FilesDeleted} marked deleted, " +
+            $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
+        
+        Log($"MirrorSyncToAzureAsync: Complete - {result.FilesTransferred} transferred, " +
+            $"{result.FilesDeleted} deleted, {result.FilesUnchanged} unchanged");
+
+        return result;
+    }
+
+    /// <summary>
+    /// Generates a preview of what a backup sync operation will do without making changes.
+    /// This allows showing the user what will be uploaded before starting.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Preview of the backup operation</returns>
+    public async Task<OperationPreview> PreviewBackupSyncAsync(CancellationToken cancellationToken = default)
+    {
+        Log("PreviewBackupSyncAsync: Generating backup preview");
+        var config = _databaseService.GetConfiguration();
+        
+        var preview = new OperationPreview
+        {
+            OperationType = OperationType.Backup,
+            OperationDescription = "Sync local files to Azure backup",
+            SourceDescription = $"{config.WatchedFolders.Count(f => f.IsEnabled)} watched folder(s)",
+            TargetDescription = $"Azure Storage ({config.ContainerName ?? "backup"})"
+        };
+
+        // Scan all watched folders
+        var allFiles = new List<string>();
+        foreach (var folder in config.WatchedFolders.Where(f => f.IsEnabled))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var files = await _fileWatcherService.ScanFolderAsync(folder, cancellationToken);
+            allFiles.AddRange(files);
+        }
+
+        Log($"PreviewBackupSyncAsync: Found {allFiles.Count} files to check");
+
+        // Compare each file with existing backup records
+        foreach (var filePath in allFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var fileInfo = new FileInfo(filePath);
+                if (!fileInfo.Exists) continue;
+
+                var existingBackup = _databaseService.GetBackedUpFile(filePath);
+
+                if (existingBackup == null)
+                {
+                    // New file - never backed up
+                    preview.FilesToCreate.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Create,
+                        Reason = "New file - never backed up"
+                    });
+                }
+                else if (existingBackup.Status == BackupStatus.Completed)
+                {
+                    // File was previously backed up - check if it changed
+                    if (fileInfo.LastWriteTimeUtc > existingBackup.LastModified ||
+                        fileInfo.Length != existingBackup.FileSize)
+                    {
+                        preview.FilesToOverwrite.Add(new PreviewFileAction
+                        {
+                            FilePath = filePath,
+                            FileSize = fileInfo.Length,
+                            LastModified = fileInfo.LastWriteTime,
+                            Action = FileActionType.Update,
+                            Reason = fileInfo.Length != existingBackup.FileSize
+                                ? $"Size changed ({existingBackup.FileSize} ? {fileInfo.Length})"
+                                : "Modified since last backup"
+                        });
+                    }
+                    else
+                    {
+                        preview.FilesToSkip.Add(new PreviewFileAction
+                        {
+                            FilePath = filePath,
+                            FileSize = fileInfo.Length,
+                            LastModified = fileInfo.LastWriteTime,
+                            Action = FileActionType.Skip,
+                            Reason = "Unchanged"
+                        });
+                    }
+                }
+                else if (existingBackup.Status == BackupStatus.Failed)
+                {
+                    preview.FilesToCreate.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Create,
+                        Reason = "Retrying previously failed backup"
+                    });
+                }
+                else
+                {
+                    preview.FilesToSkip.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Skip,
+                        Reason = "Excluded or in-progress"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"PreviewBackupSyncAsync: Error checking {filePath}: {ex.Message}");
+            }
+        }
+
+        Log($"PreviewBackupSyncAsync: Preview complete - {preview.CreateCount} new, " +
+            $"{preview.OverwriteCount} modified, {preview.SkipCount} unchanged");
+
+        return preview;
+    }
+
+    /// <summary>
+    /// Generates a preview of what backing up specific files will do.
+    /// </summary>
+    /// <param name="filePaths">List of file paths to preview</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Preview of the backup operation</returns>
+    public Task<OperationPreview> PreviewBackupFilesAsync(
+        IList<string> filePaths,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePaths);
+        Log($"PreviewBackupFilesAsync: Generating preview for {filePaths.Count} files");
+
+
+        var config = _databaseService.GetConfiguration();
+        
+        var preview = new OperationPreview
+        {
+            OperationType = OperationType.Backup,
+            OperationDescription = $"Backup {filePaths.Count} selected file(s)",
+            SourceDescription = "Selected local files",
+            TargetDescription = $"Azure Storage ({config.ContainerName ?? "backup"})"
+        };
+
+        foreach (var filePath in filePaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            try
+            {
+                var fileInfo = new FileInfo(filePath);
+                if (!fileInfo.Exists)
+                {
+                    Log($"PreviewBackupFilesAsync: File not found: {filePath}");
+                    continue;
+                }
+
+                var existingBackup = _databaseService.GetBackedUpFile(filePath);
+
+                if (existingBackup == null)
+                {
+                    preview.FilesToCreate.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Create,
+                        Reason = "New file - never backed up"
+                    });
+                }
+                else if (existingBackup.Status == BackupStatus.Completed)
+                {
+                    if (fileInfo.LastWriteTimeUtc > existingBackup.LastModified ||
+                        fileInfo.Length != existingBackup.FileSize)
+                    {
+                        preview.FilesToOverwrite.Add(new PreviewFileAction
+                        {
+                            FilePath = filePath,
+                            FileSize = fileInfo.Length,
+                            LastModified = fileInfo.LastWriteTime,
+                            Action = FileActionType.Update,
+                            Reason = fileInfo.Length != existingBackup.FileSize
+                                ? $"Size changed ({existingBackup.FileSize} ? {fileInfo.Length})"
+                                : "Modified since last backup"
+                        });
+                    }
+                    else
+                    {
+                        preview.FilesToSkip.Add(new PreviewFileAction
+                        {
+                            FilePath = filePath,
+                            FileSize = fileInfo.Length,
+                            LastModified = fileInfo.LastWriteTime,
+                            Action = FileActionType.Skip,
+                            Reason = "Already backed up and unchanged"
+                        });
+                    }
+                }
+                else if (existingBackup.Status == BackupStatus.Failed)
+                {
+                    preview.FilesToCreate.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Create,
+                        Reason = "Retrying previously failed backup"
+                    });
+                }
+                else
+                {
+                    preview.FilesToSkip.Add(new PreviewFileAction
+                    {
+                        FilePath = filePath,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Skip,
+                        Reason = "Excluded"
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"PreviewBackupFilesAsync: Error checking {filePath}: {ex.Message}");
+            }
+        }
+
+        Log($"PreviewBackupFilesAsync: Preview complete - {preview.CreateCount} new, " +
+            $"{preview.OverwriteCount} modified, {preview.SkipCount} unchanged");
+
+        return Task.FromResult(preview);
+    }
+
+    /// <summary>
+    /// Backs up specific files to Azure.
+    /// </summary>
+    /// <param name="filePaths">List of file paths to backup</param>
+    /// <param name="progress">Progress reporter with file index, total files, file name, overall bytes, total bytes, current file bytes, current file size</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task BackupFilesAsync(
+        IList<string> filePaths,
+        IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filePaths);
+        Log($"BackupFilesAsync: Starting backup of {filePaths.Count} files");
+
+        var totalFiles = filePaths.Count;
+        long totalBytes = 0;
+        long processedBytes = 0;
+
+        // Calculate total bytes
+        foreach (var filePath in filePaths)
+        {
+            try
+            {
+                var fileInfo = new FileInfo(filePath);
+                if (fileInfo.Exists)
+                    totalBytes += fileInfo.Length;
+            }
+            catch
+            {
+                // Skip files we can't access
+            }
+        }
+
+        for (var i = 0; i < filePaths.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var filePath = filePaths[i];
+            var fileName = Path.GetFileName(filePath);
+
+            try
+            {
+                var fileInfo = new FileInfo(filePath);
+                if (!fileInfo.Exists)
+                {
+                    Log($"BackupFilesAsync: File not found, skipping: {filePath}");
+                    continue;
+                }
+
+                var currentFileSize = fileInfo.Length;
+                var fileIndex = i;
+                var baseProcessedBytes = processedBytes;
+                
+                // Report initial progress for this file
+                progress?.Report((fileIndex, totalFiles, fileName, processedBytes, totalBytes, 0, currentFileSize));
+                
+                StatusChanged?.Invoke(this, $"Backing up: {fileName}");
+                
+                // Create per-file progress reporter that updates both file and overall progress
+                var fileProgress = new Progress<(long current, long total)>(p =>
+                {
+                    progress?.Report((fileIndex, totalFiles, fileName, baseProcessedBytes + p.current, totalBytes, p.current, currentFileSize));
+                });
+                
+                var success = await BackupFileAsync(filePath, fileProgress, cancellationToken);
+
+                if (success)
+                {
+                    processedBytes += currentFileSize;
+                    Log($"BackupFilesAsync: Successfully backed up: {fileName}");
+                    
+                    // Remove from pending changes queue if it was there
+                    _databaseService.RemovePendingChange(filePath);
+                }
+                else
+                {
+                    Log($"BackupFilesAsync: Failed to backup: {fileName}");
+                }
+
+                // Report completion of this file
+                progress?.Report((i + 1, totalFiles, fileName, processedBytes, totalBytes, currentFileSize, currentFileSize));
+            }
+            catch (Exception ex)
+            {
+                Log($"BackupFilesAsync: Error backing up {filePath}: {ex.Message}");
+                ErrorOccurred?.Invoke(this, $"Failed to backup {fileName}: {ex.Message}");
+            }
+        }
+
+        StatusChanged?.Invoke(this, $"Backup complete: {totalFiles} files processed");
+        Log($"BackupFilesAsync: Complete - {totalFiles} files processed, {processedBytes} bytes");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await StopAsync();
+        _backupCts?.Dispose();
+    }
+}
+
+public class BackupProgressEventArgs : EventArgs
+{
+    public string FilePath { get; set; } = string.Empty;
+    public long BytesUploaded { get; set; }
+    public int ChunksUploaded { get; set; }
+    public int TotalChunks { get; set; }
+}

@@ -1,0 +1,938 @@
+using AzureBackup.Core.Models;
+
+namespace AzureBackup.Core.Services;
+
+/// <summary>
+/// Handles restoring files from Azure Blob Storage.
+/// Supports both individual file and full restore operations.
+/// Uses parallel downloads for optimal bandwidth utilization.
+/// </summary>
+public class RestoreService
+{
+    private readonly LocalDatabaseService _databaseService;
+    private readonly IBlobStorageService _blobService;
+    private readonly EncryptionService _encryptionService;
+    
+    // Parallel download settings - balance between bandwidth and memory usage
+    private const int MaxParallelChunkDownloads = 4;
+
+    public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
+    public event EventHandler<string>? StatusChanged;
+    public event EventHandler<string>? ErrorOccurred;
+    
+    /// <summary>
+    /// Event for detailed debug/diagnostic logging.
+    /// </summary>
+    public event EventHandler<string>? DiagnosticLog;
+    
+    private void Log(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        DiagnosticLog?.Invoke(this, $"[{timestamp}] [Restore] {message}");
+    }
+
+    public RestoreService(
+        LocalDatabaseService databaseService,
+        IBlobStorageService blobService,
+        EncryptionService encryptionService)
+    {
+        _databaseService = databaseService ?? throw new ArgumentNullException(nameof(databaseService));
+        _blobService = blobService ?? throw new ArgumentNullException(nameof(blobService));
+        _encryptionService = encryptionService ?? throw new ArgumentNullException(nameof(encryptionService));
+        Log("RestoreService initialized");
+    }
+
+    /// <summary>
+    /// Lists all files available for restore from Azure.
+    /// </summary>
+    public async Task<List<BackedUpFile>> ListRestorableFilesAsync(CancellationToken cancellationToken = default)
+    {
+        Log("ListRestorableFilesAsync: Starting to list restorable files");
+        var files = new List<BackedUpFile>();
+        
+        StatusChanged?.Invoke(this, "Retrieving file list from Azure...");
+
+        var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
+        Log($"ListRestorableFilesAsync: Found {metadataBlobs.Count} metadata blobs");
+        
+        foreach (var blobName in metadataBlobs)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            
+            var file = await _blobService.DownloadFileMetadataAsync(blobName, cancellationToken);
+            if (file != null)
+            {
+                files.Add(file);
+            }
+        }
+
+        Log($"ListRestorableFilesAsync: Loaded {files.Count} file metadata entries");
+        StatusChanged?.Invoke(this, $"Found {files.Count} files available for restore");
+        return files;
+    }
+
+    /// <summary>
+    /// Restores a single file to the specified location.
+    /// Verifies integrity after restore by comparing file hash.
+    /// Uses parallel chunk downloads for files with multiple chunks.
+    /// </summary>
+    public async Task<bool> RestoreFileAsync(
+        BackedUpFile file,
+        string? restorePath = null,
+        bool overwriteExisting = false,
+        IProgress<(long current, long total)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        Log($"RestoreFileAsync: Starting restore of '{Path.GetFileName(file.LocalPath)}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
+        
+        var targetPath = restorePath ?? file.LocalPath;
+        var tempPath = targetPath + ".tmp";
+        
+        try
+        {
+            StatusChanged?.Invoke(this, $"Restoring: {Path.GetFileName(targetPath)}");
+
+            // Check if file exists
+            if (File.Exists(targetPath) && !overwriteExisting)
+            {
+                Log($"RestoreFileAsync: File already exists and overwrite=false: {targetPath}");
+                ErrorOccurred?.Invoke(this, $"File already exists: {targetPath}");
+                return false;
+            }
+
+            // Create directory if needed
+            var directory = Path.GetDirectoryName(targetPath);
+            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            {
+                Directory.CreateDirectory(directory);
+                Log($"RestoreFileAsync: Created directory: {directory}");
+            }
+            
+            // Validate chunk sequence before starting restore
+            Log("RestoreFileAsync: Validating chunk sequence");
+            var sortedChunks = file.Chunks.OrderBy(c => c.Index).ToList();
+            for (int i = 0; i < sortedChunks.Count; i++)
+            {
+                if (sortedChunks[i].Index != i)
+                {
+                    throw new DataIntegrityException(
+                        $"Invalid chunk sequence: expected index {i}, found {sortedChunks[i].Index}",
+                        file.LocalPath);
+                }
+            }
+            
+            // Validate total chunk size matches file size
+            var totalChunkSize = sortedChunks.Sum(c => (long)c.Length);
+            if (totalChunkSize != file.FileSize)
+            {
+                throw new DataIntegrityException(
+                    $"Chunk size mismatch: chunks total {totalChunkSize} bytes, expected {file.FileSize} bytes",
+                    file.LocalPath);
+            }
+            Log($"RestoreFileAsync: Chunk validation passed, downloading {sortedChunks.Count} chunks");
+
+            // Download chunks - use parallel downloads for files with multiple chunks
+            // Store downloaded chunks in a dictionary for sequential writing
+            var downloadedChunks = new Dictionary<int, byte[]>();
+            long currentBytes = 0;
+            var downloadLock = new object();
+            
+            if (sortedChunks.Count > 1)
+            {
+                // Parallel download with semaphore to limit concurrency
+                using var semaphore = new SemaphoreSlim(MaxParallelChunkDownloads);
+                var downloadTasks = sortedChunks.Select(async chunk =>
+                {
+                    await semaphore.WaitAsync(cancellationToken);
+                    try
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        
+                        var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, cancellationToken);
+                        
+                        // Verify chunk size matches metadata
+                        if (chunkData.Length != chunk.Length)
+                        {
+                            throw new DataIntegrityException(
+                                $"Chunk {chunk.Index} size mismatch: got {chunkData.Length} bytes, expected {chunk.Length} bytes",
+                                file.LocalPath);
+                        }
+                        
+                        lock (downloadLock)
+                        {
+                            downloadedChunks[chunk.Index] = chunkData;
+                            currentBytes += chunk.Length;
+                            progress?.Report((currentBytes, file.FileSize));
+                        }
+                    }
+                    finally
+                    {
+                        semaphore.Release();
+                    }
+                }).ToList();
+                
+                await Task.WhenAll(downloadTasks);
+                
+                // Write chunks sequentially to preserve file order
+                await using var outputStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, 
+                    FileShare.None, bufferSize: 81920, useAsync: true);
+                    
+                for (int i = 0; i < sortedChunks.Count; i++)
+                {
+                    await outputStream.WriteAsync(downloadedChunks[i], cancellationToken);
+                }
+                
+                await outputStream.FlushAsync(cancellationToken);
+            }
+            else
+            {
+                // Single chunk - download and write directly
+                await using var outputStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, 
+                    FileShare.None, bufferSize: 81920, useAsync: true);
+
+                foreach (var chunk in sortedChunks)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, cancellationToken);
+                    
+                    // Verify chunk size matches metadata
+                    if (chunkData.Length != chunk.Length)
+                    {
+                        throw new DataIntegrityException(
+                            $"Chunk {chunk.Index} size mismatch: got {chunkData.Length} bytes, expected {chunk.Length} bytes",
+                            file.LocalPath);
+                    }
+                    
+                    await outputStream.WriteAsync(chunkData, cancellationToken);
+
+                    currentBytes += chunk.Length;
+                    progress?.Report((currentBytes, file.FileSize));
+
+                    ProgressChanged?.Invoke(this, new RestoreProgressEventArgs
+                    {
+                        FilePath = targetPath,
+                        BytesRestored = currentBytes,
+                        TotalBytes = file.FileSize,
+                        ChunksRestored = sortedChunks.IndexOf(chunk) + 1,
+                        TotalChunks = sortedChunks.Count
+                    });
+                }
+                
+                await outputStream.FlushAsync(cancellationToken);
+            }
+            
+            // Verify restored file integrity
+            StatusChanged?.Invoke(this, $"Verifying integrity: {Path.GetFileName(targetPath)}");
+            var restoredHash = await ComputeFileHashAsync(tempPath, cancellationToken);
+            
+            if (!string.Equals(restoredHash, file.FileHash, StringComparison.OrdinalIgnoreCase))
+            {
+                // Delete corrupted temp file
+                try { File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
+                
+                throw new DataIntegrityException(
+                    $"File hash mismatch after restore: expected {file.FileHash}, got {restoredHash}",
+                    file.LocalPath);
+            }
+            
+            // Move temp file to final destination (atomic on same filesystem)
+            if (File.Exists(targetPath))
+            {
+                File.Delete(targetPath);
+            }
+            File.Move(tempPath, targetPath);
+
+            // Set file timestamps
+            File.SetLastWriteTimeUtc(targetPath, file.LastModified);
+
+            StatusChanged?.Invoke(this, $"Restored and verified: {Path.GetFileName(targetPath)}");
+            return true;
+        }
+        catch (DataIntegrityException)
+        {
+            throw; // Re-throw integrity exceptions
+        }
+        catch (Exception ex)
+        {
+            // Clean up temp file on error
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore */ }
+            
+            ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
+            return false;
+        }
+    }
+    
+    /// <summary>
+    /// Computes SHA-256 hash of a file for integrity verification.
+    /// </summary>
+    private static async Task<string> ComputeFileHashAsync(string filePath, CancellationToken cancellationToken)
+    {
+        await using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, 
+            FileShare.Read, bufferSize: 81920, useAsync: true);
+        
+        var hash = await System.Security.Cryptography.SHA256.HashDataAsync(stream, cancellationToken);
+        return Convert.ToHexString(hash);
+    }
+
+    /// <summary>
+    /// Restores multiple files to a specified directory.
+    /// </summary>
+    public async Task<RestoreResult> RestoreFilesAsync(
+        IEnumerable<BackedUpFile> files,
+        string restoreDirectory,
+        bool preserveFolderStructure = true,
+        bool overwriteExisting = false,
+        IProgress<(int current, int total, string file)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentException.ThrowIfNullOrWhiteSpace(restoreDirectory);
+        
+        var result = new RestoreResult();
+        var fileList = files.ToList();
+
+        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
+
+        for (var i = 0; i < fileList.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var file = fileList[i];
+            progress?.Report((i + 1, fileList.Count, file.LocalPath));
+
+            string targetPath;
+            if (preserveFolderStructure)
+            {
+                // Find common root and preserve structure
+                var relativePath = GetRelativePath(fileList.Select(f => f.LocalPath).ToList(), file.LocalPath);
+                targetPath = Path.Combine(restoreDirectory, relativePath);
+            }
+            else
+            {
+                targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
+            }
+
+            var success = await RestoreFileAsync(file, targetPath, overwriteExisting, 
+                cancellationToken: cancellationToken);
+
+            if (success)
+            {
+                result.SuccessfulFiles.Add(file.LocalPath);
+                result.TotalBytesRestored += file.FileSize;
+            }
+            else
+            {
+                result.FailedFiles.Add(file.LocalPath);
+            }
+        }
+
+        StatusChanged?.Invoke(this, $"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+        return result;
+    }
+
+    /// <summary>
+    /// Performs a full restore of all backed up files.
+    /// </summary>
+    public async Task<RestoreResult> RestoreAllAsync(
+        string restoreDirectory,
+        bool overwriteExisting = false,
+        IProgress<(int current, int total, string file)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        StatusChanged?.Invoke(this, "Starting full restore...");
+
+        var files = await ListRestorableFilesAsync(cancellationToken);
+        return await RestoreFilesAsync(files, restoreDirectory, 
+            preserveFolderStructure: true, overwriteExisting, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets the relative path from a list of paths.
+    /// </summary>
+    private static string GetRelativePath(List<string> allPaths, string currentPath)
+    {
+        if (allPaths.Count <= 1)
+            return Path.GetFileName(currentPath);
+
+        // Find common root directory
+        var directories = allPaths
+            .Select(p => Path.GetDirectoryName(p) ?? string.Empty)
+            .Where(d => !string.IsNullOrEmpty(d))
+            .ToList();
+
+        if (directories.Count == 0)
+            return Path.GetFileName(currentPath);
+
+        var commonRoot = directories[0];
+        foreach (var dir in directories.Skip(1))
+        {
+            while (!dir.StartsWith(commonRoot, StringComparison.OrdinalIgnoreCase) && commonRoot.Length > 0)
+            {
+                var parentDir = Path.GetDirectoryName(commonRoot);
+                if (string.IsNullOrEmpty(parentDir) || parentDir == commonRoot)
+                {
+                    commonRoot = string.Empty;
+                    break;
+                }
+                commonRoot = parentDir;
+            }
+        }
+
+        if (string.IsNullOrEmpty(commonRoot))
+            return Path.GetFileName(currentPath);
+
+        return Path.GetRelativePath(commonRoot, currentPath);
+    }
+
+    /// <summary>
+    /// Searches for files matching a pattern in the backup.
+    /// </summary>
+    public async Task<List<BackedUpFile>> SearchFilesAsync(
+        string searchPattern,
+        CancellationToken cancellationToken = default)
+    {
+        var allFiles = await ListRestorableFilesAsync(cancellationToken);
+        
+        var pattern = searchPattern.ToLowerInvariant();
+        return allFiles.Where(f => 
+            Path.GetFileName(f.LocalPath).ToLowerInvariant().Contains(pattern) ||
+            f.LocalPath.ToLowerInvariant().Contains(pattern))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Deletes a file and all its chunks from Azure storage.
+    /// </summary>
+    public async Task<bool> DeleteFileAsync(BackedUpFile file, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        
+        try
+        {
+            StatusChanged?.Invoke(this, $"Deleting: {Path.GetFileName(file.LocalPath)}");
+
+            // Delete all chunks
+            foreach (var chunk in file.Chunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await _blobService.DeleteBlobAsync(chunk.BlobName, cancellationToken);
+            }
+
+            // Delete metadata
+            var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(file.LocalPath)));
+            var metadataBlobName = $"metadata/{metadataHash}";
+            await _blobService.DeleteBlobAsync(metadataBlobName, cancellationToken);
+
+            StatusChanged?.Invoke(this, $"Deleted: {Path.GetFileName(file.LocalPath)}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ErrorOccurred?.Invoke(this, $"Failed to delete {file.LocalPath}: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Performs a mirror sync from Azure backup to a local directory.
+    /// This will:
+    /// 1. Restore files that are missing or outdated locally
+    /// 2. Delete local files that don't exist in the backup
+    /// 3. Skip files that are identical
+    /// </summary>
+    /// <param name="backupFiles">Files from Azure backup to sync</param>
+    /// <param name="targetDirectory">Local directory to sync to</param>
+    /// <param name="sourceBasePath">Original base path in backup (e.g., "J:\")</param>
+    /// <param name="progress">Progress reporter</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task<MirrorSyncResult> MirrorSyncToLocalAsync(
+        IEnumerable<BackedUpFile> backupFiles,
+        string targetDirectory,
+        string sourceBasePath,
+        IProgress<(int current, int total, string file, string action)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(backupFiles);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceBasePath);
+        
+        Log($"MirrorSyncToLocalAsync: Starting mirror sync from '{sourceBasePath}' to '{targetDirectory}'");
+        var result = new MirrorSyncResult();
+        var fileList = backupFiles.ToList();
+        
+        // Normalize paths
+        sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        targetDirectory = Path.GetFullPath(targetDirectory);
+        
+        if (!Directory.Exists(targetDirectory))
+        {
+            Directory.CreateDirectory(targetDirectory);
+        }
+
+        StatusChanged?.Invoke(this, $"Mirror sync: {fileList.Count} files from backup");
+
+        // Build a set of expected files in target directory
+        var expectedLocalFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Phase 1: Restore/update files from backup
+        var totalOperations = fileList.Count;
+        var currentOp = 0;
+
+        foreach (var backupFile in fileList)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            currentOp++;
+
+            try
+            {
+                // Calculate target path by remapping base path
+                var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
+                var targetPath = Path.Combine(targetDirectory, relativePath);
+                expectedLocalFiles.Add(targetPath);
+
+                var targetDir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+                {
+                    Directory.CreateDirectory(targetDir);
+                }
+
+                // Check if local file exists and is up to date
+                if (File.Exists(targetPath))
+                {
+                    var localInfo = new FileInfo(targetPath);
+                    
+                    // Compare size and modification time
+                    if (localInfo.Length == backupFile.FileSize && 
+                        Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
+                    {
+                        // File appears unchanged - verify with hash for certainty
+                        var localHash = await ComputeFileHashAsync(targetPath, cancellationToken);
+                        if (string.Equals(localHash, backupFile.FileHash, StringComparison.OrdinalIgnoreCase))
+                        {
+                            result.FilesUnchanged++;
+                            progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Unchanged"));
+                            continue;
+                        }
+                    }
+                }
+
+                // File is missing or outdated - restore it
+                progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
+                var success = await RestoreFileAsync(backupFile, targetPath, overwriteExisting: true, 
+                    cancellationToken: cancellationToken);
+
+                if (success)
+                {
+                    result.FilesTransferred++;
+                    result.BytesTransferred += backupFile.FileSize;
+                    Log($"MirrorSyncToLocalAsync: Restored {Path.GetFileName(targetPath)}");
+                }
+                else
+                {
+                    result.FilesErrored++;
+                    result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
+                }
+            }
+            catch (Exception ex)
+            {
+                result.FilesErrored++;
+                result.Errors.Add($"Error restoring {backupFile.LocalPath}: {ex.Message}");
+                Log($"MirrorSyncToLocalAsync: Error restoring {backupFile.LocalPath}: {ex.Message}");
+            }
+        }
+
+        // Phase 2: Delete local files that don't exist in backup (mirror mode)
+        StatusChanged?.Invoke(this, "Scanning for files to delete...");
+        
+        try
+        {
+            // Normalize target directory for comparison
+            var normalizedTargetDir = Path.GetFullPath(targetDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            
+            var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
+            
+            foreach (var localFile in localFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                // Security: Verify file is actually within target directory (protection against symlink attacks)
+                var normalizedLocalFile = Path.GetFullPath(localFile);
+                if (!normalizedLocalFile.StartsWith(normalizedTargetDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                {
+                    Log($"MirrorSyncToLocalAsync: Skipping file outside target directory: {localFile}");
+                    continue;
+                }
+
+                if (!expectedLocalFiles.Contains(localFile))
+                {
+                    try
+                    {
+                        progress?.Report((currentOp, totalOperations, Path.GetFileName(localFile), "Deleting"));
+                        File.Delete(localFile);
+                        result.FilesDeleted++;
+                        Log($"MirrorSyncToLocalAsync: Deleted {localFile}");
+                    }
+                    catch (Exception ex)
+                    {
+                        result.Errors.Add($"Failed to delete {localFile}: {ex.Message}");
+                    }
+                }
+            }
+
+            // Clean up empty directories
+            CleanEmptyDirectories(targetDirectory);
+        }
+        catch (Exception ex)
+        {
+            Log($"MirrorSyncToLocalAsync: Error during delete phase: {ex.Message}");
+        }
+
+        StatusChanged?.Invoke(this, 
+            $"Mirror sync complete: {result.FilesTransferred} restored, {result.FilesDeleted} deleted, " +
+            $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
+        
+        Log($"MirrorSyncToLocalAsync: Complete - {result.FilesTransferred} transferred, " +
+            $"{result.FilesDeleted} deleted, {result.FilesUnchanged} unchanged");
+
+        return result;
+    }
+
+    /// <summary>
+    /// Gets the relative path from a base path.
+    /// </summary>
+    private static string GetRelativePathFromBase(string fullPath, string basePath)
+    {
+        // Normalize paths
+        fullPath = Path.GetFullPath(fullPath);
+        basePath = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+        if (fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+        {
+            var relative = fullPath.Substring(basePath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            return string.IsNullOrEmpty(relative) ? Path.GetFileName(fullPath) : relative;
+        }
+
+        // If not under base path, just return the filename
+        return Path.GetFileName(fullPath);
+    }
+
+    /// <summary>
+    /// Removes empty directories recursively.
+    /// </summary>
+    private static void CleanEmptyDirectories(string directory)
+    {
+        foreach (var subDir in Directory.EnumerateDirectories(directory))
+        {
+            CleanEmptyDirectories(subDir);
+            
+            if (!Directory.EnumerateFileSystemEntries(subDir).Any())
+            {
+                try
+                {
+                    Directory.Delete(subDir);
+                }
+                catch
+                {
+                    // Ignore errors when cleaning up directories
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Restores files with path remapping support.
+    /// Each file can have a custom target path.
+    /// </summary>
+    /// <param name="filesWithPaths">Files with their target paths</param>
+    /// <param name="overwriteExisting">Whether to overwrite existing files</param>
+    /// <param name="progress">Reports file-level progress (current file index, total files, filename)</param>
+    /// <param name="fileByteProgress">Reports byte-level progress for current file (bytes completed, file index)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task<RestoreResult> RestoreFilesWithRemappingAsync(
+        IEnumerable<(BackedUpFile file, string targetPath)> filesWithPaths,
+        bool overwriteExisting = false,
+        IProgress<(int current, int total, string file)>? progress = null,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(filesWithPaths);
+        
+        var result = new RestoreResult();
+        var fileList = filesWithPaths.ToList();
+
+        Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping");
+        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
+
+        for (var i = 0; i < fileList.Count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var (file, targetPath) = fileList[i];
+            progress?.Report((i + 1, fileList.Count, file.LocalPath));
+
+            // Security: Validate target path doesn't contain suspicious patterns
+            var normalizedPath = Path.GetFullPath(targetPath);
+            if (normalizedPath.Contains(".." + Path.DirectorySeparatorChar) || 
+                normalizedPath.Contains(".." + Path.AltDirectorySeparatorChar))
+            {
+                Log($"RestoreFilesWithRemappingAsync: Skipping suspicious path: {targetPath}");
+                result.FailedFiles.Add(file.LocalPath);
+                ErrorOccurred?.Invoke(this, $"Invalid target path (contains path traversal): {targetPath}");
+                continue;
+            }
+
+            // Ensure target directory exists
+            var targetDir = Path.GetDirectoryName(normalizedPath);
+            if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+            {
+                Directory.CreateDirectory(targetDir);
+            }
+
+            // Create byte-level progress reporter for this file
+            var fileIndex = i;
+            var individualFileProgress = fileByteProgress != null
+                ? new Progress<(long current, long total)>(p =>
+                    fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
+                : null;
+
+            var success = await RestoreFileAsync(file, normalizedPath, overwriteExisting, 
+                individualFileProgress, cancellationToken);
+
+            if (success)
+            {
+                result.SuccessfulFiles.Add(normalizedPath);
+                result.TotalBytesRestored += file.FileSize;
+            }
+            else
+            {
+                result.FailedFiles.Add(file.LocalPath);
+            }
+        }
+
+        StatusChanged?.Invoke(this, $"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+        return result;
+    }
+
+    #region Preview Generation Methods
+
+    /// <summary>
+    /// Generates a preview of a mirror sync operation without making any changes.
+    /// </summary>
+    public async Task<OperationPreview> PreviewMirrorSyncAsync(
+        IEnumerable<BackedUpFile> backupFiles,
+        string targetDirectory,
+        string sourceBasePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(backupFiles);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceBasePath);
+
+        var preview = new OperationPreview
+        {
+            OperationType = OperationType.MirrorSync,
+            OperationDescription = "Sync local folder to match Azure backup",
+            SourceDescription = $"Azure Backup ({sourceBasePath})",
+            TargetDescription = targetDirectory
+        };
+
+        var fileList = backupFiles.ToList();
+        sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        targetDirectory = Path.GetFullPath(targetDirectory);
+
+        var expectedLocalFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Check each backup file
+        foreach (var backupFile in fileList)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
+            var targetPath = Path.Combine(targetDirectory, relativePath);
+            expectedLocalFiles.Add(targetPath);
+
+            if (File.Exists(targetPath))
+            {
+                var localInfo = new FileInfo(targetPath);
+                
+                // Compare to see if update needed
+                if (localInfo.Length == backupFile.FileSize && 
+                    Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
+                {
+                    // Quick check - likely unchanged, but verify with hash
+                    var localHash = await ComputeFileHashAsync(targetPath, cancellationToken);
+                    if (string.Equals(localHash, backupFile.FileHash, StringComparison.OrdinalIgnoreCase))
+                    {
+                    preview.FilesToSkip.Add(new PreviewFileAction
+                    {
+                        FilePath = backupFile.LocalPath,
+                        FileSize = backupFile.FileSize,
+                        LastModified = backupFile.LastModified,
+                        TargetPath = targetPath,
+                        Action = FileActionType.Skip,
+                        Reason = "File is identical"
+                    });
+                        continue;
+                    }
+                }
+
+            // File exists but is different
+                preview.FilesToOverwrite.Add(new PreviewFileAction
+                {
+                    FilePath = backupFile.LocalPath,
+                    FileSize = backupFile.FileSize,
+                    LastModified = backupFile.LastModified,
+                    TargetPath = targetPath,
+                    Action = FileActionType.Overwrite,
+                    Reason = localInfo.Length != backupFile.FileSize 
+                        ? $"Size differs (local: {localInfo.Length}, backup: {backupFile.FileSize})"
+                        : "Content differs"
+                });
+            }
+            else
+            {
+            // New file
+                preview.FilesToCreate.Add(new PreviewFileAction
+                {
+                    FilePath = backupFile.LocalPath,
+                    FileSize = backupFile.FileSize,
+                    LastModified = backupFile.LastModified,
+                    TargetPath = targetPath,
+                    Action = FileActionType.Create,
+                    Reason = "File does not exist locally"
+                });
+            }
+        }
+
+        // Check for local files that don't exist in backup (will be deleted)
+        if (Directory.Exists(targetDirectory))
+        {
+            var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
+            foreach (var localFile in localFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (!expectedLocalFiles.Contains(localFile))
+                {
+                var fileInfo = new FileInfo(localFile);
+                    preview.FilesToDelete.Add(new PreviewFileAction
+                    {
+                        FilePath = localFile,
+                        FileSize = fileInfo.Length,
+                        LastModified = fileInfo.LastWriteTime,
+                        Action = FileActionType.Delete,
+                        Reason = "Not in backup"
+                    });
+                }
+            }
+        }
+
+        return preview;
+    }
+
+    /// <summary>
+    /// Generates a preview of deleting files from Azure storage.
+    /// </summary>
+    public OperationPreview PreviewDeleteFromAzure(IEnumerable<BackedUpFile> filesToDelete)
+    {
+        ArgumentNullException.ThrowIfNull(filesToDelete);
+
+        var fileList = filesToDelete.ToList();
+        var preview = new OperationPreview
+        {
+            OperationType = OperationType.DeleteFromAzure,
+            OperationDescription = $"Permanently delete {fileList.Count} file(s) from Azure storage",
+            SourceDescription = "Azure Blob Storage",
+            TargetDescription = "N/A (files will be removed)"
+        };
+
+        foreach (var file in fileList)
+        {
+            preview.FilesToDelete.Add(new PreviewFileAction
+            {
+                FilePath = file.LocalPath,
+                FileSize = file.FileSize,
+                LastModified = file.LastModified,
+                Action = FileActionType.Delete,
+                Reason = "User requested deletion"
+            });
+        }
+
+        return preview;
+    }
+
+    /// <summary>
+    /// Generates a preview of restoring files with path remapping.
+    /// </summary>
+    public OperationPreview PreviewRestoreWithRemapping(
+        IEnumerable<(BackedUpFile file, string targetPath)> filesWithPaths)
+    {
+        ArgumentNullException.ThrowIfNull(filesWithPaths);
+
+        var fileList = filesWithPaths.ToList();
+        var preview = new OperationPreview
+        {
+            OperationType = OperationType.Restore,
+            OperationDescription = $"Restore {fileList.Count} file(s) from Azure backup",
+            SourceDescription = "Azure Blob Storage",
+            TargetDescription = "Local file system (with path remapping)"
+        };
+
+        foreach (var (file, targetPath) in fileList)
+        {
+            if (File.Exists(targetPath))
+            {
+                var localInfo = new FileInfo(targetPath);
+                preview.FilesToOverwrite.Add(new PreviewFileAction
+                {
+                    FilePath = file.LocalPath,
+                    FileSize = file.FileSize,
+                    LastModified = file.LastModified,
+                    TargetPath = targetPath,
+                    Action = FileActionType.Overwrite,
+                    Reason = $"Existing file will be replaced (local size: {localInfo.Length})"
+                });
+            }
+            else
+            {
+                preview.FilesToCreate.Add(new PreviewFileAction
+                {
+                    FilePath = file.LocalPath,
+                    FileSize = file.FileSize,
+                    LastModified = file.LastModified,
+                    TargetPath = targetPath,
+                    Action = FileActionType.Create,
+                    Reason = "New file"
+                });
+            }
+        }
+
+        return preview;
+    }
+
+    #endregion
+}
+
+public class RestoreProgressEventArgs : EventArgs
+{
+    public string FilePath { get; set; } = string.Empty;
+    public long BytesRestored { get; set; }
+    public long TotalBytes { get; set; }
+    public int ChunksRestored { get; set; }
+    public int TotalChunks { get; set; }
+    
+    public double PercentComplete => TotalBytes > 0 ? (double)BytesRestored / TotalBytes * 100 : 0;
+}
+
+public class RestoreResult
+{
+    public List<string> SuccessfulFiles { get; set; } = [];
+    public List<string> FailedFiles { get; set; } = [];
+    public long TotalBytesRestored { get; set; }
+
+    public int TotalFilesProcessed => SuccessfulFiles.Count + FailedFiles.Count;
+    public bool IsSuccess => FailedFiles.Count == 0;
+}

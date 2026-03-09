@@ -1,0 +1,39 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AzureBackup.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="800" d:DesignHeight="500"
+             x:Class="AzureBackup.Views.LogsView"
+             x:DataType="vm:MainWindowViewModel">
+
+    <Border Classes="card">
+        <Grid RowDefinitions="Auto,*">
+            <Grid ColumnDefinitions="*,Auto,Auto">
+                <TextBlock Text="Activity Log" FontSize="18" FontWeight="SemiBold"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" Margin="0,0,12,0"
+                            VerticalAlignment="Center">
+                    <TextBlock Text="Diagnostic Logging:" VerticalAlignment="Center" FontSize="12"/>
+                    <ToggleButton IsChecked="{Binding EnableDiagnosticLogging}"
+                                  ToolTip.Tip="Toggle detailed diagnostic logging from services"
+                                  Padding="8,4">
+                        <Panel>
+                            <TextBlock Text="ON" IsVisible="{Binding EnableDiagnosticLogging}" Foreground="LimeGreen"/>
+                            <TextBlock Text="OFF" IsVisible="{Binding !EnableDiagnosticLogging}" Opacity="0.6"/>
+                        </Panel>
+                    </ToggleButton>
+                </StackPanel>
+                <Button Grid.Column="2" Content="Clear Logs" Command="{Binding ClearLogsCommand}"/>
+            </Grid>
+            <ListBox Grid.Row="1" ItemsSource="{Binding LogMessages}" ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     Margin="0,12,0,0">
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <TextBlock Text="{Binding}" FontFamily="Consolas,Courier New,monospace" FontSize="12"
+                                   TextWrapping="Wrap"/>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Grid>
+    </Border>
+</UserControl>

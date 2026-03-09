@@ -1,0 +1,23 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AzureBackup.App"
+             xmlns:local="using:AzureBackup"
+             xmlns:vm="using:AzureBackup.ViewModels"
+             RequestedThemeVariant="Default">
+
+    <Application.DataTemplates>
+        <local:ViewLocator/>
+    </Application.DataTemplates>
+  
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+    
+    <Application.Resources>
+        <vm:BoolToColorConverter x:Key="BoolToColorConverter"/>
+        <vm:BoolToStatusConverter x:Key="BoolToStatusConverter"/>
+        <vm:BoolToViewModeConverter x:Key="BoolToViewModeConverter"/>
+        <vm:BytesToStringConverter x:Key="BytesToStringConverter"/>
+        <vm:PendingToColorConverter x:Key="PendingToColorConverter"/>
+    </Application.Resources>
+</Application>

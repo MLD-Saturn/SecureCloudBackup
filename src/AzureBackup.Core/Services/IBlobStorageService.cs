@@ -1,0 +1,102 @@
+using Azure.Core;
+using AzureBackup.Core.Models;
+
+namespace AzureBackup.Core.Services;
+
+/// <summary>
+/// Interface for blob storage operations, enabling testing without Azure.
+/// Supports both Entra ID and Connection String authentication.
+/// </summary>
+public interface IBlobStorageService : IAsyncDisposable
+{
+    /// <summary>
+    /// Gets whether the service is connected to storage.
+    /// </summary>
+    bool IsConnected { get; }
+    
+    /// <summary>
+    /// Total bytes uploaded in this session.
+    /// </summary>
+    long TotalBytesUploaded { get; }
+    
+    /// <summary>
+    /// Total operations performed in this session.
+    /// </summary>
+    int TotalOperations { get; }
+
+    #region Connection Methods
+
+    /// <summary>
+    /// Initializes connection to blob storage using a connection string.
+    /// Use this for personal Microsoft accounts.
+    /// </summary>
+    /// <param name="connectionString">The Azure Storage connection string</param>
+    /// <param name="containerName">The container name to use for backups</param>
+    Task ConnectAsync(string connectionString, string containerName);
+
+    /// <summary>
+    /// Tests the connection to blob storage using a connection string.
+    /// </summary>
+    Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName);
+
+    /// <summary>
+    /// Initializes connection to blob storage using Entra ID (TokenCredential).
+    /// Use this for organizational/work accounts.
+    /// </summary>
+    /// <param name="blobServiceUri">The blob service URI (e.g., https://account.blob.core.windows.net)</param>
+    /// <param name="containerName">The container name to use for backups</param>
+    /// <param name="credential">The TokenCredential for authentication</param>
+    Task ConnectWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential);
+
+    /// <summary>
+    /// Tests the connection to blob storage using Entra ID.
+    /// </summary>
+    Task<(bool success, string message)> TestConnectionWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential);
+
+    #endregion
+
+    #region Blob Operations
+
+    /// <summary>
+    /// Uploads an encrypted chunk to blob storage.
+    /// </summary>
+    Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Uploads file metadata (encrypted).
+    /// </summary>
+    Task UploadFileMetadataAsync(BackedUpFile fileInfo, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Downloads and decrypts a chunk.
+    /// </summary>
+    Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Lists all backed up files by retrieving metadata blobs.
+    /// </summary>
+    Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Downloads and decrypts file metadata.
+    /// </summary>
+    Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a blob (used for cleanup).
+    /// </summary>
+    Task DeleteBlobAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Estimates monthly storage cost based on current usage.
+    /// </summary>
+    Task<(long totalBytes, decimal estimatedMonthlyCost)> GetStorageStatsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Gets the estimated cost for operations performed.
+    /// </summary>
+    decimal GetEstimatedOperationsCost();
+
+    #endregion
+}
