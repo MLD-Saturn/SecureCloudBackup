@@ -110,7 +110,7 @@ public class ParallelOperationsTests : IAsyncLifetime
         Assert.All(blobNames, name => Assert.Equal($"chunks/{uniqueHash}", name));
         
         // Only one chunk should be stored (deduplication)
-        Assert.Single(_blobService.StoredBlobNames.Where(n => n.StartsWith("chunks/")));
+        Assert.Single(_blobService.StoredBlobNames, n => n.StartsWith("chunks/"));
     }
 
     [Fact]

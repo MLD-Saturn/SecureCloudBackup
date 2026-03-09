@@ -203,7 +203,7 @@ public class DataIntegrityTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task EncryptedData_DifferentFromOriginal()
+    public void EncryptedData_DifferentFromOriginal()
     {
         // Arrange - This test verifies encryption is actually happening
         var originalData = CreateRandomContent(1024);
