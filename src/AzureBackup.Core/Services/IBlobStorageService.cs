@@ -123,5 +123,36 @@ public interface IBlobStorageService : IAsyncDisposable
     /// </summary>
     decimal GetEstimatedOperationsCost();
 
+    /// <summary>
+    /// Gets the properties of a blob including its storage tier and size.
+    /// </summary>
+    /// <param name="blobName">The blob name (e.g., "chunks/abc123")</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Tuple of size in bytes and storage tier</returns>
+    Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sets the storage tier for a blob.
+    /// </summary>
+    /// <param name="blobName">The blob name</param>
+    /// <param name="tier">The target storage tier</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Lists all chunk blobs in the container.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>List of chunk hashes (without the "chunks/" prefix)</returns>
+    Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Checks if a blob exists without downloading it.
+    /// </summary>
+    /// <param name="blobName">The blob name</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>True if the blob exists</returns>
+    Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default);
+
     #endregion
 }

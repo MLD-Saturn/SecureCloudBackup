@@ -16,6 +16,7 @@ public partial class InMemoryBlobService : IBlobStorageService
 {
     private readonly EncryptionService _encryptionService;
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
+    private readonly ConcurrentDictionary<string, StorageTier> _blobTiers = new();
     private bool _isConnected;
     
     // Simulated latency for more realistic testing (milliseconds)
@@ -118,6 +119,7 @@ public partial class InMemoryBlobService : IBlobStorageService
         return Task.FromResult((true, "In-memory connection successful (Entra ID simulated)"));
     }
 
+
     #endregion
 
     #region Blob Operations
@@ -142,9 +144,10 @@ public partial class InMemoryBlobService : IBlobStorageService
             return blobName;
         }
 
-        // Encrypt and store (storageTier is ignored for in-memory storage)
+        // Encrypt and store
         var encryptedData = _encryptionService.Encrypt(chunkData);
         _blobs[blobName] = encryptedData;
+        _blobTiers[blobName] = storageTier;
         
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
@@ -171,9 +174,9 @@ public partial class InMemoryBlobService : IBlobStorageService
         var blobName = $"chunks/{chunkHash}";
         
         // Direct upload - no deduplication check (for new files)
-        // storageTier is ignored for in-memory storage
         var encryptedData = _encryptionService.Encrypt(chunkData);
         _blobs[blobName] = encryptedData;
+        _blobTiers[blobName] = storageTier;
         
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
@@ -319,6 +322,61 @@ public partial class InMemoryBlobService : IBlobStorageService
         return TotalOperations * 0.00001m;
     }
 
+    public Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(
+        string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!_blobs.TryGetValue(blobName, out var data))
+        {
+            throw new InvalidOperationException($"Blob not found: {blobName}");
+        }
+
+        // Get tier from our tracking dictionary, default to Cool
+        var tier = _blobTiers.GetValueOrDefault(blobName, StorageTier.Cool);
+        
+        TotalOperations++;
+        return Task.FromResult(((long)data.Length, tier));
+    }
+
+    public Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!_blobs.ContainsKey(blobName))
+        {
+            throw new InvalidOperationException($"Blob not found: {blobName}");
+        }
+
+        _blobTiers[blobName] = tier;
+        TotalOperations++;
+        return Task.CompletedTask;
+    }
+
+    public Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+
+        var chunks = _blobs.Keys
+            .Where(k => k.StartsWith("chunks/"))
+            .Select(k => k.Replace("chunks/", ""))
+            .ToList();
+        
+        TotalOperations++;
+        return Task.FromResult(chunks);
+    }
+
+    public Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        TotalOperations++;
+        return Task.FromResult(_blobs.ContainsKey(blobName));
+    }
+
     #endregion
 
     public ValueTask DisposeAsync()
@@ -334,6 +392,7 @@ public partial class InMemoryBlobService : IBlobStorageService
     public void Clear()
     {
         _blobs.Clear();
+        _blobTiers.Clear();
         TotalBytesUploaded = 0;
         TotalOperations = 0;
     }

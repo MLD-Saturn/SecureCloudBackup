@@ -14,6 +14,8 @@ public class LocalDatabaseService : IDisposable
     private ILiteCollection<BackupConfiguration>? _configCollection;
     private ILiteCollection<BackedUpFile>? _filesCollection;
     private ILiteCollection<FileChangeEvent>? _pendingChangesCollection;
+    private ILiteCollection<ChunkIndexEntry>? _chunkIndexCollection;
+    private ILiteCollection<IndexMetadata>? _indexMetadataCollection;
     private readonly object _dbLock = new();
     private bool _disposed;
     private string? _databasePath;
@@ -58,11 +60,19 @@ public class LocalDatabaseService : IDisposable
         _configCollection = _database.GetCollection<BackupConfiguration>("config");
         _filesCollection = _database.GetCollection<BackedUpFile>("files");
         _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
+        _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
+        _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
 
         // Create indexes for faster queries
         _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
         _filesCollection.EnsureIndex(x => x.Status);
         _filesCollection.EnsureIndex(x => x.FileHash);
+        
+        // Chunk index indexes
+        _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
+        _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
+        _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
+        
         Log("Initialize: Database initialized successfully");
     }
 
@@ -400,6 +410,183 @@ public class LocalDatabaseService : IDisposable
 
     #endregion
 
+    #region Chunk Index
+
+    /// <summary>
+    /// Gets a chunk index entry by hash.
+    /// </summary>
+    public ChunkIndexEntry? GetChunkIndexEntry(string chunkHash)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+        
+        lock (_dbLock)
+        {
+            return _chunkIndexCollection!.FindOne(x => x.ChunkHash == chunkHash);
+        }
+    }
+
+    /// <summary>
+    /// Saves or updates a chunk index entry.
+    /// </summary>
+    public void SaveChunkIndexEntry(ChunkIndexEntry entry)
+    {
+        EnsureInitialized();
+        ArgumentNullException.ThrowIfNull(entry);
+        
+        lock (_dbLock)
+        {
+            var existing = _chunkIndexCollection!.FindOne(x => x.ChunkHash == entry.ChunkHash);
+            if (existing != null)
+            {
+                _chunkIndexCollection.Update(entry);
+            }
+            else
+            {
+                _chunkIndexCollection.Insert(entry);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Deletes a chunk index entry.
+    /// </summary>
+    public void DeleteChunkIndexEntry(string chunkHash)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+        
+        lock (_dbLock)
+        {
+            _chunkIndexCollection!.DeleteMany(x => x.ChunkHash == chunkHash);
+        }
+    }
+
+    /// <summary>
+    /// Gets all chunk index entries.
+    /// </summary>
+    public List<ChunkIndexEntry> GetAllChunkIndexEntries()
+    {
+        EnsureInitialized();
+        
+        lock (_dbLock)
+        {
+            return _chunkIndexCollection!.FindAll().ToList();
+        }
+    }
+
+    /// <summary>
+    /// Gets chunk entries that reference a specific file.
+    /// </summary>
+    public List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        
+        lock (_dbLock)
+        {
+            // LiteDB doesn't support querying nested collections well,
+            // so we need to filter in memory
+            return _chunkIndexCollection!
+                .FindAll()
+                .Where(e => e.ReferencingFiles.Any(r => 
+                    r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)))
+                .ToList();
+        }
+    }
+
+    /// <summary>
+    /// Gets orphaned chunks (reference count = 0).
+    /// </summary>
+    public List<ChunkIndexEntry> GetOrphanedChunks()
+    {
+        EnsureInitialized();
+        
+        lock (_dbLock)
+        {
+            return _chunkIndexCollection!.Find(x => x.ReferenceCount == 0).ToList();
+        }
+    }
+
+    /// <summary>
+    /// Gets chunks by storage tier.
+    /// </summary>
+    public List<ChunkIndexEntry> GetChunksByTier(StorageTier tier)
+    {
+        EnsureInitialized();
+        
+        lock (_dbLock)
+        {
+            return _chunkIndexCollection!.Find(x => x.CurrentTier == tier).ToList();
+        }
+    }
+
+    /// <summary>
+    /// Clears all chunk index entries.
+    /// </summary>
+    public void ClearChunkIndex()
+    {
+        EnsureInitialized();
+        
+        lock (_dbLock)
+        {
+            _chunkIndexCollection!.DeleteAll();
+        }
+    }
+
+    /// <summary>
+    /// Gets index metadata by key.
+    /// </summary>
+    public DateTime? GetIndexMetadata(string key)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        
+        lock (_dbLock)
+        {
+            var entry = _indexMetadataCollection!.FindOne(x => x.Key == key);
+            return entry?.Value;
+        }
+    }
+
+    /// <summary>
+    /// Sets index metadata by key.
+    /// </summary>
+    public void SetIndexMetadata(string key, DateTime value)
+    {
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(key);
+        
+        lock (_dbLock)
+        {
+            var entry = _indexMetadataCollection!.FindOne(x => x.Key == key);
+            if (entry != null)
+            {
+                entry.Value = value;
+                _indexMetadataCollection.Update(entry);
+            }
+            else
+            {
+                _indexMetadataCollection.Insert(new IndexMetadata { Key = key, Value = value });
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets the total count of chunks in the index.
+    /// </summary>
+    public int GetChunkIndexCount()
+    {
+        EnsureInitialized();
+        
+        lock (_dbLock)
+        {
+            return _chunkIndexCollection!.Count();
+        }
+    }
+
+    #endregion
+
     #region Statistics
 
     /// <summary>
@@ -515,6 +702,8 @@ public class LocalDatabaseService : IDisposable
         // Clear all file records
         _filesCollection?.DeleteAll();
         _pendingChangesCollection?.DeleteAll();
+        _chunkIndexCollection?.DeleteAll();
+        _indexMetadataCollection?.DeleteAll();
     }
 
     /// <summary>
@@ -611,4 +800,14 @@ public class BackupStatistics
         }
         return $"{size:0.##} {sizes[order]}";
     }
+}
+
+/// <summary>
+/// Simple key-value storage for index metadata timestamps.
+/// </summary>
+public class IndexMetadata
+{
+    public int Id { get; set; }
+    public string Key { get; set; } = string.Empty;
+    public DateTime Value { get; set; }
 }

@@ -550,6 +550,81 @@ public partial class AzureBlobService : IBlobStorageService
         return TotalOperations * CostPerWriteOp;
     }
 
+    /// <summary>
+    /// Gets the properties of a blob including its storage tier and size.
+    /// </summary>
+    public async Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(
+        string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var properties = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
+        
+        TotalOperations++;
+
+        var tier = properties.Value.AccessTier?.ToString() switch
+        {
+            "Hot" => StorageTier.Hot,
+            "Cool" => StorageTier.Cool,
+            "Cold" => StorageTier.Cold,
+            _ => StorageTier.Cool
+        };
+
+        return (properties.Value.ContentLength, tier);
+    }
+
+    /// <summary>
+    /// Sets the storage tier for a blob.
+    /// </summary>
+    public async Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+        await blobClient.SetAccessTierAsync(ToAccessTier(tier), cancellationToken: cancellationToken);
+        
+        TotalOperations++;
+        Log($"SetBlobTierAsync: Set {blobName} to {tier} tier");
+    }
+
+    /// <summary>
+    /// Lists all chunk blobs in the container.
+    /// </summary>
+    public async Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+
+        List<string> chunks = new();
+        
+        await foreach (var blob in _containerClient!.GetBlobsAsync(prefix: "chunks/", cancellationToken: cancellationToken))
+        {
+            // Extract the hash from the blob name (remove "chunks/" prefix)
+            var hash = blob.Name.Replace("chunks/", "");
+            chunks.Add(hash);
+        }
+        
+        TotalOperations++;
+        return chunks;
+    }
+
+    /// <summary>
+    /// Checks if a blob exists without downloading it.
+    /// </summary>
+    public async Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var exists = await blobClient.ExistsAsync(cancellationToken);
+        
+        TotalOperations++;
+        return exists.Value;
+    }
+
     #endregion
 
     private void EnsureConnected()
