@@ -1,5 +1,4 @@
 using System;
-using System;
 using System.IO;
 using AzureBackup.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
