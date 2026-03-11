@@ -275,8 +275,11 @@ public partial class MainWindowViewModel
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
                     File.Move(AppMode.DatabasePath, backupPath);
                     File.Move(tempPath, AppMode.DatabasePath);
-                    
-                    // Delete backup after successful migration
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
                     
                     AddLog("Database migration completed successfully");
@@ -285,14 +288,57 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Migration failed: {ex.Message}");
-                    // Clean up temp file if it exists
                     if (File.Exists(tempPath))
                         File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
+                    return;
+                }
+            }
+            
+            // Step 3b: Handle migration from legacy encrypted database (raw password) to Argon2id
+            if (_needsLegacyMigration)
+            {
+                AddLog("Upgrading database encryption to Argon2id...");
+                var tempPath = AppMode.DatabasePath + ".upgraded";
+                
+                try
+                {
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, Password);
+                    _databaseService.Close();
+                    
+                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
+                    File.Move(AppMode.DatabasePath, backupPath);
+                    File.Move(tempPath, AppMode.DatabasePath);
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
+                    File.Delete(backupPath);
+                    
+                    AddLog("Database encryption upgraded to Argon2id successfully");
+                    _needsLegacyMigration = false;
+                }
+                catch (AzureBackup.Core.InvalidPasswordException)
+                {
+                    AddLog("Invalid password - please try again");
+                    return;
+                }
+                catch (System.Exception ex)
+                {
+                    AddLog($"Encryption upgrade failed: {ex.Message}");
+                    if (File.Exists(tempPath))
+                        File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
                     return;
                 }
             }
 
-            // Step 2: Initialize the encrypted database with password
+            // Step 4: Initialize the encrypted database with password
             try
             {
                 _databaseService.Initialize(AppMode.DatabasePath, Password);
@@ -438,6 +484,11 @@ public partial class MainWindowViewModel
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
                     File.Move(AppMode.DatabasePath, backupPath);
                     File.Move(tempPath, AppMode.DatabasePath);
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
                     
                     AddLog("Database migration completed successfully");
@@ -448,6 +499,50 @@ public partial class MainWindowViewModel
                     AddLog($"Migration failed: {ex.Message}");
                     if (File.Exists(tempPath))
                         File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
+                    return;
+                }
+            }
+
+            // Step 3b: Handle migration from legacy encrypted database (raw password) to Argon2id
+            if (_needsLegacyMigration)
+            {
+                AddLog("Upgrading database encryption to Argon2id...");
+                var tempPath = AppMode.DatabasePath + ".upgraded";
+                
+                try
+                {
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, Password);
+                    _databaseService.Close();
+                    
+                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
+                    File.Move(AppMode.DatabasePath, backupPath);
+                    File.Move(tempPath, AppMode.DatabasePath);
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
+                    File.Delete(backupPath);
+                    
+                    AddLog("Database encryption upgraded to Argon2id successfully");
+                    _needsLegacyMigration = false;
+                }
+                catch (AzureBackup.Core.InvalidPasswordException)
+                {
+                    AddLog("Invalid password - please try again");
+                    return;
+                }
+                catch (System.Exception ex)
+                {
+                    AddLog($"Encryption upgrade failed: {ex.Message}");
+                    if (File.Exists(tempPath))
+                        File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
                     return;
                 }
             }
@@ -576,7 +671,12 @@ public partial class MainWindowViewModel
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
                     System.IO.File.Move(AppMode.DatabasePath, backupPath);
                     System.IO.File.Move(tempPath, AppMode.DatabasePath);
-                    System.IO.File.Delete(backupPath);
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
+                    File.Delete(backupPath);
                     
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
@@ -586,7 +686,50 @@ public partial class MainWindowViewModel
                     AddLog($"Migration failed: {ex.Message}");
                     if (System.IO.File.Exists(tempPath))
                         System.IO.File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
                     return (false, $"Migration failed: {ex.Message}");
+                }
+            }
+            
+            // Step 1b: Handle migration from legacy encrypted database to Argon2id
+            if (_needsLegacyMigration)
+            {
+                AddLog("Upgrading database encryption to Argon2id...");
+                var tempPath = AppMode.DatabasePath + ".upgraded";
+                
+                try
+                {
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, password);
+                    _databaseService.Close();
+                    
+                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
+                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
+                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
+                    // Move the salt file too
+                    var tempSaltPath = tempPath + ".salt";
+                    var finalSaltPath = AppMode.DatabasePath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Move(tempSaltPath, finalSaltPath);
+                    File.Delete(backupPath);
+                    
+                    AddLog("Database encryption upgraded to Argon2id successfully");
+                    _needsLegacyMigration = false;
+                }
+                catch (AzureBackup.Core.InvalidPasswordException)
+                {
+                    return (false, "Invalid password for existing database");
+                }
+                catch (System.Exception ex)
+                {
+                    AddLog($"Encryption upgrade failed: {ex.Message}");
+                    if (System.IO.File.Exists(tempPath))
+                        System.IO.File.Delete(tempPath);
+                    var tempSaltPath = tempPath + ".salt";
+                    if (File.Exists(tempSaltPath))
+                        File.Delete(tempSaltPath);
+                    return (false, $"Encryption upgrade failed: {ex.Message}");
                 }
             }
 

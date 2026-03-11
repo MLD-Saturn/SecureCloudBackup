@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
+using Konscious.Security.Cryptography;
 using LiteDB;
 
 namespace AzureBackup.Core.Services;
@@ -7,7 +8,8 @@ namespace AzureBackup.Core.Services;
 /// <summary>
 /// Manages local database for tracking backup state, configuration, and file metadata.
 /// Uses LiteDB for embedded, portable storage (no installation required).
-/// The database is encrypted using the user's password for security.
+/// The database is encrypted using a key derived from the user's password via Argon2id,
+/// providing strong protection against brute force attacks.
 /// </summary>
 public class LocalDatabaseService : IDisposable
 {
@@ -20,6 +22,13 @@ public class LocalDatabaseService : IDisposable
     private readonly object _dbLock = new();
     private bool _disposed;
     private string? _databasePath;
+
+    // Argon2id parameters - matches EncryptionService for consistency
+    private const int Argon2DegreeOfParallelism = 8;
+    private const int Argon2MemorySize = 65536; // 64 MB
+    private const int Argon2Iterations = 3;
+    private const int SaltSize = 16;
+    private const int DerivedKeySize = 32; // 256 bits
 
     public bool IsInitialized => _database != null;
     
@@ -40,6 +49,11 @@ public class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
+    /// Gets the path to the database salt file.
+    /// </summary>
+    private static string GetSaltFilePath(string databasePath) => databasePath + ".salt";
+
+    /// <summary>
     /// Checks if a database file exists at the specified path.
     /// Used to determine if this is a new user or returning user before password entry.
     /// </summary>
@@ -48,6 +62,41 @@ public class LocalDatabaseService : IDisposable
     public static bool DatabaseExists(string databasePath)
     {
         return File.Exists(databasePath);
+    }
+
+    /// <summary>
+    /// Checks if a database has an associated Argon2id salt file.
+    /// Databases without a salt file are using the legacy encryption method.
+    /// </summary>
+    /// <param name="databasePath">Path to the database file</param>
+    /// <returns>True if the database has a salt file (using new Argon2id encryption)</returns>
+    public static bool HasArgon2idSalt(string databasePath)
+    {
+        var saltPath = GetSaltFilePath(databasePath);
+        return File.Exists(saltPath);
+    }
+
+    /// <summary>
+    /// Checks if an existing database uses the legacy encryption method (raw password without Argon2id).
+    /// Legacy databases exist but have no .salt file.
+    /// </summary>
+    /// <param name="databasePath">Path to the database file</param>
+    /// <returns>True if the database exists and uses legacy encryption</returns>
+    public static bool IsLegacyEncryptedDatabase(string databasePath)
+    {
+        if (!File.Exists(databasePath))
+            return false;
+        
+        // If it's unencrypted, it's not legacy encrypted
+        if (IsUnencryptedDatabase(databasePath))
+            return false;
+        
+        // If it has a salt file, it's using new Argon2id encryption
+        if (HasArgon2idSalt(databasePath))
+            return false;
+        
+        // Database exists, is encrypted, but has no salt file = legacy encryption
+        return true;
     }
 
     /// <summary>
@@ -78,7 +127,7 @@ public class LocalDatabaseService : IDisposable
 
     /// <summary>
     /// Migrates an unencrypted database to an encrypted one.
-    /// Creates a new encrypted database and copies all data.
+    /// Creates a new encrypted database with Argon2id key derivation and copies all data.
     /// </summary>
     /// <param name="sourcePath">Path to the unencrypted database</param>
     /// <param name="targetPath">Path for the new encrypted database</param>
@@ -95,34 +144,140 @@ public class LocalDatabaseService : IDisposable
         // Open source (unencrypted)
         using var sourceDb = new LiteDatabase(sourcePath);
         
-        // Create target (encrypted)
-        var targetConnString = new ConnectionString
+        // Generate salt for the new encrypted database
+        var salt = new byte[SaltSize];
+        RandomNumberGenerator.Fill(salt);
+        
+        // Save the salt file
+        var saltFilePath = GetSaltFilePath(targetPath);
+        File.WriteAllBytes(saltFilePath, salt);
+        
+        // Derive strong key using Argon2id
+        var derivedKey = DeriveKeyFromPassword(password, salt);
+        
+        try
         {
-            Filename = targetPath,
-            Password = password,
+            var dbPassword = Convert.ToBase64String(derivedKey);
+            
+            // Create target (encrypted with derived key)
+            var targetConnString = new ConnectionString
+            {
+                Filename = targetPath,
+                Password = dbPassword,
+                Connection = ConnectionType.Shared
+            };
+            using var targetDb = new LiteDatabase(targetConnString);
+
+            // Copy all collections
+            foreach (var collectionName in sourceDb.GetCollectionNames())
+            {
+                var sourceCollection = sourceDb.GetCollection(collectionName);
+                var targetCollection = targetDb.GetCollection(collectionName);
+                
+                foreach (var doc in sourceCollection.FindAll())
+                {
+                    targetCollection.Insert(doc);
+                }
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(derivedKey);
+        }
+    }
+
+    /// <summary>
+    /// Migrates a legacy encrypted database (raw password, no Argon2id) to the new format.
+    /// Creates a new database with Argon2id key derivation and copies all data.
+    /// </summary>
+    /// <param name="sourcePath">Path to the legacy encrypted database</param>
+    /// <param name="targetPath">Path for the new encrypted database</param>
+    /// <param name="password">Password (same password used for the legacy database)</param>
+    /// <exception cref="InvalidPasswordException">Thrown if password is incorrect for the legacy database</exception>
+    public static void MigrateLegacyEncrypted(string sourcePath, string targetPath, string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+
+        if (!File.Exists(sourcePath))
+            throw new FileNotFoundException("Source database not found", sourcePath);
+
+        // Open source with legacy encryption (raw password)
+        var sourceConnString = new ConnectionString
+        {
+            Filename = sourcePath,
+            Password = password, // Raw password - legacy method
             Connection = ConnectionType.Shared
         };
-        using var targetDb = new LiteDatabase(targetConnString);
-
-        // Copy all collections
-        foreach (var collectionName in sourceDb.GetCollectionNames())
+        
+        LiteDatabase sourceDb;
+        try
         {
-            var sourceCollection = sourceDb.GetCollection(collectionName);
-            var targetCollection = targetDb.GetCollection(collectionName);
+            sourceDb = new LiteDatabase(sourceConnString);
+            // Verify we can actually read from it
+            _ = sourceDb.GetCollectionNames().ToList();
+        }
+        catch (LiteException ex) when (ex.Message.Contains("invalid password", StringComparison.OrdinalIgnoreCase) ||
+                                        ex.Message.Contains("file is not a valid", StringComparison.OrdinalIgnoreCase) ||
+                                        ex.Message.Contains("HMAC", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidPasswordException("Invalid password for legacy database. Please try again.", ex);
+        }
+        
+        using (sourceDb)
+        {
+            // Generate salt for the new encrypted database
+            var salt = new byte[SaltSize];
+            RandomNumberGenerator.Fill(salt);
             
-            foreach (var doc in sourceCollection.FindAll())
+            // Save the salt file
+            var saltFilePath = GetSaltFilePath(targetPath);
+            File.WriteAllBytes(saltFilePath, salt);
+            
+            // Derive strong key using Argon2id
+            var derivedKey = DeriveKeyFromPassword(password, salt);
+            
+            try
             {
-                targetCollection.Insert(doc);
+                var dbPassword = Convert.ToBase64String(derivedKey);
+                
+                // Create target (encrypted with derived key)
+                var targetConnString = new ConnectionString
+                {
+                    Filename = targetPath,
+                    Password = dbPassword,
+                    Connection = ConnectionType.Shared
+                };
+                using var targetDb = new LiteDatabase(targetConnString);
+
+                // Copy all collections
+                foreach (var collectionName in sourceDb.GetCollectionNames())
+                {
+                    var sourceCollection = sourceDb.GetCollection(collectionName);
+                    var targetCollection = targetDb.GetCollection(collectionName);
+                    
+                    foreach (var doc in sourceCollection.FindAll())
+                    {
+                        targetCollection.Insert(doc);
+                    }
+                }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(derivedKey);
             }
         }
     }
 
     /// <summary>
     /// Initializes the database at the specified path with password encryption.
+    /// Uses Argon2id to derive a strong key from the password, providing protection
+    /// against brute force attacks even if the database file is stolen.
     /// </summary>
     /// <param name="databasePath">Path to the database file</param>
     /// <param name="password">Password used to encrypt the database</param>
-    /// <exception cref="LiteException">Thrown if password is incorrect for existing database</exception>
+    /// <exception cref="InvalidPasswordException">Thrown if password is incorrect for existing database</exception>
     public void Initialize(string databasePath, string password)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
@@ -139,45 +294,109 @@ public class LocalDatabaseService : IDisposable
             Log($"Initialize: Created directory {directory}");
         }
 
-        // Build connection string with password for encryption
-        var connectionString = new ConnectionString
+        // Get or create the database salt
+        var saltFilePath = GetSaltFilePath(databasePath);
+        byte[] salt;
+        
+        if (File.Exists(saltFilePath))
         {
-            Filename = databasePath,
-            Password = password,
-            Connection = ConnectionType.Shared
-        };
+            // Existing database - read salt
+            salt = File.ReadAllBytes(saltFilePath);
+            if (salt.Length != SaltSize)
+            {
+                throw new InvalidOperationException($"Database salt file is corrupted (expected {SaltSize} bytes, got {salt.Length})");
+            }
+            Log("Initialize: Loaded existing database salt");
+        }
+        else
+        {
+            // New database - generate and save salt
+            salt = new byte[SaltSize];
+            RandomNumberGenerator.Fill(salt);
+            File.WriteAllBytes(saltFilePath, salt);
+            Log("Initialize: Generated and saved new database salt");
+        }
 
+        // Derive strong key using Argon2id (same parameters as EncryptionService)
+        Log("Initialize: Deriving database key with Argon2id...");
+        var derivedKey = DeriveKeyFromPassword(password, salt);
+        
         try
         {
-            _database = new LiteDatabase(connectionString);
+            // Convert derived key to Base64 for LiteDB password
+            // LiteDB will use this as the encryption password
+            var dbPassword = Convert.ToBase64String(derivedKey);
             
-            _configCollection = _database.GetCollection<BackupConfiguration>("config");
-            _filesCollection = _database.GetCollection<BackedUpFile>("files");
-            _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
-            _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
-            _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
+            // Build connection string with derived key
+            var connectionString = new ConnectionString
+            {
+                Filename = databasePath,
+                Password = dbPassword,
+                Connection = ConnectionType.Shared
+            };
 
-            // Create indexes for faster queries
-            _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
-            _filesCollection.EnsureIndex(x => x.Status);
-            _filesCollection.EnsureIndex(x => x.FileHash);
-            
-            // Chunk index indexes
-            _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
-            _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
-            _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
+            try
+            {
+                _database = new LiteDatabase(connectionString);
+                
+                _configCollection = _database.GetCollection<BackupConfiguration>("config");
+                _filesCollection = _database.GetCollection<BackedUpFile>("files");
+                _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
+                _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
+                _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
+
+                // Create indexes for faster queries
+                _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
+                _filesCollection.EnsureIndex(x => x.Status);
+                _filesCollection.EnsureIndex(x => x.FileHash);
+                
+                // Chunk index indexes
+                _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
+                _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
+                _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
+            }
+            catch (LiteException ex) when (ex.Message.Contains("invalid password", StringComparison.OrdinalIgnoreCase) ||
+                                            ex.Message.Contains("file is not a valid", StringComparison.OrdinalIgnoreCase) ||
+                                            ex.Message.Contains("HMAC", StringComparison.OrdinalIgnoreCase))
+            {
+                Log("Initialize: Invalid password for encrypted database");
+                _database?.Dispose();
+                _database = null;
+                throw new InvalidPasswordException("Invalid password. Please try again.", ex);
+            }
         }
-        catch (LiteException ex) when (ex.Message.Contains("invalid password", StringComparison.OrdinalIgnoreCase) ||
-                                        ex.Message.Contains("file is not a valid", StringComparison.OrdinalIgnoreCase) ||
-                                        ex.Message.Contains("HMAC", StringComparison.OrdinalIgnoreCase))
+        finally
         {
-            Log("Initialize: Invalid password for encrypted database");
-            _database?.Dispose();
-            _database = null;
-            throw new InvalidPasswordException("Invalid password. Please try again.", ex);
+            // Zero the derived key from memory
+            CryptographicOperations.ZeroMemory(derivedKey);
         }
         
-        Log("Initialize: Encrypted database initialized successfully");
+        Log("Initialize: Encrypted database initialized successfully with Argon2id-derived key");
+    }
+
+    /// <summary>
+    /// Derives a key from a password using Argon2id.
+    /// Uses the same parameters as EncryptionService for consistency.
+    /// </summary>
+    private static byte[] DeriveKeyFromPassword(string password, byte[] salt)
+    {
+        var passwordBytes = System.Text.Encoding.UTF8.GetBytes(password);
+        try
+        {
+            using Argon2id argon2 = new(passwordBytes)
+            {
+                Salt = salt,
+                DegreeOfParallelism = Argon2DegreeOfParallelism,
+                MemorySize = Argon2MemorySize,
+                Iterations = Argon2Iterations
+            };
+
+            return argon2.GetBytes(DerivedKeySize);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(passwordBytes);
+        }
     }
 
     /// <summary>
@@ -825,7 +1044,14 @@ public class LocalDatabaseService : IDisposable
                 SecureDeleteFile(logPath);
             }
             
-            Log("SecureReset: Database has been securely deleted. Application restart required.");
+            // Also delete the salt file
+            var saltPath = GetSaltFilePath(_databasePath);
+            if (File.Exists(saltPath))
+            {
+                SecureDeleteFile(saltPath);
+            }
+            
+            Log("SecureReset: Database and salt file have been securely deleted. Application restart required.");
         }
     }
 

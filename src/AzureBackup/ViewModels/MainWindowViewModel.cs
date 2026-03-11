@@ -135,6 +135,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// </summary>
     public bool NeedsMigration => _needsMigration;
 
+    // Flag to track if migration from legacy encrypted database is needed (raw password, no Argon2id)
+    private bool _needsLegacyMigration;
+
     [ObservableProperty]
     private bool _isOperationInProgress;
 
@@ -603,12 +606,17 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         var dbPath = AppMode.DatabasePath;
         HasExistingConfig = LocalDatabaseService.DatabaseExists(dbPath);
         
-        // Check if migration from unencrypted database is needed
+        // Check what type of migration is needed (if any)
         _needsMigration = HasExistingConfig && LocalDatabaseService.IsUnencryptedDatabase(dbPath);
+        _needsLegacyMigration = HasExistingConfig && LocalDatabaseService.IsLegacyEncryptedDatabase(dbPath);
         
         if (_needsMigration)
         {
             AddLog("Legacy unencrypted database detected - will migrate to encrypted format");
+        }
+        else if (_needsLegacyMigration)
+        {
+            AddLog("Legacy encrypted database detected - will upgrade to stronger Argon2id encryption");
         }
         else if (HasExistingConfig)
         {

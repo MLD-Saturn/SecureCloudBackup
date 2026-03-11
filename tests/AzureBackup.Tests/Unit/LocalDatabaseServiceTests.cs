@@ -213,6 +213,109 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
             LocalDatabaseService.MigrateToEncrypted("source.db", "target.db", null!));
     }
 
+    [Fact]
+    public void IsLegacyEncryptedDatabase_WithNewArgon2idDatabase_ReturnsFalse()
+    {
+        // The test fixture database is created with Argon2id (new format)
+        Assert.False(LocalDatabaseService.IsLegacyEncryptedDatabase(_dbPath));
+    }
+
+    [Fact]
+    public void IsLegacyEncryptedDatabase_WithNonExistentFile_ReturnsFalse()
+    {
+        var nonExistentPath = Path.Combine(_testDirectory, "nonexistent.db");
+        Assert.False(LocalDatabaseService.IsLegacyEncryptedDatabase(nonExistentPath));
+    }
+
+    [Fact]
+    public void HasArgon2idSalt_WithNewDatabase_ReturnsTrue()
+    {
+        // The test fixture database has a salt file
+        Assert.True(LocalDatabaseService.HasArgon2idSalt(_dbPath));
+    }
+
+    [Fact]
+    public void HasArgon2idSalt_WithNonExistentDatabase_ReturnsFalse()
+    {
+        var nonExistentPath = Path.Combine(_testDirectory, "nonexistent.db");
+        Assert.False(LocalDatabaseService.HasArgon2idSalt(nonExistentPath));
+    }
+
+    [Fact]
+    public void MigrateLegacyEncrypted_MigratesDataSuccessfully()
+    {
+        // Arrange - Create a "legacy" encrypted database (simulate old format by creating without salt file)
+        var legacyPath = Path.Combine(_testDirectory, "legacy.db");
+        var upgradedPath = Path.Combine(_testDirectory, "upgraded.db");
+        var testPassword = "LegacyPassword123!";
+        
+        // Create a database with raw password (simulating legacy format)
+        var legacyConnString = new LiteDB.ConnectionString
+        {
+            Filename = legacyPath,
+            Password = testPassword, // Raw password - legacy method
+            Connection = LiteDB.ConnectionType.Shared
+        };
+        
+        using (var legacyDb = new LiteDB.LiteDatabase(legacyConnString))
+        {
+            // Add some test data
+            var configCollection = legacyDb.GetCollection<AzureBackup.Core.Models.BackupConfiguration>("config");
+            configCollection.Insert(new AzureBackup.Core.Models.BackupConfiguration
+            {
+                Id = 1,
+                ContainerName = "legacy-container",
+                StorageAccountName = "legacyaccount"
+            });
+        }
+        
+        // Verify it's detected as legacy (no salt file)
+        Assert.True(LocalDatabaseService.IsLegacyEncryptedDatabase(legacyPath));
+        Assert.False(LocalDatabaseService.HasArgon2idSalt(legacyPath));
+
+        // Act - migrate to new Argon2id format
+        LocalDatabaseService.MigrateLegacyEncrypted(legacyPath, upgradedPath, testPassword);
+
+        // Assert - verify upgraded database has the data and uses Argon2id
+        Assert.True(LocalDatabaseService.HasArgon2idSalt(upgradedPath));
+        Assert.False(LocalDatabaseService.IsLegacyEncryptedDatabase(upgradedPath));
+        
+        using var upgradedService = new LocalDatabaseService();
+        upgradedService.Initialize(upgradedPath, testPassword);
+        
+        var migratedConfig = upgradedService.GetConfiguration();
+        Assert.Equal("legacy-container", migratedConfig.ContainerName);
+        Assert.Equal("legacyaccount", migratedConfig.StorageAccountName);
+    }
+
+    [Fact]
+    public void MigrateLegacyEncrypted_WithWrongPassword_ThrowsInvalidPasswordException()
+    {
+        // Arrange - Create a "legacy" encrypted database
+        var legacyPath = Path.Combine(_testDirectory, "legacy_wrong_pwd.db");
+        var upgradedPath = Path.Combine(_testDirectory, "upgraded_wrong_pwd.db");
+        var correctPassword = "CorrectPassword123!";
+        var wrongPassword = "WrongPassword123!";
+        
+        // Create a database with raw password
+        var legacyConnString = new LiteDB.ConnectionString
+        {
+            Filename = legacyPath,
+            Password = correctPassword,
+            Connection = LiteDB.ConnectionType.Shared
+        };
+        
+        using (var legacyDb = new LiteDB.LiteDatabase(legacyConnString))
+        {
+            var configCollection = legacyDb.GetCollection<AzureBackup.Core.Models.BackupConfiguration>("config");
+            configCollection.Insert(new AzureBackup.Core.Models.BackupConfiguration { Id = 1 });
+        }
+
+        // Act & Assert - should throw InvalidPasswordException
+        Assert.Throws<AzureBackup.Core.InvalidPasswordException>(() =>
+            LocalDatabaseService.MigrateLegacyEncrypted(legacyPath, upgradedPath, wrongPassword));
+    }
+
     #endregion
 
     #region Configuration Tests
