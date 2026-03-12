@@ -201,7 +201,7 @@ public partial class MainWindowViewModel
         finally
         {
             IsOperationInProgress = false;
-            ClearProgressTracking();
+            StopProgressTracking();
         }
     }
 
@@ -321,6 +321,7 @@ public partial class MainWindowViewModel
         finally
         {
             IsOperationInProgress = false;
+            IsTransferInProgress = false;
             ProgressValue = 0;
             ProgressText = string.Empty;
         }

@@ -308,7 +308,7 @@ public partial class MainWindowViewModel
         finally
         {
             IsOperationInProgress = false;
-            ClearProgressTracking();
+            StopProgressTracking();
         }
     }
 
@@ -452,7 +452,7 @@ public partial class MainWindowViewModel
         finally
         {
             IsOperationInProgress = false;
-            ClearProgressTracking();
+            StopProgressTracking();
         }
     }
 

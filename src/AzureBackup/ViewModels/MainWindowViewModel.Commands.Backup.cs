@@ -365,7 +365,7 @@ public partial class MainWindowViewModel
         finally
         {
             IsOperationInProgress = false;
-            ClearProgressTracking();
+            StopProgressTracking();
         }
     }
 

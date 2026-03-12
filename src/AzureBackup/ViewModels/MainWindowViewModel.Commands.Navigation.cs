@@ -302,6 +302,7 @@ public partial class MainWindowViewModel
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
                 OnPropertyChanged(nameof(ShowAzureEmptyState));
+                OnPropertyChanged(nameof(FilteredRestorableFiles)); // Update flat list view
                 
                 // Update BackedUpFiles for the Backup tab (same data, different view)
                 BackedUpFiles.Clear();
@@ -314,7 +315,7 @@ public partial class MainWindowViewModel
                 TotalFiles = files.Count;
                 TotalSize = FormatBytes(files.Sum(f => f.FileSize));
                 
-                // Build Azure file tree
+                // Build Azure file tree for tree view mode
                 if (UseTreeView)
                 {
                     BuildFileTree();

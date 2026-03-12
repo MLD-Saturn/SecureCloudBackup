@@ -378,6 +378,7 @@ public partial class MainWindowViewModel
     /// </summary>
     private void ResetProgressState()
     {
+        IsTransferInProgress = false;
         ProgressValue = 0;
         ProgressText = string.Empty;
         CurrentOperationType = string.Empty;

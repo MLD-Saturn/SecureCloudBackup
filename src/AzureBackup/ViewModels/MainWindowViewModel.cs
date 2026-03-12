@@ -142,6 +142,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private bool _isOperationInProgress;
 
     /// <summary>
+    /// True when a file transfer operation (backup, restore, sync) is in progress.
+    /// This shows the detailed progress panel with progress bars.
+    /// Distinguished from IsOperationInProgress which includes simple refreshes.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isTransferInProgress;
+
+    /// <summary>
     /// True when a reset has been requested and is awaiting confirmation.
     /// </summary>
     [ObservableProperty]
@@ -769,6 +777,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
+            IsTransferInProgress = true; // Show the progress panel
             CurrentOperationType = operationType;
             TotalFilesInOperation = totalFiles;
             TotalBytesToProcess = totalBytes;
@@ -885,6 +894,19 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));
+        });
+    }
+
+    /// <summary>
+    /// Stops progress tracking and hides the progress panel.
+    /// Call this at the end of file transfer operations.
+    /// </summary>
+    private void StopProgressTracking()
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            IsTransferInProgress = false;
+            ClearProgressTracking();
         });
     }
 

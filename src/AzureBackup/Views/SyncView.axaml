@@ -412,9 +412,9 @@
             </Border>
         </Grid>
 
-        <!-- Progress Panel (shown during sync) -->
+        <!-- Progress Panel (shown during file transfer operations) -->
         <Border Grid.Row="3" Classes="card" Margin="0,8,0,0"
-                IsVisible="{Binding IsOperationInProgress}">
+                IsVisible="{Binding IsTransferInProgress}">
             <Grid RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto">
                 <!-- Overall progress header -->
                 <Grid ColumnDefinitions="*,Auto,Auto">

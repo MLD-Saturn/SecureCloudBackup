@@ -297,7 +297,7 @@ public partial class MainWindowViewModel
                 }
             }
             
-            // Step 3b: Handle migration from legacy encrypted database (raw password) to Argon2id
+            // Step 2: Handle migration from legacy encrypted database (raw password) to Argon2id
             if (_needsLegacyMigration)
             {
                 AddLog("Upgrading database encryption to Argon2id...");
@@ -338,7 +338,7 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // Step 4: Initialize the encrypted database with password
+            // Step 3: Initialize the encrypted database with password
             try
             {
                 _databaseService.Initialize(AppMode.DatabasePath, Password);
@@ -350,10 +350,10 @@ public partial class MainWindowViewModel
                 return;
             }
             
-            // Step 3: Load configuration from the now-unlocked database
+            // Step 4: Load configuration from the now-unlocked database
             LoadConfiguration();
             
-            // Step 4: Initialize encryption service for backup operations
+            // Step 5: Initialize encryption service for backup operations
             var success = await _orchestrator.InitializeAsync(Password);
             if (success)
             {
@@ -410,13 +410,10 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Combined command that handles initialization, storage settings, and connection in one step.
-    /// For new users: validates passwords, saves storage settings, initializes encryption, connects.
-    /// For returning users: validates password, unlocks encryption, connects.
     /// </summary>
     [RelayCommand]
     private async Task UnlockAndConnectAsync()
     {
-        // Step 1: Validate password
         if (string.IsNullOrWhiteSpace(Password))
         {
             AddLog("Please enter a password");
@@ -424,6 +421,12 @@ public partial class MainWindowViewModel
         }
 
         var isNewSetup = !HasExistingConfig;
+        
+        // Save user input before LoadConfiguration potentially overwrites it
+        // This is needed for new setups where config is empty
+        var userConnectionString = ConnectionString;
+        var userContainerName = ContainerName;
+        var userStorageAccountName = StorageAccountName;
 
         // For new setup or migration, require password confirmation
         if (isNewSetup || _needsMigration)
@@ -440,12 +443,12 @@ public partial class MainWindowViewModel
                 return;
             }
 
-            // Step 2: Validate storage configuration for new users (not for migration)
+            // Validate storage configuration for new users (not for migration)
             if (isNewSetup && !_needsMigration)
             {
                 if (UseEntraIdAuth)
                 {
-                    if (string.IsNullOrWhiteSpace(StorageAccountName))
+                    if (string.IsNullOrWhiteSpace(userStorageAccountName))
                     {
                         AddLog("Please enter a storage account name");
                         return;
@@ -458,7 +461,7 @@ public partial class MainWindowViewModel
                 }
                 else
                 {
-                    if (string.IsNullOrWhiteSpace(ConnectionString) || ConnectionString.StartsWith("[Encrypted"))
+                    if (string.IsNullOrWhiteSpace(userConnectionString) || userConnectionString.StartsWith("[Encrypted"))
                     {
                         AddLog("Please enter a connection string");
                         return;
@@ -470,7 +473,7 @@ public partial class MainWindowViewModel
         IsOperationInProgress = true;
         try
         {
-            // Step 3: Handle migration from unencrypted database if needed
+            // Step 1: Handle migration from unencrypted database if needed
             if (_needsMigration)
             {
                 AddLog("Migrating database to encrypted format...");
@@ -482,8 +485,8 @@ public partial class MainWindowViewModel
                     _databaseService.Close();
                     
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
-                    File.Move(AppMode.DatabasePath, backupPath);
-                    File.Move(tempPath, AppMode.DatabasePath);
+                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
+                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
                     // Move the salt file too
                     var tempSaltPath = tempPath + ".salt";
                     var finalSaltPath = AppMode.DatabasePath + ".salt";
@@ -497,16 +500,16 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Migration failed: {ex.Message}");
-                    if (File.Exists(tempPath))
-                        File.Delete(tempPath);
+                    if (System.IO.File.Exists(tempPath))
+                        System.IO.File.Delete(tempPath);
                     var tempSaltPath = tempPath + ".salt";
                     if (File.Exists(tempSaltPath))
                         File.Delete(tempSaltPath);
                     return;
                 }
             }
-
-            // Step 3b: Handle migration from legacy encrypted database (raw password) to Argon2id
+            
+            // Step 1b: Handle migration from legacy encrypted database to Argon2id
             if (_needsLegacyMigration)
             {
                 AddLog("Upgrading database encryption to Argon2id...");
@@ -518,8 +521,8 @@ public partial class MainWindowViewModel
                     _databaseService.Close();
                     
                     var backupPath = AppMode.DatabasePath + ".legacy.bak";
-                    File.Move(AppMode.DatabasePath, backupPath);
-                    File.Move(tempPath, AppMode.DatabasePath);
+                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
+                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
                     // Move the salt file too
                     var tempSaltPath = tempPath + ".salt";
                     var finalSaltPath = AppMode.DatabasePath + ".salt";
@@ -532,14 +535,14 @@ public partial class MainWindowViewModel
                 }
                 catch (AzureBackup.Core.InvalidPasswordException)
                 {
-                    AddLog("Invalid password - please try again");
+                    AddLog("Invalid password for existing database - please try again");
                     return;
                 }
                 catch (System.Exception ex)
                 {
                     AddLog($"Encryption upgrade failed: {ex.Message}");
-                    if (File.Exists(tempPath))
-                        File.Delete(tempPath);
+                    if (System.IO.File.Exists(tempPath))
+                        System.IO.File.Delete(tempPath);
                     var tempSaltPath = tempPath + ".salt";
                     if (File.Exists(tempSaltPath))
                         File.Delete(tempSaltPath);
@@ -547,11 +550,10 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // Step 4: Initialize the encrypted database with password
+            // Step 2: Initialize the encrypted database with password
             try
             {
                 _databaseService.Initialize(AppMode.DatabasePath, Password);
-                AddLog("Database unlocked successfully");
             }
             catch (AzureBackup.Core.InvalidPasswordException)
             {
@@ -559,10 +561,19 @@ public partial class MainWindowViewModel
                 return;
             }
             
-            // Step 5: Load configuration from the now-unlocked database
+            // Step 3: Load configuration from the now-unlocked database
             LoadConfiguration();
             
-            // Step 6: Initialize encryption service for backup operations
+            // For new setups, restore user input that LoadConfiguration may have overwritten
+            // (config is empty for new databases, so LoadConfiguration sets defaults)
+            if (isNewSetup)
+            {
+                ConnectionString = userConnectionString;
+                ContainerName = userContainerName;
+                StorageAccountName = userStorageAccountName;
+            }
+            
+            // Step 4: Initialize encryption service for backup operations
             var success = await _orchestrator.InitializeAsync(Password);
             if (!success)
             {
@@ -577,7 +588,7 @@ public partial class MainWindowViewModel
             Password = string.Empty;
             PasswordConfirm = string.Empty;
 
-            // Step 7: Save and connect to storage (for new users with storage config)
+            // Step 5: Save and connect to storage (for new users with storage config)
             if (isNewSetup && !_needsMigration)
             {
                 // Save watched folders
@@ -587,21 +598,21 @@ public partial class MainWindowViewModel
                 
                 _orchestrator.SetBudget(MonthlyBudget);
 
-                // Save storage settings
+                // Save storage settings using the preserved user input
                 if (UseEntraIdAuth)
                 {
-                    await _orchestrator.SaveStorageAccountAsync(StorageAccountName, ContainerName);
+                    await _orchestrator.SaveStorageAccountAsync(userStorageAccountName, userContainerName);
                     AddLog("Entra ID settings saved and connected!");
                 }
                 else
                 {
-                    await _orchestrator.SaveConnectionStringAsync(ConnectionString, ContainerName);
+                    await _orchestrator.SaveConnectionStringAsync(userConnectionString, userContainerName);
                     ConnectionString = "[Encrypted - stored securely]";
                     AddLog("Connection string saved (encrypted) and connected!");
                 }
             }
 
-            // Step 8: Update status and load files
+            // Step 6: Update status and load files
             IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
             
             // Reload config to check for stored connection
