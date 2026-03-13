@@ -77,7 +77,7 @@ public class RestoreService
         }
         
         // Validate the path doesn't contain invalid characters
-        var invalidChars = Path.GetInvalidPathCharacters();
+        var invalidChars = Path.GetInvalidPathChars();
         if (path.IndexOfAny(invalidChars) >= 0)
         {
             throw new SecurityPolicyException(

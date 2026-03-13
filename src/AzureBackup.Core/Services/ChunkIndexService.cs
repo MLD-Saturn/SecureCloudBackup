@@ -11,8 +11,9 @@ public class ChunkIndexService
 {
     private readonly LocalDatabaseService _databaseService;
     private readonly IBlobStorageService _blobService;
+    private readonly EncryptionService _encryptionService;
     
-    private const string IndexBackupBlobName = "index/chunk-index-backup.json";
+    private const string IndexBackupBlobName = "index/chunk-index-backup.enc";
     
     // Storage tier pricing per GB per month (approximate Azure pricing)
     private static readonly Dictionary<StorageTier, decimal> TierPricingPerGbMonth = new()
@@ -33,12 +34,14 @@ public class ChunkIndexService
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [ChunkIndex] {message}");
     }
 
-    public ChunkIndexService(LocalDatabaseService databaseService, IBlobStorageService blobService)
+    public ChunkIndexService(LocalDatabaseService databaseService, IBlobStorageService blobService, EncryptionService encryptionService)
     {
         ArgumentNullException.ThrowIfNull(databaseService);
         ArgumentNullException.ThrowIfNull(blobService);
+        ArgumentNullException.ThrowIfNull(encryptionService);
         _databaseService = databaseService;
         _blobService = blobService;
+        _encryptionService = encryptionService;
     }
 
     #region Reference Management
@@ -437,12 +440,20 @@ public class ChunkIndexService
         };
 
         var json = JsonSerializer.Serialize(backup, new JsonSerializerOptions { WriteIndented = false });
-        var data = System.Text.Encoding.UTF8.GetBytes(json);
+        var plaintext = System.Text.Encoding.UTF8.GetBytes(json);
+        var data = _encryptionService.Encrypt(plaintext);
 
         await _blobService.UploadBlobAsync(IndexBackupBlobName, data, StorageTier.Cool, cancellationToken);
-        
+
+        // Delete legacy unencrypted backup if it exists
+        try
+        {
+            await _blobService.DeleteBlobAsync("index/chunk-index-backup.json", cancellationToken);
+        }
+        catch { /* Ignore if legacy blob doesn't exist */ }
+
         _databaseService.SetIndexMetadata("LastAzureSyncAt", DateTime.UtcNow);
-        Log($"Index backup complete: {backup.Entries.Count} entries, {FormatBytes(data.Length)} stored");
+        Log($"Index backup complete: {backup.Entries.Count} entries, {FormatBytes(data.Length)} stored (encrypted)");
     }
 
     /// <summary>
@@ -457,7 +468,8 @@ public class ChunkIndexService
         try
         {
             var data = await _blobService.DownloadBlobAsync(IndexBackupBlobName, cancellationToken);
-            var json = System.Text.Encoding.UTF8.GetString(data);
+            var plaintext = _encryptionService.Decrypt(data);
+            var json = System.Text.Encoding.UTF8.GetString(plaintext);
             var backup = JsonSerializer.Deserialize<ChunkIndexBackup>(json);
 
             if (backup == null)

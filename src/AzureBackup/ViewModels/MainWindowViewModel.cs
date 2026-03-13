@@ -583,7 +583,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _restoreService = new RestoreService(_databaseService, _blobService, _encryptionService);
 
         // Initialize chunk index service (requires blob service to be connected later)
-        _chunkIndexService = new ChunkIndexService(_databaseService, _blobService);
+        _chunkIndexService = new ChunkIndexService(_databaseService, _blobService, _encryptionService);
         _orchestrator.SetChunkIndexService(_chunkIndexService);
         
         // Initialize Storage Health ViewModel

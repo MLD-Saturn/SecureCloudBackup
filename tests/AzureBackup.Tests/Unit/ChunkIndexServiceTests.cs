@@ -34,7 +34,7 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         _blobService = new InMemoryBlobService(_encryptionService);
         await _blobService.ConnectAsync("test-connection", "test-container");
         
-        _indexService = new ChunkIndexService(_databaseService, _blobService);
+        _indexService = new ChunkIndexService(_databaseService, _blobService, _encryptionService);
     }
 
     public Task DisposeAsync()
