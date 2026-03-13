@@ -334,7 +334,7 @@ public class ChunkingService
         ArgumentNullException.ThrowIfNull(chunk);
         
         await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: Math.Max(4096, chunk.Length), useAsync: true);
+            bufferSize: 81920, useAsync: true);
         
         stream.Position = chunk.Offset;
         byte[] data = new byte[chunk.Length];

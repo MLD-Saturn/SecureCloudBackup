@@ -165,38 +165,35 @@ public class EncryptionService : IDisposable
 
         try
         {
-            byte[] nonce = new byte[NonceSize];
-            RandomNumberGenerator.Fill(nonce);
+            // Single allocation for the entire output:
+            // magic(4) + version(1) + nonce(12) + ciphertext(N) + tag(16) + checksum(4)
+            var headerSize = MagicHeader.Length + 1 + NonceSize;
+            var totalSize = headerSize + plaintext.Length + TagSize + ChecksumSize;
+            byte[] result = new byte[totalSize];
 
-            byte[] ciphertext = new byte[plaintext.Length];
-            byte[] tag = new byte[TagSize];
-
-            using AesGcm aes = new(keyCopy, TagSize);
-            aes.Encrypt(nonce, plaintext, ciphertext, tag);
-
-            // Combine: magic + version + nonce + ciphertext + tag
-            byte[] resultWithoutChecksum = new byte[MagicHeader.Length + 1 + NonceSize + ciphertext.Length + TagSize];
+            // Write header directly into result buffer
             var offset = 0;
-
-            MagicHeader.CopyTo(resultWithoutChecksum, offset);
+            MagicHeader.CopyTo(result, offset);
             offset += MagicHeader.Length;
-            
-            resultWithoutChecksum[offset] = CurrentFormatVersion;
+
+            result[offset] = CurrentFormatVersion;
             offset += 1;
 
-            nonce.CopyTo(resultWithoutChecksum, offset);
+            // Generate nonce directly into result buffer
+            var nonceSpan = result.AsSpan(offset, NonceSize);
+            RandomNumberGenerator.Fill(nonceSpan);
             offset += NonceSize;
 
-            ciphertext.CopyTo(resultWithoutChecksum, offset);
-            offset += ciphertext.Length;
+            // Encrypt directly into result buffer (ciphertext + tag regions)
+            var ciphertextSpan = result.AsSpan(offset, plaintext.Length);
+            var tagSpan = result.AsSpan(offset + plaintext.Length, TagSize);
 
-            tag.CopyTo(resultWithoutChecksum, offset);
+            using AesGcm aes = new(keyCopy, TagSize);
+            aes.Encrypt(nonceSpan, plaintext, ciphertextSpan, tagSpan);
 
-            // Add CRC32 checksum for corruption detection
-            var checksum = ComputeChecksum(resultWithoutChecksum);
-            byte[] result = new byte[resultWithoutChecksum.Length + ChecksumSize];
-            resultWithoutChecksum.CopyTo(result, 0);
-            checksum.CopyTo(result, resultWithoutChecksum.Length);
+            // Compute CRC32 over everything before the checksum slot
+            var dataForChecksum = result.AsSpan(0, totalSize - ChecksumSize);
+            WriteChecksum(dataForChecksum, result.AsSpan(totalSize - ChecksumSize));
 
             return result;
         }
@@ -204,37 +201,6 @@ public class EncryptionService : IDisposable
         {
             CryptographicOperations.ZeroMemory(keyCopy);
         }
-    }
-
-    /// <summary>
-    /// Encrypts data from a stream and writes to output stream.
-    /// Processes in chunks to handle large files efficiently.
-    /// Uses atomic writes to prevent partial corruption.
-    /// </summary>
-    public async Task EncryptStreamAsync(Stream input, Stream output, int bufferSize = 1024 * 1024)
-    {
-        EnsureInitialized();
-
-        byte[] buffer = new byte[bufferSize];
-        int bytesRead;
-
-        while ((bytesRead = await input.ReadAsync(buffer)) > 0)
-        {
-            byte[] chunkData = new byte[bytesRead];
-            Array.Copy(buffer, chunkData, bytesRead);
-            var encrypted = Encrypt(chunkData);
-
-            // Write chunk atomically: combine length + data into single write
-            byte[] chunkPacket = new byte[4 + encrypted.Length];
-            BitConverter.GetBytes(encrypted.Length).CopyTo(chunkPacket, 0);
-            encrypted.CopyTo(chunkPacket, 4);
-            
-            await output.WriteAsync(chunkPacket);
-        }
-
-        // Write end marker
-        await output.WriteAsync(BitConverter.GetBytes(0));
-        await output.FlushAsync();
     }
 
     /// <summary>
@@ -318,37 +284,6 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
-    /// Decrypts data from a stream and writes to output stream.
-    /// </summary>
-    public async Task DecryptStreamAsync(Stream input, Stream output)
-    {
-        EnsureInitialized();
-
-        byte[] lengthBuffer = new byte[4];
-
-        while (true)
-        {
-            var bytesRead = await input.ReadAsync(lengthBuffer);
-            if (bytesRead < 4) 
-                throw new DataIntegrityException("Unexpected end of stream - file may be truncated");
-
-            var chunkLength = BitConverter.ToInt32(lengthBuffer);
-            if (chunkLength == 0) break; // End marker
-            
-            if (chunkLength < 0 || chunkLength > 100_000_000) // Sanity check: max 100MB chunk
-                throw new DataIntegrityException("Invalid chunk length - file may be corrupted");
-
-            byte[] encryptedChunk = new byte[chunkLength];
-            await input.ReadExactlyAsync(encryptedChunk);
-
-            var decrypted = Decrypt(encryptedChunk);
-            await output.WriteAsync(decrypted);
-        }
-        
-        await output.FlushAsync();
-    }
-
-    /// <summary>
     /// Encrypts a string and returns base64-encoded result.
     /// Useful for encrypting file paths and metadata.
     /// </summary>
@@ -369,6 +304,15 @@ public class EncryptionService : IDisposable
         var encrypted = Convert.FromBase64String(encryptedBase64);
         var decrypted = Decrypt(encrypted);
         return Encoding.UTF8.GetString(decrypted);
+    }
+
+    /// <summary>
+    /// Writes CRC32 checksum directly into destination span, avoiding a heap allocation.
+    /// </summary>
+    private static void WriteChecksum(ReadOnlySpan<byte> data, Span<byte> destination)
+    {
+        var crc = System.IO.Hashing.Crc32.HashToUInt32(data);
+        BitConverter.TryWriteBytes(destination, crc);
     }
 
     /// <summary>

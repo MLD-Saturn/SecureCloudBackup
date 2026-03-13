@@ -591,7 +591,9 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     /// <summary>
-    /// Uploads a generic blob (not encrypted, for system data like index backups).
+    /// Uploads a generic blob to storage. SECURITY: This method does NOT encrypt data.
+    /// Callers MUST encrypt data before calling this method to maintain zero-knowledge.
+    /// Currently only used by ChunkIndexService which encrypts before calling.
     /// </summary>
     public async Task UploadBlobAsync(string blobName, byte[] data, StorageTier storageTier = StorageTier.Hot,
         CancellationToken cancellationToken = default)
@@ -619,7 +621,9 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     /// <summary>
-    /// Downloads a generic blob (not encrypted).
+    /// Downloads a generic blob from storage. SECURITY: This method does NOT decrypt data.
+    /// Callers MUST decrypt data after calling this method.
+    /// Currently only used by ChunkIndexService which decrypts after calling.
     /// </summary>
     public async Task<byte[]> DownloadBlobAsync(string blobName, CancellationToken cancellationToken = default)
     {

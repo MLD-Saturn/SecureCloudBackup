@@ -887,12 +887,13 @@ public class BackupOrchestrator : IAsyncDisposable
                 var uploadTasks = chunksToUpload.Select(async chunk =>
                 {
                     await semaphore.WaitAsync(cancellationToken);
+                    var chunkData = Array.Empty<byte>();
                     try
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        
-                        var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
-                        
+
+                        chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
+
                         // Use direct upload for new files (skip existence check)
                         // Use regular upload for modified files (check for unchanged chunks)
                         chunk.BlobName = isNewFile
@@ -919,6 +920,7 @@ public class BackupOrchestrator : IAsyncDisposable
                     }
                     finally
                     {
+                        CryptographicOperations.ZeroMemory(chunkData);
                         semaphore.Release();
                     }
                 }).ToList();
@@ -933,23 +935,29 @@ public class BackupOrchestrator : IAsyncDisposable
                     cancellationToken.ThrowIfCancellationRequested();
 
                     var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
-                    
-                    // Use direct upload for new files (skip existence check)
-                    chunk.BlobName = isNewFile
-                        ? await _blobService.UploadChunkDirectAsync(chunkData, chunk.Hash, storageTier,
-                            new Progress<long>(b => 
-                            {
-                                bytesUploaded += b;
-                                progress?.Report((bytesUploaded, totalFileSize));
-                            }), 
-                            cancellationToken)
-                        : await _blobService.UploadChunkAsync(chunkData, chunk.Hash, storageTier,
-                            new Progress<long>(b => 
-                            {
-                                bytesUploaded += b;
-                                progress?.Report((bytesUploaded, totalFileSize));
-                            }), 
-                            cancellationToken);
+                    try
+                    {
+                        // Use direct upload for new files (skip existence check)
+                        chunk.BlobName = isNewFile
+                            ? await _blobService.UploadChunkDirectAsync(chunkData, chunk.Hash, storageTier,
+                                new Progress<long>(b => 
+                                {
+                                    bytesUploaded += b;
+                                    progress?.Report((bytesUploaded, totalFileSize));
+                                }), 
+                                cancellationToken)
+                            : await _blobService.UploadChunkAsync(chunkData, chunk.Hash, storageTier,
+                                new Progress<long>(b => 
+                                {
+                                    bytesUploaded += b;
+                                    progress?.Report((bytesUploaded, totalFileSize));
+                                }), 
+                                cancellationToken);
+                    }
+                    finally
+                    {
+                        CryptographicOperations.ZeroMemory(chunkData);
+                    }
                 }
             }
 

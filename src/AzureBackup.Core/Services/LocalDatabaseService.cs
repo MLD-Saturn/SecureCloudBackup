@@ -601,13 +601,17 @@ public class LocalDatabaseService : IDisposable
     public Dictionary<BackupStatus, int> GetFileStatusCounts()
     {
         EnsureInitialized();
-        
+
         lock (_dbLock)
         {
-            return _filesCollection!
-                .FindAll()
-                .GroupBy(x => x.Status)
-                .ToDictionary(g => g.Key, g => g.Count());
+            Dictionary<BackupStatus, int> counts = new();
+            foreach (var status in Enum.GetValues<BackupStatus>())
+            {
+                var count = _filesCollection!.Count(x => x.Status == status);
+                if (count > 0)
+                    counts[status] = count;
+            }
+            return counts;
         }
     }
 
@@ -631,10 +635,13 @@ public class LocalDatabaseService : IDisposable
     public long GetTotalBackedUpSize()
     {
         EnsureInitialized();
-        
+
         lock (_dbLock)
         {
-            return _filesCollection!.FindAll().Sum(x => x.FileSize);
+            return _filesCollection!.Query()
+                .Select(x => x.FileSize)
+                .ToEnumerable()
+                .Sum();
         }
     }
 
