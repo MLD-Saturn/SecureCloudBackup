@@ -247,7 +247,10 @@ public class EncryptionService : IDisposable
         // Minimum: magic(4) + version(1) + nonce(12) + tag(16) + checksum(4) = 37 bytes (empty plaintext)
         var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
         if (encryptedData.Length < minLength)
+        {
+            Log($"Decrypt: Data too short ({encryptedData.Length} bytes, min={minLength})");
             throw new CryptographicException("Encrypted data is too short or corrupted");
+        }
 
         // Verify checksum first
         var dataWithoutChecksum = encryptedData[..^ChecksumSize];
@@ -255,17 +258,26 @@ public class EncryptionService : IDisposable
         var computedChecksum = ComputeChecksum(dataWithoutChecksum);
         
         if (!storedChecksum.SequenceEqual(computedChecksum))
+        {
+            Log($"Decrypt: CRC32 checksum mismatch (data length={encryptedData.Length})");
             throw new DataIntegrityException("Data integrity check failed - file may be corrupted");
+        }
 
         // Verify magic header
         var magic = dataWithoutChecksum[..MagicHeader.Length];
         if (!magic.SequenceEqual(MagicHeader))
+        {
+            Log($"Decrypt: Invalid magic header (got {Convert.ToHexString(magic)}, expected {Convert.ToHexString(MagicHeader)})");
             throw new DataIntegrityException("Invalid data format - not encrypted by this application");
+        }
 
         // Check version
         var version = dataWithoutChecksum[MagicHeader.Length];
         if (version > CurrentFormatVersion)
+        {
+            Log($"Decrypt: Unsupported format version {version} (max={CurrentFormatVersion})");
             throw new DataIntegrityException($"Unsupported encryption format version {version}. Please update the application.");
+        }
 
         byte[] keyCopy;
         lock (_keyLock)
@@ -294,8 +306,9 @@ public class EncryptionService : IDisposable
 
             return plaintext;
         }
-        catch (CryptographicException)
+        catch (CryptographicException ex)
         {
+            Log($"Decrypt: AES-GCM decryption failed (data length={encryptedData.Length}): {ex.Message}");
             throw new DataIntegrityException("Decryption failed - wrong password or corrupted data");
         }
         finally

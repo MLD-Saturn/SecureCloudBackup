@@ -122,6 +122,8 @@ public partial class MainWindowViewModel
             return;
         }
 
+        Program.Logger?.Log("RestoreSelectedTreeFilesAsync: Starting tree view restore");
+
         // Get selected files from tree
         var selectedFiles = FileTreeRoots
             .SelectMany(r => r.GetSelectedFiles())
@@ -134,23 +136,22 @@ public partial class MainWindowViewModel
         }
 
         // Build list of (file, target path) pairs
-        // If RestoreToOriginalLocation is true, use original paths
-        // Otherwise use the effective restore path (with any custom remapping)
         var filesWithPaths = selectedFiles
             .Where(f => f.File != null)
             .Select(f => (
                 file: f.File!, 
                 targetPath: RestoreToOriginalLocation 
-                    ? f.File!.LocalPath  // Original location
+                    ? f.File!.LocalPath
                     : (!string.IsNullOrWhiteSpace(RestoreDirectory) 
                         ? Path.Combine(RestoreDirectory, Path.GetFileName(f.File!.LocalPath))
                         : f.EffectiveRestorePath)))
             .ToList();
 
+        Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: {filesWithPaths.Count} files, totalBytes={filesWithPaths.Sum(f => f.file.FileSize)}");
+
         // Generate preview to check for overwrites
         var preview = _restoreService.PreviewRestoreWithRemapping(filesWithPaths);
 
-        // Only show dialog if there are overwrites
         if (preview.HasDestructiveActions)
         {
             var confirmed = await ShowPreviewDialogAsync(preview);
@@ -171,14 +172,13 @@ public partial class MainWindowViewModel
             StartProgressTracking("Restoring", filesWithPaths.Count, totalBytes);
 
             AddLog($"Restoring {filesWithPaths.Count} files with path remapping...");
+            Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Calling RestoreFilesWithRemappingAsync");
 
-            // File-level progress (which file we're on)
             Progress<(int current, int total, string file)> fileProgress = new(p =>
             {
-                // This is handled by the byte-level progress now
+                // Handled by byte-level progress
             });
             
-            // Byte-level progress for individual files
             Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
             {
                 var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
@@ -193,10 +193,17 @@ public partial class MainWindowViewModel
                 _operationCts!.Token);
 
             AddLog($"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+            Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Complete - {result.SuccessfulFiles.Count} OK, {result.FailedFiles.Count} failed");
         }
         catch (OperationCanceledException)
         {
             AddLog("Restore cancelled");
+            Program.Logger?.Log("RestoreSelectedTreeFilesAsync: Cancelled by user");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Restore failed: {ex.Message}");
+            Program.Logger?.LogException(ex, "RestoreSelectedTreeFilesAsync");
         }
         finally
         {

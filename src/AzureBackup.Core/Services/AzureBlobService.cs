@@ -441,11 +441,31 @@ public partial class AzureBlobService : IBlobStorageService
             var encryptedData = stream.ToArray();
             TotalOperations++;
             
-            return _encryptionService.Decrypt(encryptedData);
+            Log($"DownloadChunkAsync: Downloaded {blobName} ({encryptedData.Length} bytes encrypted), decrypting...");
+            try
+            {
+                return _encryptionService.Decrypt(encryptedData);
+            }
+            catch (Exception ex)
+            {
+                Log($"DownloadChunkAsync: DECRYPT FAILED for {blobName}: {ex.GetType().Name}: {ex.Message}");
+                throw;
+            }
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
+            Log($"DownloadChunkAsync: Chunk not found (404): {blobName}");
             throw new DataIntegrityException($"Chunk not found: {blobName}", blobName, ex);
+        }
+        catch (RequestFailedException ex)
+        {
+            Log($"DownloadChunkAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            throw;
+        }
+        catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
+        {
+            Log($"DownloadChunkAsync: EXCEPTION for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
     }
 

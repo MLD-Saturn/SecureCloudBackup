@@ -275,6 +275,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     [ObservableProperty]
     private string _estimatedTimeRemaining = string.Empty;
 
+    // Track current file index for display (0-based internally, shown as 1-based)
+    private int _currentFileIndex;
+
     /// <summary>
     /// Formatted string showing bytes processed vs total.
     /// </summary>
@@ -284,9 +287,10 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// Formatted string showing files processed vs total.
+    /// Shows "X of Y files" where X is the current file being processed (1-based).
     /// </summary>
     public string FilesProgressText => TotalFilesInOperation > 0
-        ? $"{CompletedFilesCount} of {TotalFilesInOperation} files"
+        ? $"{Math.Max(CompletedFilesCount, _currentFileIndex + 1)} of {TotalFilesInOperation} files"
         : string.Empty;
 
     private static string FormatBytesStatic(long bytes)
@@ -608,6 +612,22 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _restoreService.DiagnosticLog += OnDiagnosticLog;
         _fileWatcherService.DiagnosticLog += OnDiagnosticLog;
         
+        // Wire up crash-safe file logger for all service diagnostic events
+        if (Program.Logger != null)
+        {
+            _orchestrator.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            _blobService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            _databaseService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            _encryptionService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            _restoreService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            _fileWatcherService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            
+            _restoreService.ErrorOccurred += (s, msg) => Program.Logger.Log($"[ERROR] {msg}");
+            _orchestrator.ErrorOccurred += (s, msg) => Program.Logger.Log($"[ERROR] {msg}");
+            
+            Program.Logger.Log($"Services initialized, log file: {Program.Logger.LogFilePath}");
+        }
+        
         AddLog("Application started - diagnostic logging enabled");
 
         // Check database state for returning vs new user
@@ -703,16 +723,16 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         ContainerName = config.ContainerName ?? "backup";
         
-        // Update WatchedFolders collection on UI thread
+        // Update WatchedFolders collection directly
+        // LoadConfiguration is called from UI thread (auth commands), so direct update is safe
         var folders = config.WatchedFolders;
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        WatchedFolders.Clear();
+        foreach (var folder in folders)
         {
-            WatchedFolders.Clear();
-            foreach (var folder in folders)
-            {
-                WatchedFolders.Add(new WatchedFolderViewModel(folder));
-            }
-        });
+            WatchedFolders.Add(new WatchedFolderViewModel(folder));
+        }
+        OnPropertyChanged(nameof(FilteredLocalFiles));
+        OnPropertyChanged(nameof(LocalFilesSummary));
 
         RefreshStatistics();
     }
@@ -789,6 +809,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             CurrentFileProgressText = string.Empty;
             OperationSpeed = string.Empty;
             EstimatedTimeRemaining = string.Empty;
+            _currentFileIndex = 0;
             
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));
@@ -806,15 +827,21 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             CurrentFileProgress = fileSize > 0 ? (double)bytesProcessed / fileSize * 100 : 0;
             CurrentFileProgressText = $"{FormatBytesStatic(bytesProcessed)} / {FormatBytesStatic(fileSize)}";
             
-            // Update overall progress
+            // Update overall progress based on total bytes transferred
             TotalBytesProcessed = _lastBytesProcessed + bytesProcessed;
             ProgressValue = TotalBytesToProcess > 0 
                 ? (double)TotalBytesProcessed / TotalBytesToProcess * 100 
-                : (double)(fileIndex + 1) / TotalFilesInOperation * 100;
+                : 0;
+            
+            // Update files progress to show current file being processed (1-indexed)
+            // CompletedFilesCount shows files fully completed, but we also want to show
+            // that we're working on file fileIndex+1
+            _currentFileIndex = fileIndex;
             
             ProgressText = $"{CurrentOperationType}: {fileName} ({fileIndex + 1}/{TotalFilesInOperation})";
             
             OnPropertyChanged(nameof(BytesProgressText));
+            OnPropertyChanged(nameof(FilesProgressText));
             
             // Update speed and ETA periodically
             UpdateSpeedAndEta();
@@ -833,6 +860,11 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             TotalBytesProcessed = _lastBytesProcessed;
             CurrentFileProgress = 100;
             
+            // Update progress value based on bytes
+            ProgressValue = TotalBytesToProcess > 0 
+                ? (double)TotalBytesProcessed / TotalBytesToProcess * 100 
+                : 0;
+            
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));
         });
@@ -840,6 +872,8 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// Updates speed calculation and estimated time remaining.
+    /// Speed = Total bytes transferred / Total elapsed time
+    /// ETA = Remaining bytes / Speed
     /// </summary>
     private void UpdateSpeedAndEta()
     {
@@ -891,6 +925,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             TotalBytesToProcess = 0;
             OperationSpeed = string.Empty;
             EstimatedTimeRemaining = string.Empty;
+            _currentFileIndex = 0;
             
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));

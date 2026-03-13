@@ -388,6 +388,9 @@ public partial class MainWindowViewModel
                         AddLog("Please configure your Azure connection string in Settings.");
                     }
                 }
+                
+                // Refresh local files (watched folders)
+                await RefreshLocalFilesAsync();
             }
             else
             {
@@ -637,6 +640,9 @@ public partial class MainWindowViewModel
                     AddLog("Unlocked! Enter your connection string and click 'Save & Connect'.");
                 }
             }
+            
+            // Always refresh local files (watched folders) regardless of Azure connection
+            await RefreshLocalFilesAsync();
         }
         catch (AzureBackup.Core.SecurityPolicyException ex)
         {

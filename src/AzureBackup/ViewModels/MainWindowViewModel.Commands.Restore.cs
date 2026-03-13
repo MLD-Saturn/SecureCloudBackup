@@ -247,12 +247,13 @@ public partial class MainWindowViewModel
             return;
         }
 
+        Program.Logger?.Log($"RestoreSelectedFilesAsync: Starting restore of {filesToRestore.Count} files to '{RestoreDirectory}'");
+
         IsOperationInProgress = true;
         CreateOperationCts();
 
         try
         {
-            // Calculate total size for progress tracking
             var totalBytes = filesToRestore.Sum(f => f.Model.FileSize);
             StartProgressTracking("Restoring", filesToRestore.Count, totalBytes);
             
@@ -268,12 +269,12 @@ public partial class MainWindowViewModel
                 var fileSize = file.Model.FileSize;
                 
                 UpdateFileProgress(fileName, 0, fileSize, i);
+                Program.Logger?.Log($"RestoreSelectedFilesAsync: [{i + 1}/{filesToRestore.Count}] '{fileName}' ({fileSize} bytes)");
 
                 try
                 {
                     var targetPath = Path.Combine(RestoreDirectory, fileName);
                     
-                    // Create progress reporter for individual file
                     Progress<(long current, long total)> fileProgress = new(p =>
                     {
                         UpdateFileProgress(fileName, p.current, p.total, i);
@@ -290,20 +291,29 @@ public partial class MainWindowViewModel
                     else
                     {
                         failCount++;
+                        Program.Logger?.Log($"RestoreSelectedFilesAsync: [{i + 1}] '{fileName}' returned false");
                     }
                 }
                 catch (Exception ex)
                 {
                     AddLog($"Failed to restore {fileName}: {ex.Message}");
+                    Program.Logger?.LogException(ex, $"RestoreSelectedFilesAsync file '{fileName}'");
                     failCount++;
                 }
             }
 
             AddLog($"Restore complete: {successCount} succeeded, {failCount} failed");
+            Program.Logger?.Log($"RestoreSelectedFilesAsync: Complete - {successCount} OK, {failCount} failed");
         }
         catch (OperationCanceledException)
         {
             AddLog("Restore cancelled");
+            Program.Logger?.Log("RestoreSelectedFilesAsync: Cancelled");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Restore failed: {ex.Message}");
+            Program.Logger?.LogException(ex, "RestoreSelectedFilesAsync outer");
         }
         finally
         {
