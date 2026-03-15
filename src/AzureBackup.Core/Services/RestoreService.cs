@@ -947,6 +947,13 @@ public class RestoreService
                     continue;
                 }
 
+                // Preserve corrupted recovery files — these were created by AttemptCorruptedRecoveryAsync
+                // and should not be deleted by the mirror cleanup phase
+                if (normalizedLocalFile.Contains($"{Path.DirectorySeparatorChar}__corrupted__{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 if (!expectedLocalFiles.Contains(localFile))
                 {
                     try
