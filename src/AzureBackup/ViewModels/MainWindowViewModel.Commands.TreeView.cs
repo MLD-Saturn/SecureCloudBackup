@@ -178,9 +178,21 @@ public partial class MainWindowViewModel
             {
                 // Handled by byte-level progress
             });
-            
+
+            var lastFileIndex = -1;
             Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
             {
+                // When we move to a new file, mark the previous one as complete
+                // so _lastBytesProcessed accumulates correctly
+                if (p.fileIndex != lastFileIndex)
+                {
+                    if (lastFileIndex >= 0)
+                    {
+                        CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
+                    }
+                    lastFileIndex = p.fileIndex;
+                }
+
                 var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
                 UpdateFileProgress(fileName, p.bytesCompleted, p.fileSize, p.fileIndex);
             });
@@ -191,6 +203,12 @@ public partial class MainWindowViewModel
                 fileProgress,
                 byteProgress,
                 _operationCts!.Token);
+
+            // Mark the last file as complete so cumulative bytes are fully accurate
+            if (lastFileIndex >= 0)
+            {
+                CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
+            }
 
             AddLog($"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
             Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Complete - {result.SuccessfulFiles.Count} OK, {result.FailedFiles.Count} failed");

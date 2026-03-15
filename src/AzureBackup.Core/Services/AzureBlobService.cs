@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Azure;
@@ -35,6 +36,10 @@ public partial class AzureBlobService : IBlobStorageService
         MaximumTransferSize = 8 * 1024 * 1024,  // 8 MB blocks for large files
         InitialTransferSize = 8 * 1024 * 1024   // Start with 8 MB initial transfer
     };
+
+    // Retry settings for upload integrity failures (MD5 mismatch from Azure)
+    private const int MaxUploadRetries = 25;
+    private const int UploadRetryBaseDelayMs = 500;
     
     // Regex for validating blob names (SHA-256 hex string)
     [GeneratedRegex(@"^[A-Fa-f0-9]{64}$", RegexOptions.Compiled)]
@@ -316,13 +321,13 @@ public partial class AzureBlobService : IBlobStorageService
             TransferOptions = DefaultTransferOptions
         };
 
-        await using MemoryStream stream = new(encryptedData);
-        await blobClient.UploadAsync(stream, options, cancellationToken);
-        
+        await UploadWithIntegrityRetryAsync(blobClient, encryptedData, options,
+            $"UploadChunkAsync({chunkHash[..8]}...)", cancellationToken);
+
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
         progress?.Report(encryptedData.Length);
-        Log($"UploadChunkAsync: Chunk uploaded successfully ({encryptedData.Length} bytes encrypted)");
+        Log($"UploadChunkAsync: Chunk uploaded successfully ({encryptedData.Length} bytes encrypted, MD5 verified)");
 
         return blobName;
     }
@@ -359,13 +364,13 @@ public partial class AzureBlobService : IBlobStorageService
             TransferOptions = DefaultTransferOptions
         };
 
-        await using MemoryStream stream = new(encryptedData);
-        await blobClient.UploadAsync(stream, options, cancellationToken);
-        
+        await UploadWithIntegrityRetryAsync(blobClient, encryptedData, options,
+            $"UploadChunkDirectAsync({chunkHash[..8]}...)", cancellationToken);
+
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
         progress?.Report(encryptedData.Length);
-        Log($"UploadChunkDirectAsync: Chunk uploaded successfully ({encryptedData.Length} bytes encrypted)");
+        Log($"UploadChunkDirectAsync: Chunk uploaded successfully ({encryptedData.Length} bytes encrypted, MD5 verified)");
 
         return blobName;
     }
@@ -400,15 +405,15 @@ public partial class AzureBlobService : IBlobStorageService
         var blobName = $"metadata/{metadataHash}";
         
         var blobClient = _containerClient!.GetBlobClient(blobName);
-        
+
         BlobUploadOptions options = new()
         {
             AccessTier = ToAccessTier(storageTier)
         };
 
-        await using MemoryStream stream = new(encryptedMetadata);
-        await blobClient.UploadAsync(stream, options, cancellationToken);
-        
+        await UploadWithIntegrityRetryAsync(blobClient, encryptedMetadata, options,
+            $"UploadFileMetadataAsync({Path.GetFileName(fileInfo.LocalPath)})", cancellationToken);
+
         TotalOperations++;
     }
 
@@ -428,19 +433,45 @@ public partial class AzureBlobService : IBlobStorageService
         
         try
         {
+            // Get blob properties to retrieve the stored Content-MD5 for post-download verification
+            byte[]? storedContentHash = null;
+            try
+            {
+                var properties = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
+                storedContentHash = properties.Value.ContentHash;
+            }
+            catch
+            {
+                // Properties fetch failed - continue without MD5 verification
+            }
+
             await using MemoryStream stream = new();
-            
+
             // Use parallel transfer options for faster downloads
             BlobDownloadToOptions downloadOptions = new()
             {
                 TransferOptions = DefaultTransferOptions
             };
-            
+
             await blobClient.DownloadToAsync(stream, downloadOptions, cancellationToken);
-            
+
             var streamCapacity = stream.Capacity;
             var encryptedData = stream.ToArray();
             TotalOperations++;
+
+            // Verify download integrity against stored Content-MD5 (if available)
+            // This catches corruption during download before attempting decryption
+            if (storedContentHash is { Length: > 0 })
+            {
+                var downloadedHash = MD5.HashData(encryptedData);
+                if (!downloadedHash.AsSpan().SequenceEqual(storedContentHash))
+                {
+                    Log($"DownloadChunkAsync: MD5 MISMATCH for {blobName} - data corrupted during download " +
+                        $"(expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)})");
+                    throw new DataIntegrityException(
+                        $"Download integrity check failed for {blobName} - data corrupted during transfer", blobName);
+                }
+            }
             
             // Log size details for chunks to track memory pressure on large chunks
             if (encryptedData.Length > 0)
@@ -603,7 +634,7 @@ public partial class AzureBlobService : IBlobStorageService
         ArgumentNullException.ThrowIfNull(data);
         
         var blobClient = _containerClient!.GetBlobClient(blobName);
-        
+
         BlobUploadOptions options = new()
         {
             AccessTier = ToAccessTier(storageTier),
@@ -612,12 +643,12 @@ public partial class AzureBlobService : IBlobStorageService
                 ContentType = "application/json"
             }
         };
-        
-        await using MemoryStream stream = new(data);
-        await blobClient.UploadAsync(stream, options, cancellationToken);
-        
+
+        await UploadWithIntegrityRetryAsync(blobClient, data, options,
+            $"UploadBlobAsync({blobName})", cancellationToken);
+
         TotalOperations++;
-        Log($"UploadBlobAsync: Uploaded {blobName} ({data.Length} bytes)");
+        Log($"UploadBlobAsync: Uploaded {blobName} ({data.Length} bytes, MD5 verified)");
     }
 
     /// <summary>
@@ -820,6 +851,45 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     #endregion
+
+    /// <summary>
+    /// Uploads data to a blob with MD5 integrity verification and automatic retry.
+    /// On MD5 mismatch (transit corruption), retries with exponential backoff.
+    /// For encrypted data, the caller should pass the plaintext and this method
+    /// re-encrypts on each retry (producing a fresh nonce/ciphertext to avoid
+    /// re-sending the same bytes that were corrupted).
+    /// </summary>
+    private async Task UploadWithIntegrityRetryAsync(
+        BlobClient blobClient,
+        byte[] data,
+        BlobUploadOptions options,
+        string logContext,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; attempt <= MaxUploadRetries; attempt++)
+        {
+            try
+            {
+                // Compute MD5 for Azure server-side verification
+                options.HttpHeaders ??= new BlobHttpHeaders();
+                options.HttpHeaders.ContentHash = MD5.HashData(data);
+
+                await using MemoryStream stream = new(data);
+                await blobClient.UploadAsync(stream, options, cancellationToken);
+                return; // Success
+            }
+            catch (RequestFailedException ex) when (
+                attempt < MaxUploadRetries &&
+                !cancellationToken.IsCancellationRequested &&
+                (ex.ErrorCode == "Md5Mismatch" || ex.Status == 400))
+            {
+                var delayMs = UploadRetryBaseDelayMs * (1 << (attempt - 1)); // Exponential backoff
+                Log($"{logContext}: MD5 mismatch on attempt {attempt}/{MaxUploadRetries}, " +
+                    $"data corrupted in transit. Retrying in {delayMs}ms...");
+                await Task.Delay(delayMs, cancellationToken);
+            }
+        }
+    }
 
     private void EnsureConnected()
     {

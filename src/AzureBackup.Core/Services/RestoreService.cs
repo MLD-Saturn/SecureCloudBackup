@@ -434,30 +434,30 @@ public class RestoreService
         // Producer task: Download chunks in parallel and write to channel
         var producerTask = Task.Run(async () =>
         {
+            var semaphore = new SemaphoreSlim(MaxParallelChunkDownloads);
+            var downloadTasks = new List<Task>();
             try
             {
                 Log("BoundedParallelDownload.Producer: Starting download tasks");
-                using SemaphoreSlim semaphore = new(MaxParallelChunkDownloads);
-                var downloadTasks = new List<Task>();
-                
+
                 foreach (var chunk in sortedChunks)
                 {
                     linkedCts.Token.ThrowIfCancellationRequested();
-                    
+
                     await semaphore.WaitAsync(linkedCts.Token);
-                    
+
                     var downloadTask = Task.Run(async () =>
                     {
                         try
                         {
                             linkedCts.Token.ThrowIfCancellationRequested();
-                            
+
                             var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, linkedCts.Token);
-                            
+
                             VerifyChunkIntegrity(chunkData, chunk, file.LocalPath);
-                            
+
                             await channel.Writer.WriteAsync((chunk.Index, chunkData), linkedCts.Token);
-                            
+
                             var count = Interlocked.Increment(ref chunksDownloaded);
                             if (count % 50 == 0 || count == sortedChunks.Count)
                             {
@@ -486,18 +486,8 @@ public class RestoreService
                             semaphore.Release();
                         }
                     }, linkedCts.Token);
-                    
+
                     downloadTasks.Add(downloadTask);
-                }
-                
-                try
-                {
-                    await Task.WhenAll(downloadTasks);
-                    Log("BoundedParallelDownload.Producer: All downloads completed");
-                }
-                catch (OperationCanceledException) when (downloadException != null)
-                {
-                    Log($"BoundedParallelDownload.Producer: Downloads cancelled due to error: {downloadException.Message}");
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -507,6 +497,24 @@ public class RestoreService
             }
             finally
             {
+                // Always await in-flight download tasks before disposing the semaphore.
+                // Without this, cancelled tasks that call semaphore.Release() in their
+                // finally block race against disposal, causing ObjectDisposedException.
+                try
+                {
+                    if (downloadTasks.Count > 0)
+                    {
+                        await Task.WhenAll(downloadTasks);
+                    }
+                    Log("BoundedParallelDownload.Producer: All downloads completed");
+                }
+                catch (Exception ex)
+                {
+                    Log($"BoundedParallelDownload.Producer: Downloads finished with error: {ex.GetType().Name}: {ex.Message}");
+                    downloadException ??= ex;
+                }
+
+                semaphore.Dispose();
                 channel.Writer.Complete(downloadException);
                 Log("BoundedParallelDownload.Producer: Channel writer completed");
             }
