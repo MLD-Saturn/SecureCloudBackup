@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -181,50 +182,14 @@ public partial class MainWindowViewModel
 
         try
         {
-            var totalBytes = filesWithPaths.Sum(f => f.file.FileSize);
-            StartProgressTracking("Restoring", filesWithPaths.Count, totalBytes);
-
             AddLog($"Restoring {filesWithPaths.Count} files with path remapping...");
             Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Calling RestoreFilesWithRemappingAsync");
 
-            Progress<(int current, int total, string file)> fileProgress = new(p =>
-            {
-                // Handled by byte-level progress
-            });
+            var result = await ExecuteRestoreWithRemappingAsync(filesWithPaths, _operationCts!.Token);
 
-            var lastFileIndex = -1;
-            Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
-            {
-                // When we move to a new file, mark the previous one as complete
-                // so _lastBytesProcessed accumulates correctly
-                if (p.fileIndex != lastFileIndex)
-                {
-                    if (lastFileIndex >= 0)
-                    {
-                        CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
-                    }
-                    lastFileIndex = p.fileIndex;
-                }
-
-                var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
-                UpdateFileProgress(fileName, p.bytesCompleted, p.fileSize, p.fileIndex);
-            });
-
-            var result = await _restoreService.RestoreFilesWithRemappingAsync(
-                filesWithPaths, 
-                overwriteExisting: true,
-                fileProgress,
-                byteProgress,
-                _operationCts!.Token);
-
-            // Mark the last file as complete so cumulative bytes are fully accurate
-            if (lastFileIndex >= 0)
-            {
-                CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
-            }
-
-            AddLog($"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
-            Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Complete - {result.SuccessfulFiles.Count} OK, {result.FailedFiles.Count} failed");
+            LogRestoreResult(result);
+            Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: Complete - {result.SuccessfulFiles.Count} OK, " +
+                $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed");
         }
         catch (OperationCanceledException)
         {
@@ -339,6 +304,11 @@ public partial class MainWindowViewModel
             AddLog($"Mirror sync complete: {result.FilesTransferred} restored, {result.FilesDeleted} deleted, " +
                    $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
 
+            if (result.FilesCorruptedRecovered > 0)
+            {
+                AddLog($"  {result.FilesCorruptedRecovered} file(s) recovered to __corrupted__ subfolder");
+            }
+
             foreach (var error in result.Errors.Take(5))
             {
                 AddLog($"  Error: {error}");
@@ -364,6 +334,76 @@ public partial class MainWindowViewModel
             ProgressText = string.Empty;
         }
     }
+
+    #region Restore Helpers
+
+    /// <summary>
+    /// Executes a batch restore with standard progress tracking.
+    /// Uses RestoreFilesWithRemappingAsync for corrupted recovery support.
+    /// </summary>
+    private async Task<AzureBackup.Core.Services.RestoreResult> ExecuteRestoreWithRemappingAsync(
+        List<(BackedUpFile file, string targetPath)> filesWithPaths,
+        CancellationToken cancellationToken)
+    {
+        var totalBytes = filesWithPaths.Sum(f => f.file.FileSize);
+        StartProgressTracking("Restoring", filesWithPaths.Count, totalBytes);
+
+        Progress<(int current, int total, string file)> fileProgress = new(p =>
+        {
+            // File-level progress handled by byte-level reporter below
+        });
+
+        var lastFileIndex = -1;
+        Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
+        {
+            if (p.fileIndex != lastFileIndex)
+            {
+                if (lastFileIndex >= 0)
+                {
+                    CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
+                }
+                lastFileIndex = p.fileIndex;
+            }
+
+            var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
+            UpdateFileProgress(fileName, p.bytesCompleted, p.fileSize, p.fileIndex);
+        });
+
+        var result = await _restoreService.RestoreFilesWithRemappingAsync(
+            filesWithPaths,
+            overwriteExisting: true,
+            fileProgress,
+            byteProgress,
+            cancellationToken);
+
+        // Mark the last file as complete so cumulative bytes are fully accurate
+        if (lastFileIndex >= 0)
+        {
+            CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Logs a restore result with corrupted recovery details.
+    /// </summary>
+    private void LogRestoreResult(AzureBackup.Core.Services.RestoreResult result)
+    {
+        AddLog($"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+
+        if (result.CorruptedRecoveryFiles.Count > 0)
+        {
+            AddLog($"  {result.CorruptedRecoveryFiles.Count} file(s) recovered to __corrupted__ subfolder:");
+            foreach (var (originalPath, recoveredPath, badChunks) in result.CorruptedRecoveryFiles)
+            {
+                var detail = badChunks > 0 ? $"{badChunks} chunk(s) zero-filled" : "data intact";
+                AddLog($"    {Path.GetFileName(originalPath)} → {recoveredPath} ({detail})");
+            }
+        }
+    }
+
+    #endregion
 
     /// <summary>
     /// Builds the file tree from the flat restorable files list.

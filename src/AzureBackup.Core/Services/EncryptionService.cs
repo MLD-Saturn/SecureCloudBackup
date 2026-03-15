@@ -284,6 +284,78 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
+    /// Attempts best-effort decryption, skipping the CRC32 integrity check.
+    /// Use this for corrupted file recovery — if the CRC trailer bytes were corrupted
+    /// but the ciphertext and AES-GCM tag are intact, decryption will succeed.
+    /// Returns null if decryption is completely impossible (AES-GCM tag mismatch).
+    /// </summary>
+    public byte[]? DecryptBestEffort(ReadOnlySpan<byte> encryptedData)
+    {
+        var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
+        if (encryptedData.Length < minLength)
+        {
+            Log($"DecryptBestEffort: Data too short ({encryptedData.Length} bytes, min={minLength})");
+            return null;
+        }
+
+        // Strip checksum but do NOT verify it
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+
+        // Verify magic header (if this is wrong, data is not ours at all)
+        var magic = dataWithoutChecksum[..MagicHeader.Length];
+        if (!magic.SequenceEqual(MagicHeader))
+        {
+            Log($"DecryptBestEffort: Invalid magic header");
+            return null;
+        }
+
+        var version = dataWithoutChecksum[MagicHeader.Length];
+        if (version > CurrentFormatVersion)
+        {
+            Log($"DecryptBestEffort: Unsupported format version {version}");
+            return null;
+        }
+
+        byte[] keyCopy;
+        lock (_keyLock)
+        {
+            EnsureInitialized();
+            keyCopy = new byte[KeySize];
+            Array.Copy(_derivedKey!, keyCopy, KeySize);
+        }
+
+        try
+        {
+            var offset = MagicHeader.Length + 1;
+            var nonce = dataWithoutChecksum.Slice(offset, NonceSize);
+            offset += NonceSize;
+
+            var ciphertextLength = dataWithoutChecksum.Length - MagicHeader.Length - 1 - NonceSize - TagSize;
+            var ciphertext = dataWithoutChecksum.Slice(offset, ciphertextLength);
+            offset += ciphertextLength;
+
+            var tag = dataWithoutChecksum.Slice(offset, TagSize);
+
+            byte[] plaintext = new byte[ciphertextLength];
+
+            using AesGcm aes = new(keyCopy, TagSize);
+            aes.Decrypt(nonce, ciphertext, tag, plaintext);
+
+            Log($"DecryptBestEffort: Decrypted {ciphertextLength} bytes (CRC invalid but AES-GCM tag OK)");
+            return plaintext;
+        }
+        catch (CryptographicException ex)
+        {
+            Log($"DecryptBestEffort: AES-GCM also failed, data unrecoverable: {ex.Message}");
+            return null;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyCopy);
+        }
+    }
+
+    /// <summary>
     /// Encrypts a string and returns base64-encoded result.
     /// Useful for encrypting file paths and metadata.
     /// </summary>

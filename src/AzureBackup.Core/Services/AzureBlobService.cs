@@ -518,6 +518,56 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     /// <summary>
+    /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.
+    /// Returns null for chunks that are completely unrecoverable.
+    /// Used for corrupted file recovery to __corrupted__ subfolder.
+    /// </summary>
+    public async Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+
+        try
+        {
+            await using MemoryStream stream = new();
+            BlobDownloadToOptions downloadOptions = new()
+            {
+                TransferOptions = DefaultTransferOptions
+            };
+
+            await blobClient.DownloadToAsync(stream, downloadOptions, cancellationToken);
+            var encryptedData = stream.ToArray();
+            TotalOperations++;
+
+            var decrypted = _encryptionService.DecryptBestEffort(encryptedData);
+            if (decrypted != null)
+            {
+                Log($"DownloadChunkBestEffortAsync: Recovered {blobName} ({encryptedData.Length:N0} -> {decrypted.Length:N0} bytes)");
+            }
+            else
+            {
+                Log($"DownloadChunkBestEffortAsync: {blobName} is unrecoverable (AES-GCM tag mismatch)");
+            }
+            return decrypted;
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            Log($"DownloadChunkBestEffortAsync: Chunk not found: {blobName}");
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Log($"DownloadChunkBestEffortAsync: Failed for {blobName}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Lists all backed up files by retrieving metadata blobs.
     /// </summary>
     public async Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default)

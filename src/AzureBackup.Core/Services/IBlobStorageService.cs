@@ -116,6 +116,13 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.
+    /// Returns null for chunks that are completely unrecoverable (AES-GCM tag mismatch).
+    /// Used for corrupted file recovery.
+    /// </summary>
+    Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Lists all backed up files by retrieving metadata blobs.
     /// </summary>
     Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default);

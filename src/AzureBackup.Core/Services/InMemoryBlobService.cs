@@ -255,6 +255,27 @@ public partial class InMemoryBlobService : IBlobStorageService
         return _encryptionService.Decrypt(encryptedData);
     }
 
+    /// <summary>
+    /// Downloads a chunk with best-effort decryption (skips CRC32 check).
+    /// Returns null for unrecoverable chunks.
+    /// </summary>
+    public virtual async Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+
+        await SimulateLatencyAsync(cancellationToken);
+
+        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+            return null;
+
+        TotalOperations++;
+        return _encryptionService.DecryptBestEffort(encryptedData);
+    }
+
     public Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default)
     {
         EnsureConnected();

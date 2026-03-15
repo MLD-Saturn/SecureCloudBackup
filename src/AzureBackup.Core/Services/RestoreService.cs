@@ -671,7 +671,7 @@ public class RestoreService
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentException.ThrowIfNullOrWhiteSpace(restoreDirectory);
-        
+
         RestoreResult result = new();
         var fileList = files.ToList();
 
@@ -687,7 +687,6 @@ public class RestoreService
             string targetPath;
             if (preserveFolderStructure)
             {
-                // Find common root and preserve structure
                 var relativePath = GetRelativePath(fileList.Select(f => f.LocalPath).ToList(), file.LocalPath);
                 targetPath = Path.Combine(restoreDirectory, relativePath);
             }
@@ -696,21 +695,13 @@ public class RestoreService
                 targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
             }
 
-            var success = await RestoreFileAsync(file, targetPath, overwriteExisting, 
-                cancellationToken: cancellationToken);
-
-            if (success)
-            {
-                result.SuccessfulFiles.Add(file.LocalPath);
-                result.TotalBytesRestored += file.FileSize;
-            }
-            else
-            {
-                result.FailedFiles.Add(file.LocalPath);
-            }
+            var logPrefix = $"RestoreFilesAsync: [{i + 1}/{fileList.Count}]";
+            var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
+                file, targetPath, overwriteExisting, fileProgress: null, logPrefix, cancellationToken);
+            ApplyRestoreOutcome(result, outcome, file, targetPath, recoveredPath, unrecoverableChunks);
         }
 
-        StatusChanged?.Invoke(this, $"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
         return result;
     }
 
@@ -903,19 +894,27 @@ public class RestoreService
 
                 // File is missing or outdated - restore it
                 progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
-                var success = await RestoreFileAsync(backupFile, targetPath, overwriteExisting: true, 
-                    cancellationToken: cancellationToken);
 
-                if (success)
+                var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
+                var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
+                    backupFile, targetPath, overwriteExisting: true, fileProgress: null, logPrefix, cancellationToken);
+
+                switch (outcome)
                 {
-                    result.FilesTransferred++;
-                    result.BytesTransferred += backupFile.FileSize;
-                    Log($"MirrorSyncToLocalAsync: Restored {Path.GetFileName(targetPath)}");
-                }
-                else
-                {
-                    result.FilesErrored++;
-                    result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
+                    case FileRestoreOutcome.Success:
+                        result.FilesTransferred++;
+                        result.BytesTransferred += backupFile.FileSize;
+                        break;
+                    case FileRestoreOutcome.CorruptedRecovery:
+                        result.FilesCorruptedRecovered++;
+                        result.BytesTransferred += backupFile.FileSize;
+                        if (recoveredPath != null)
+                            result.CorruptedRecoveryPaths.Add(recoveredPath);
+                        break;
+                    case FileRestoreOutcome.Failed:
+                        result.FilesErrored++;
+                        result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
+                        break;
                 }
             }
             catch (Exception ex)
@@ -972,12 +971,20 @@ public class RestoreService
             Log($"MirrorSyncToLocalAsync: Error during delete phase: {ex.Message}");
         }
 
-        StatusChanged?.Invoke(this, 
-            $"Mirror sync complete: {result.FilesTransferred} restored, {result.FilesDeleted} deleted, " +
-            $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
-        
-        Log($"MirrorSyncToLocalAsync: Complete - {result.FilesTransferred} transferred, " +
-            $"{result.FilesDeleted} deleted, {result.FilesUnchanged} unchanged");
+        var summaryParts = new List<string>
+        {
+            $"{result.FilesTransferred} restored",
+            $"{result.FilesDeleted} deleted",
+            $"{result.FilesUnchanged} unchanged"
+        };
+        if (result.FilesCorruptedRecovered > 0)
+            summaryParts.Add($"{result.FilesCorruptedRecovered} recovered to __corrupted__");
+        if (result.FilesErrored > 0)
+            summaryParts.Add($"{result.FilesErrored} errors");
+
+        var summaryText = $"Mirror sync complete: {string.Join(", ", summaryParts)}";
+        StatusChanged?.Invoke(this, summaryText);
+        Log($"MirrorSyncToLocalAsync: {summaryText}");
 
         return result;
     }
@@ -1021,6 +1028,212 @@ public class RestoreService
                     // Ignore errors when cleaning up directories
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Result of a single file restore attempt with corrupted recovery support.
+    /// </summary>
+    private enum FileRestoreOutcome
+    {
+        Success,
+        Failed,
+        CorruptedRecovery
+    }
+
+    /// <summary>
+    /// Restores a single file with full exception handling and corrupted recovery.
+    /// This is the shared logic used by all batch restore methods to ensure consistent behavior.
+    /// </summary>
+    /// <returns>Outcome, recovered path (if corrupted recovery), and unrecoverable chunk count.</returns>
+    private async Task<(FileRestoreOutcome outcome, string? recoveredPath, int unrecoverableChunks)> RestoreFileWithRecoveryAsync(
+        BackedUpFile file,
+        string targetPath,
+        bool overwriteExisting,
+        IProgress<(long current, long total)>? fileProgress,
+        string logPrefix,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var success = await RestoreFileAsync(file, targetPath, overwriteExisting,
+                fileProgress, cancellationToken);
+
+            if (success)
+            {
+                Log($"{logPrefix} OK");
+                return (FileRestoreOutcome.Success, null, 0);
+            }
+
+            Log($"{logPrefix} FAILED (returned false)");
+            return (FileRestoreOutcome.Failed, null, 0);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (DataIntegrityException ex)
+        {
+            Log($"{logPrefix} INTEGRITY FAILURE: {ex.Message}");
+            ErrorOccurred?.Invoke(this, $"Integrity error restoring {file.LocalPath}: {ex.Message}");
+
+            Log($"{logPrefix} Attempting corrupted recovery");
+            StatusChanged?.Invoke(this, $"Attempting corrupted recovery: {Path.GetFileName(file.LocalPath)}");
+
+            var recovery = await AttemptCorruptedRecoveryAsync(file, targetPath, cancellationToken);
+            if (recovery.HasValue)
+            {
+                var (recoveredPath, unrecoverableChunks) = recovery.Value;
+                var status = unrecoverableChunks > 0
+                    ? $"Recovered with {unrecoverableChunks} zero-filled chunk(s)"
+                    : "Recovered (CRC mismatch only, data intact)";
+                Log($"{logPrefix} RECOVERED to {recoveredPath} — {status}");
+                ErrorOccurred?.Invoke(this, $"Corrupted recovery: {file.LocalPath} → {recoveredPath} ({status})");
+                return (FileRestoreOutcome.CorruptedRecovery, recoveredPath, unrecoverableChunks);
+            }
+
+            Log($"{logPrefix} RECOVERY FAILED");
+            ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: integrity error and recovery failed");
+            return (FileRestoreOutcome.Failed, null, 0);
+        }
+        catch (Exception ex)
+        {
+            Log($"{logPrefix} EXCEPTION: {ex.GetType().Name}: {ex.Message}");
+            ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
+            return (FileRestoreOutcome.Failed, null, 0);
+        }
+    }
+
+    /// <summary>
+    /// Applies a single file restore outcome to a RestoreResult.
+    /// </summary>
+    private static void ApplyRestoreOutcome(
+        RestoreResult result,
+        FileRestoreOutcome outcome,
+        BackedUpFile file,
+        string targetPath,
+        string? recoveredPath,
+        int unrecoverableChunks)
+    {
+        switch (outcome)
+        {
+            case FileRestoreOutcome.Success:
+                result.SuccessfulFiles.Add(targetPath);
+                result.TotalBytesRestored += file.FileSize;
+                break;
+            case FileRestoreOutcome.CorruptedRecovery:
+                result.CorruptedRecoveryFiles.Add((file.LocalPath, recoveredPath!, unrecoverableChunks));
+                result.TotalBytesRestored += file.FileSize;
+                break;
+            case FileRestoreOutcome.Failed:
+                result.FailedFiles.Add(file.LocalPath);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Builds a summary status message from a RestoreResult.
+    /// </summary>
+    private static string BuildRestoreStatusMessage(RestoreResult result)
+    {
+        var parts = new List<string> { $"{result.SuccessfulFiles.Count} succeeded" };
+        if (result.CorruptedRecoveryFiles.Count > 0)
+            parts.Add($"{result.CorruptedRecoveryFiles.Count} recovered to __corrupted__");
+        if (result.FailedFiles.Count > 0)
+            parts.Add($"{result.FailedFiles.Count} failed");
+        return $"Restore complete: {string.Join(", ", parts)}";
+    }
+
+    /// <summary>
+    /// Attempts to recover a file with corrupted chunks to a __corrupted__ subfolder.
+    /// Downloads each chunk individually with best-effort decryption (skips CRC32 check).
+    /// Chunks that are completely unrecoverable (AES-GCM tag mismatch) are zero-filled
+    /// so the rest of the file remains usable (e.g., video files will play with brief glitches).
+    /// </summary>
+    /// <returns>
+    /// (recoveredPath, unrecoverableChunkCount) if recovery produced a file, or null if recovery failed entirely.
+    /// </returns>
+    private async Task<(string recoveredPath, int unrecoverableChunks)?> AttemptCorruptedRecoveryAsync(
+        BackedUpFile file,
+        string originalTargetPath,
+        CancellationToken cancellationToken)
+    {
+        var dir = Path.GetDirectoryName(originalTargetPath) ?? string.Empty;
+        var corruptedDir = Path.Combine(dir, "__corrupted__");
+        var corruptedPath = Path.Combine(corruptedDir, Path.GetFileName(originalTargetPath));
+
+        Log($"AttemptCorruptedRecoveryAsync: Recovering '{Path.GetFileName(file.LocalPath)}' to {corruptedPath}");
+        StatusChanged?.Invoke(this, $"Attempting corrupted recovery: {Path.GetFileName(file.LocalPath)}");
+
+        try
+        {
+            Directory.CreateDirectory(corruptedDir);
+
+            var sortedChunks = file.Chunks.OrderBy(c => c.Index).ToList();
+            var unrecoverableChunks = 0;
+            var recoveredChunks = 0;
+
+            // Shared zero buffer for efficient zero-fill (max 1 MB, reused across chunks)
+            var zeroBuffer = new byte[Math.Min(1024 * 1024, sortedChunks.Max(c => c.Length))];
+
+            await using FileStream outputStream = new(corruptedPath, FileMode.Create, FileAccess.Write,
+                FileShare.None, bufferSize: 81920, useAsync: true);
+
+            foreach (var chunk in sortedChunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var chunkData = await _blobService.DownloadChunkBestEffortAsync(chunk.BlobName, cancellationToken);
+
+                if (chunkData != null)
+                {
+                    await outputStream.WriteAsync(chunkData, cancellationToken);
+                    recoveredChunks++;
+                }
+                else
+                {
+                    // Zero-fill in blocks using shared buffer to avoid large allocations
+                    var remaining = chunk.Length;
+                    while (remaining > 0)
+                    {
+                        var writeSize = Math.Min(remaining, zeroBuffer.Length);
+                        await outputStream.WriteAsync(zeroBuffer.AsMemory(0, writeSize), cancellationToken);
+                        remaining -= writeSize;
+                    }
+                    unrecoverableChunks++;
+                    Log($"AttemptCorruptedRecoveryAsync: Chunk {chunk.Index} UNRECOVERABLE, zero-filled ({chunk.Length} bytes)");
+                }
+
+                // Early bailout: if no chunks have been recovered so far and we've tried several,
+                // the data is likely entirely unrecoverable (e.g., wrong key scenario)
+                var totalAttempted = recoveredChunks + unrecoverableChunks;
+                if (recoveredChunks == 0 && totalAttempted >= 3)
+                {
+                    Log($"AttemptCorruptedRecoveryAsync: Aborting — first {totalAttempted} chunks all unrecoverable");
+                    try { await outputStream.DisposeAsync(); } catch { /* closing stream */ }
+                    try { File.Delete(corruptedPath); } catch { /* best effort */ }
+                    return null;
+                }
+            }
+
+            Log($"AttemptCorruptedRecoveryAsync: Recovery complete — " +
+                $"{recoveredChunks}/{sortedChunks.Count} chunks recovered, " +
+                $"saved to {corruptedPath}");
+
+            return (corruptedPath, unrecoverableChunks);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Log($"AttemptCorruptedRecoveryAsync: Recovery failed entirely: {ex.Message}");
+
+            // Clean up partial file
+            try { File.Delete(corruptedPath); } catch { /* best effort */ }
+
+            return null;
         }
     }
 
@@ -1082,38 +1295,16 @@ public class RestoreService
                     fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
                 : null;
 
-            try
-            {
-                var success = await RestoreFileAsync(file, normalizedPath, overwriteExisting, 
-                    individualFileProgress, cancellationToken);
-
-                if (success)
-                {
-                    result.SuccessfulFiles.Add(normalizedPath);
-                    result.TotalBytesRestored += file.FileSize;
-                    Log($"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}] OK");
-                }
-                else
-                {
-                    result.FailedFiles.Add(file.LocalPath);
-                    Log($"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}] FAILED (returned false)");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                Log($"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}] EXCEPTION: {ex.GetType().Name}: {ex.Message}");
-                Log($"RestoreFilesWithRemappingAsync: StackTrace: {ex.StackTrace}");
-                result.FailedFiles.Add(file.LocalPath);
-                ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
-            }
+            var logPrefix = $"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}]";
+            var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
+                file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, cancellationToken);
+            ApplyRestoreOutcome(result, outcome, file, normalizedPath, recoveredPath, unrecoverableChunks);
         }
 
-        Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed, {result.TotalBytesRestored} bytes");
-        StatusChanged?.Invoke(this, $"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
+        Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, " +
+            $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed, " +
+            $"{result.TotalBytesRestored} bytes");
+        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
         return result;
     }
 
@@ -1332,8 +1523,15 @@ public class RestoreResult
 {
     public List<string> SuccessfulFiles { get; set; } = [];
     public List<string> FailedFiles { get; set; } = [];
+
+    /// <summary>
+    /// Files that failed normal restore but were partially recovered to a __corrupted__ subfolder.
+    /// Each entry is (originalPath, corruptedPath, unrecoverableChunkCount).
+    /// </summary>
+    public List<(string OriginalPath, string RecoveredPath, int UnrecoverableChunks)> CorruptedRecoveryFiles { get; set; } = [];
+
     public long TotalBytesRestored { get; set; }
 
-    public int TotalFilesProcessed => SuccessfulFiles.Count + FailedFiles.Count;
-    public bool IsSuccess => FailedFiles.Count == 0;
+    public int TotalFilesProcessed => SuccessfulFiles.Count + FailedFiles.Count + CorruptedRecoveryFiles.Count;
+    public bool IsSuccess => FailedFiles.Count == 0 && CorruptedRecoveryFiles.Count == 0;
 }

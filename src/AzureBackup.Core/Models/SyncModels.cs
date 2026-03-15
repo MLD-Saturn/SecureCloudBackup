@@ -40,21 +40,27 @@ public class MirrorSyncResult
 {
     /// <summary>Files that were restored/backed up.</summary>
     public int FilesTransferred { get; set; }
-    
+
     /// <summary>Files that were deleted to match the source.</summary>
     public int FilesDeleted { get; set; }
-    
+
     /// <summary>Files that were unchanged.</summary>
     public int FilesUnchanged { get; set; }
-    
+
     /// <summary>Files that had errors.</summary>
     public int FilesErrored { get; set; }
-    
+
+    /// <summary>Files that were recovered to a __corrupted__ subfolder due to integrity errors.</summary>
+    public int FilesCorruptedRecovered { get; set; }
+
     /// <summary>Total bytes transferred.</summary>
     public long BytesTransferred { get; set; }
-    
+
     /// <summary>Error messages for failed files.</summary>
     public List<string> Errors { get; set; } = [];
+
+    /// <summary>Paths of files recovered to __corrupted__ subfolders.</summary>
+    public List<string> CorruptedRecoveryPaths { get; set; } = [];
 }
 
 /// <summary>

@@ -272,7 +272,7 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
-    /// Called by the View after files are selected for backup.
+    /// Called by the View after files are selected for backup via file picker.
     /// </summary>
     public async Task BackupSelectedFilesAsync(string[] filePaths)
     {
@@ -284,83 +284,26 @@ public partial class MainWindowViewModel
 
         if (filePaths.Length == 0) return;
 
+        AddLog($"Preparing to backup {filePaths.Length} file(s)...");
         IsOperationInProgress = true;
         _operationCts = new CancellationTokenSource();
 
         try
         {
-            // Calculate total size for progress tracking
-            long totalBytes = 0;
-            foreach (var path in filePaths)
-            {
-                try
-                {
-                    FileInfo info = new(path);
-                    if (info.Exists) totalBytes += info.Length;
-                }
-                catch { /* Skip inaccessible files */ }
-            }
+            var result = await ConfirmAndFilterBackupFilesAsync(filePaths.ToList(), _operationCts.Token);
+            if (result is null) return;
 
-            StartProgressTracking("Backing up", filePaths.Length, totalBytes);
-            
-            var successCount = 0;
-            var failCount = 0;
+            await ExecuteBackupAsync(result.Value.files, result.Value.preview, _operationCts.Token);
 
-            for (var i = 0; i < filePaths.Length; i++)
-            {
-                _operationCts.Token.ThrowIfCancellationRequested();
-                
-                var file = filePaths[i];
-                var fileName = Path.GetFileName(file);
-                long fileSize = 0;
-                
-                try
-                {
-                    FileInfo info = new(file);
-                    if (info.Exists) fileSize = info.Length;
-                }
-                catch { /* Proceed with 0 size */ }
-
-                UpdateFileProgress(fileName, 0, fileSize, i);
-
-                try
-                {
-                    // Create progress reporter for byte-level progress
-                    var fileIndex = i;
-                    var currentFileSize = fileSize;
-                    Progress<(long current, long total)> fileProgress = new(p =>
-                    {
-                        UpdateFileProgress(fileName, p.current, currentFileSize, fileIndex);
-                    });
-                    
-                    var success = await _orchestrator.BackupFileAsync(file, fileProgress, _operationCts.Token);
-                    if (success)
-                    {
-                        successCount++;
-                        CompleteFileProgress(fileSize);
-                    }
-                    else
-                    {
-                        failCount++;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    AddLog($"Failed to backup {fileName}: {ex.Message}");
-                    failCount++;
-                }
-            }
-
-            AddLog($"Backup complete: {successCount} succeeded, {failCount} failed");
             RefreshStatistics();
-            RefreshBackedUpFiles();
-            
-            // Refresh Azure file list after backup
-            await RefreshFromAzureAsync();
         }
         catch (OperationCanceledException)
         {
             AddLog("Backup cancelled");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Backup failed: {ex.Message}");
         }
         finally
         {
@@ -369,60 +312,100 @@ public partial class MainWindowViewModel
         }
     }
 
+    #endregion
+
+    #region Backup Helpers
+
     /// <summary>
-    /// Backs up a list of specific files (used by drag-drop).
-    /// Shows a preview dialog and validates against actual Azure state.
+    /// Shows a backup preview dialog and filters out files the user excluded.
+    /// Returns the filtered file list and the preview, or null if cancelled/no changes.
     /// </summary>
-    public async Task BackupSpecificFilesAsync(IEnumerable<string> filePaths)
+    private async Task<(List<string> files, OperationPreview preview)?> ConfirmAndFilterBackupFilesAsync(
+        List<string> filePaths,
+        CancellationToken cancellationToken)
     {
-        if (!IsInitialized)
+        var preview = await _orchestrator.PreviewBackupFilesAsync(filePaths, cancellationToken);
+
+        IsOperationInProgress = false;
+
+        if (!preview.HasChanges)
         {
-            AddLog("Please initialize first");
-            return;
+            AddLog("All selected files are already backed up - no changes needed");
+            return null;
         }
 
-        var fileList = filePaths.ToList();
-        if (fileList.Count == 0) return;
-
-        // Get Azure file paths for validation (to detect stale local DB records)
-        HashSet<string>? azureFilePaths = null;
-        if (RestorableFiles.Count > 0)
-        {
-            azureFilePaths = new HashSet<string>(
-                RestorableFiles.Select(f => f.Model.LocalPath),
-                StringComparer.OrdinalIgnoreCase);
-        }
-
-        // Generate preview with Azure validation
-        var preview = await _orchestrator.PreviewBackupFilesAsync(fileList, azureFilePaths);
-
-        // Determine default storage tier from watched folder (use first file's folder)
-        var firstFolder = GetWatchedFolderForFile(fileList[0]);
-        preview.DefaultStorageTier = firstFolder?.StorageTier ?? Core.Models.StorageTier.Hot;
-
-        // Show preview dialog
         var confirmed = await ShowPreviewDialogAsync(preview);
-
         if (!confirmed)
         {
             AddLog("Backup cancelled by user");
-            return;
+            return null;
         }
 
-        // Perform backup with selected tier (TODO: Pass tier to orchestrator)
-        AddLog($"Backing up {fileList.Count} file(s) to {preview.EffectiveStorageTier} tier...");
-        await BackupSelectedFilesAsync(fileList.ToArray());
+        // Remove files the user excluded in the preview dialog
+        var excluded = preview.ExcludedFilePaths;
+        if (excluded.Count > 0)
+        {
+            filePaths = filePaths
+                .Where(f => !excluded.Contains(f))
+                .ToList();
+        }
+
+        if (filePaths.Count == 0)
+        {
+            AddLog("All files were excluded - nothing to backup");
+            return null;
+        }
+
+        return (filePaths, preview);
     }
 
     /// <summary>
-    /// Gets the WatchedFolder that contains the specified file path.
+    /// Executes a batch backup with standard progress tracking.
+    /// Uses the same StartProgressTracking/UpdateFileProgress/CompleteFileProgress
+    /// pattern as restore operations for consistent UI behavior.
     /// </summary>
-    private WatchedFolder? GetWatchedFolderForFile(string filePath)
+    private async Task ExecuteBackupAsync(
+        List<string> filePaths,
+        OperationPreview preview,
+        CancellationToken cancellationToken)
     {
-        return WatchedFolders
-            .Where(f => f.IsEnabled)
-            .Select(f => f.ToModel())
-            .FirstOrDefault(f => filePath.StartsWith(f.Path, StringComparison.OrdinalIgnoreCase));
+        var totalFiles = preview.IncludedCreateCount + preview.IncludedOverwriteCount;
+        StartProgressTracking("Backing up", totalFiles, preview.TotalBytesToTransfer);
+
+        var lastFileIndex = -1;
+        long lastFileSize = 0;
+
+        Progress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)> progress = new(p =>
+        {
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                // Detect file transitions — when fileIndex advances, the previous file is complete
+                if (p.fileIndex != lastFileIndex)
+                {
+                    if (lastFileIndex >= 0)
+                    {
+                        CompleteFileProgress(lastFileSize);
+                    }
+                    lastFileIndex = p.fileIndex;
+                }
+                lastFileSize = p.currentFileSize;
+
+                UpdateFileProgress(p.fileName, p.currentFileBytes, p.currentFileSize, p.fileIndex);
+            });
+        });
+
+        await _orchestrator.BackupFilesAsync(filePaths, progress, cancellationToken);
+
+        // Finalize the last file's progress
+        if (lastFileIndex >= 0)
+        {
+            CompleteFileProgress(lastFileSize);
+        }
+
+        AddLog($"Successfully backed up {totalFiles} file(s)");
+
+        await RefreshLocalFilesAsync();
+        await RefreshRestorableFilesAsync();
     }
 
     #endregion
