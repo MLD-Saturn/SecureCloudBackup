@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
 using Avalonia.Threading;
@@ -116,7 +117,7 @@ public partial class StorageHealthViewModel : ViewModelBase
 
     public int SelectedOrphanCount => OrphanedChunks.Count(o => o.IsSelected);
 
-    public string SelectedOrphanSize => FormatBytes(OrphanedChunks.Where(o => o.IsSelected).Sum(o => o.SizeBytes));
+    public string SelectedOrphanSize => FormatHelper.FormatBytes(OrphanedChunks.Where(o => o.IsSelected).Sum(o => o.SizeBytes));
 
     #endregion
 
@@ -135,11 +136,11 @@ public partial class StorageHealthViewModel : ViewModelBase
         var summary = _chunkIndexService.GetIndexSummary();
 
         TotalChunks = summary.TotalChunks;
-        TotalSize = FormatBytes(summary.TotalSizeBytes);
+        TotalSize = FormatHelper.FormatBytes(summary.TotalSizeBytes);
         OrphanCount = summary.OrphanCount;
-        OrphanSize = FormatBytes(summary.OrphanSizeBytes);
+        OrphanSize = FormatHelper.FormatBytes(summary.OrphanSizeBytes);
         SharedChunks = summary.SharedChunks;
-        DeduplicationSavings = FormatBytes(summary.DeduplicationSavingsBytes);
+        DeduplicationSavings = FormatHelper.FormatBytes(summary.DeduplicationSavingsBytes);
 
         LastRebuildTime = summary.LastFullRebuildAt?.ToString("g") ?? "Never";
         LastAzureSyncTime = summary.LastAzureSyncAt?.ToString("g") ?? "Never";
@@ -148,21 +149,21 @@ public partial class StorageHealthViewModel : ViewModelBase
         if (summary.TierBreakdown.TryGetValue(StorageTier.Hot, out var hot))
         {
             HotTierChunks = hot.ChunkCount;
-            HotTierSize = FormatBytes(hot.TotalSizeBytes);
+            HotTierSize = FormatHelper.FormatBytes(hot.TotalSizeBytes);
             HotTierCost = $"${hot.EstimatedMonthlyCost:F4}/mo";
         }
 
         if (summary.TierBreakdown.TryGetValue(StorageTier.Cool, out var cool))
         {
             CoolTierChunks = cool.ChunkCount;
-            CoolTierSize = FormatBytes(cool.TotalSizeBytes);
+            CoolTierSize = FormatHelper.FormatBytes(cool.TotalSizeBytes);
             CoolTierCost = $"${cool.EstimatedMonthlyCost:F4}/mo";
         }
 
         if (summary.TierBreakdown.TryGetValue(StorageTier.Cold, out var cold))
         {
             ColdTierChunks = cold.ChunkCount;
-            ColdTierSize = FormatBytes(cold.TotalSizeBytes);
+            ColdTierSize = FormatHelper.FormatBytes(cold.TotalSizeBytes);
             ColdTierCost = $"${cold.EstimatedMonthlyCost:F4}/mo";
         }
 
@@ -215,10 +216,10 @@ public partial class StorageHealthViewModel : ViewModelBase
                 LastScanTime = result.ScannedAt.ToString("g");
                 ScanDuration = $"{result.ScanDuration.TotalSeconds:F1}s";
                 OrphanCount = result.OrphanedChunks.Count;
-                OrphanSize = FormatBytes(result.TotalOrphanSizeBytes);
+                OrphanSize = FormatHelper.FormatBytes(result.TotalOrphanSizeBytes);
                 OrphanCost = $"${result.EstimatedMonthlyCost:F4}/mo";
 
-                StatusMessage = $"Scan complete: {result.OrphanedChunks.Count} orphans found ({FormatBytes(result.TotalOrphanSizeBytes)})";
+                StatusMessage = $"Scan complete: {result.OrphanedChunks.Count} orphans found ({FormatHelper.FormatBytes(result.TotalOrphanSizeBytes)})";
                 OnPropertyChanged(nameof(HasOrphans));
             });
         }
@@ -283,7 +284,7 @@ public partial class StorageHealthViewModel : ViewModelBase
 
             RefreshSummary();
 
-            StatusMessage = $"Cleanup complete: {result.ChunksDeleted} deleted, {FormatBytes(result.BytesFreed)} freed";
+            StatusMessage = $"Cleanup complete: {result.ChunksDeleted} deleted, {FormatHelper.FormatBytes(result.BytesFreed)} freed";
             
             if (result.FailedDeletions > 0)
             {
@@ -428,19 +429,6 @@ public partial class StorageHealthViewModel : ViewModelBase
 
     #region Helpers
 
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
-    }
-
     private static decimal GetTierPricing(StorageTier tier) => tier switch
     {
         StorageTier.Hot => 0.018m,
@@ -465,7 +453,7 @@ public partial class OrphanChunkViewModel : ObservableObject
     public string ChunkHash => Entry.ChunkHash;
     public string ShortHash => Entry.ChunkHash.Length > 12 ? Entry.ChunkHash[..12] + "..." : Entry.ChunkHash;
     public long SizeBytes => Entry.SizeBytes;
-    public string Size => FormatBytes(Entry.SizeBytes);
+    public string Size => FormatHelper.FormatBytes(Entry.SizeBytes);
     public string Tier => Entry.CurrentTier.ToString();
     public string FirstUploaded => Entry.FirstUploadedAt.ToString("g");
     public string OriginalFile => string.IsNullOrEmpty(Entry.OriginalUploaderPath) 
@@ -475,18 +463,5 @@ public partial class OrphanChunkViewModel : ObservableObject
     public OrphanChunkViewModel(ChunkIndexEntry entry)
     {
         Entry = entry ?? throw new ArgumentNullException(nameof(entry));
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 }

@@ -1194,21 +1194,8 @@ public class BackupStatistics
     public long TotalBytesUploaded { get; set; }
     public decimal EstimatedMonthlyCost { get; set; }
 
-    public string TotalSizeFormatted => FormatBytes(TotalSize);
-    public string TotalBytesUploadedFormatted => FormatBytes(TotalBytesUploaded);
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
-    }
+    public string TotalSizeFormatted => FormatHelper.FormatBytes(TotalSize);
+    public string TotalBytesUploadedFormatted => FormatHelper.FormatBytes(TotalBytesUploaded);
 }
 
 /// <summary>

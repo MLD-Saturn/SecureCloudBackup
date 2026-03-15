@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using AzureBackup.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
 
@@ -77,36 +78,59 @@ public partial class OperationPreviewViewModel : ObservableObject
     public bool HasDestructiveActions => _preview.HasDestructiveActions;
 
     /// <summary>
-    /// Summary text for the operation.
+    /// Summary text for the operation (reflects included files only).
     /// </summary>
     public string Summary
     {
         get
         {
             System.Collections.Generic.List<string> parts = new();
-            
-            if (_preview.CreateCount > 0)
-                parts.Add($"{_preview.CreateCount} new");
-            if (_preview.OverwriteCount > 0)
-                parts.Add($"{_preview.OverwriteCount} overwrite");
-            if (_preview.DeleteCount > 0)
-                parts.Add($"{_preview.DeleteCount} delete");
-            if (_preview.SkipCount > 0)
-                parts.Add($"{_preview.SkipCount} unchanged");
+
+            var createCount = _preview.IncludedCreateCount;
+            var overwriteCount = _preview.IncludedOverwriteCount;
+            var deleteCount = _preview.IncludedDeleteCount;
+            var skipCount = _preview.SkipCount;
+
+            if (createCount > 0)
+                parts.Add($"{createCount} new");
+            if (overwriteCount > 0)
+                parts.Add($"{overwriteCount} overwrite");
+            if (deleteCount > 0)
+                parts.Add($"{deleteCount} delete");
+            if (skipCount > 0)
+                parts.Add($"{skipCount} unchanged");
 
             return parts.Count > 0 ? string.Join(", ", parts) : "No changes";
         }
     }
 
     /// <summary>
-    /// Total bytes to transfer formatted.
+    /// Total bytes to transfer formatted (included files only).
     /// </summary>
-    public string TransferSize => FormatBytes(_preview.TotalBytesToTransfer);
+    public string TransferSize => AzureBackup.Core.FormatHelper.FormatBytes(_preview.TotalBytesToTransfer);
 
     /// <summary>
-    /// Total bytes to delete formatted.
+    /// Total bytes to delete formatted (included files only).
     /// </summary>
-    public string DeleteSize => FormatBytes(_preview.TotalBytesToDelete);
+    public string DeleteSize => AzureBackup.Core.FormatHelper.FormatBytes(_preview.TotalBytesToDelete);
+
+    /// <summary>
+    /// Included create count for display in section headers.
+    /// </summary>
+    public string IncludedCreateText => 
+        $"({_preview.IncludedCreateCount}/{_preview.CreateCount})";
+
+    /// <summary>
+    /// Included overwrite count for display in section headers.
+    /// </summary>
+    public string IncludedOverwriteText => 
+        $"({_preview.IncludedOverwriteCount}/{_preview.OverwriteCount})";
+
+    /// <summary>
+    /// Included delete count for display in section headers.
+    /// </summary>
+    public string IncludedDeleteText => 
+        $"({_preview.IncludedDeleteCount}/{_preview.DeleteCount})";
 
     /// <summary>
     /// Files to create.
@@ -149,9 +173,12 @@ public partial class OperationPreviewViewModel : ObservableObject
     public bool ShowSkipSection => _preview.SkipCount > 0;
 
     /// <summary>
-    /// Whether the confirm button should be enabled.
+    /// Whether the confirm button should be enabled (at least one file included).
     /// </summary>
-    public bool CanConfirm => _preview.HasChanges;
+    public bool CanConfirm => 
+        _preview.IncludedCreateCount > 0 || 
+        _preview.IncludedOverwriteCount > 0 || 
+        _preview.IncludedDeleteCount > 0;
 
     /// <summary>
     /// Text for the confirm button.
@@ -214,23 +241,57 @@ public partial class OperationPreviewViewModel : ObservableObject
     {
         _preview = preview;
         _selectedStorageTier = preview.EffectiveStorageTier;
-        
+
         FilesToCreate = new ObservableCollection<PreviewFileAction>(preview.FilesToCreate);
         FilesToOverwrite = new ObservableCollection<PreviewFileAction>(preview.FilesToOverwrite);
         FilesToDelete = new ObservableCollection<PreviewFileAction>(preview.FilesToDelete);
         FilesToSkip = new ObservableCollection<PreviewFileAction>(preview.FilesToSkip.Take(100)); // Limit skipped files shown
     }
 
-    private static string FormatBytes(long bytes)
+    /// <summary>
+    /// Called when any file's IsIncluded state changes.
+    /// Refreshes all computed properties that depend on inclusion state.
+    /// </summary>
+    public void RefreshInclusionState()
     {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
+        OnPropertyChanged(nameof(Summary));
+        OnPropertyChanged(nameof(TransferSize));
+        OnPropertyChanged(nameof(DeleteSize));
+        OnPropertyChanged(nameof(CanConfirm));
+        OnPropertyChanged(nameof(IncludedCreateText));
+        OnPropertyChanged(nameof(IncludedOverwriteText));
+        OnPropertyChanged(nameof(IncludedDeleteText));
     }
+
+    /// <summary>
+    /// Includes all files in a section.
+    /// </summary>
+    [RelayCommand]
+    private void IncludeAllInSection(string section)
+    {
+        var items = GetSectionItems(section);
+        foreach (var item in items)
+            item.IsIncluded = true;
+        RefreshInclusionState();
+    }
+
+    /// <summary>
+    /// Excludes all files in a section.
+    /// </summary>
+    [RelayCommand]
+    private void ExcludeAllInSection(string section)
+    {
+        var items = GetSectionItems(section);
+        foreach (var item in items)
+            item.IsIncluded = false;
+        RefreshInclusionState();
+    }
+
+    private ObservableCollection<PreviewFileAction> GetSectionItems(string section) => section switch
+    {
+        "create" => FilesToCreate,
+        "overwrite" => FilesToOverwrite,
+        "delete" => FilesToDelete,
+        _ => FilesToCreate
+    };
 }

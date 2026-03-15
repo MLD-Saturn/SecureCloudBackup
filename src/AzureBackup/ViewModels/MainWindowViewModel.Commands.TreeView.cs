@@ -152,15 +152,28 @@ public partial class MainWindowViewModel
         // Generate preview to check for overwrites
         var preview = _restoreService.PreviewRestoreWithRemapping(filesWithPaths);
 
-        if (preview.HasDestructiveActions)
+        var confirmed = await ShowPreviewDialogAsync(preview);
+
+        if (!confirmed)
         {
-            var confirmed = await ShowPreviewDialogAsync(preview);
-            
-            if (!confirmed)
-            {
-                AddLog("Restore operation cancelled by user");
-                return;
-            }
+            AddLog("Restore operation cancelled by user");
+            return;
+        }
+
+        // Remove files the user excluded in the preview dialog
+        var excluded = preview.ExcludedFilePaths;
+        if (excluded.Count > 0)
+        {
+            filesWithPaths = filesWithPaths
+                .Where(f => !excluded.Contains(f.file.LocalPath))
+                .ToList();
+            Program.Logger?.Log($"RestoreSelectedTreeFilesAsync: {excluded.Count} files excluded by user, {filesWithPaths.Count} remaining");
+        }
+
+        if (filesWithPaths.Count == 0)
+        {
+            AddLog("All files were excluded - nothing to restore");
+            return;
         }
 
         IsOperationInProgress = true;

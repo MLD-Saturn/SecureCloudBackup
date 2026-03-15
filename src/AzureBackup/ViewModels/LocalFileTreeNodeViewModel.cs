@@ -75,7 +75,7 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
     /// <summary>
     /// Human-readable file size.
     /// </summary>
-    public string FileSizeText => IsFile ? FormatBytes(FileSize) : string.Empty;
+    public string FileSizeText => IsFile ? AzureBackup.Core.FormatHelper.FormatBytes(FileSize) : string.Empty;
 
     /// <summary>
     /// Last modified time.
@@ -419,7 +419,7 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
             if (!Directory.Exists(folder.Path)) continue;
 
             LocalFileTreeNodeViewModel rootNode = new(
-                Path.GetFileName(folder.Path.TrimEnd(Path.DirectorySeparatorChar)) ?? folder.Path,
+                GetRootDisplayName(folder.Path),
                 folder.Path,
                 isFolder: true);
 
@@ -429,6 +429,22 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
         }
 
         return roots;
+    }
+
+    /// <summary>
+    /// Gets a display name for a root watched folder path.
+    /// Handles drive roots (e.g. "J:\") where Path.GetFileName returns empty string.
+    /// </summary>
+    private static string GetRootDisplayName(string folderPath)
+    {
+        var trimmed = folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var name = Path.GetFileName(trimmed);
+
+        // Path.GetFileName returns empty for drive roots like "J:" 
+        if (string.IsNullOrEmpty(name))
+            return trimmed + Path.DirectorySeparatorChar; // "J:\"
+
+        return name;
     }
 
     private static void BuildTreeRecursive(
@@ -566,18 +582,5 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
                 return true;
         }
         return false;
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 }

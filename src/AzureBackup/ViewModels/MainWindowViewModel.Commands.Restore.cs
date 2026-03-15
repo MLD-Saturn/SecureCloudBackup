@@ -381,13 +381,27 @@ public partial class MainWindowViewModel
         // Generate preview
         var preview = _restoreService.PreviewDeleteFromAzure(filesToDelete.Select(f => f.Model));
 
-
         // Show preview dialog and get user confirmation
         var confirmed = await ShowPreviewDialogAsync(preview);
-        
+
         if (!confirmed)
         {
             AddLog("Delete operation cancelled by user");
+            return;
+        }
+
+        // Remove files the user excluded in the preview dialog
+        var excluded = preview.ExcludedFilePaths;
+        if (excluded.Count > 0)
+        {
+            filesToDelete = filesToDelete
+                .Where(f => !excluded.Contains(f.Model.LocalPath))
+                .ToList();
+        }
+
+        if (filesToDelete.Count == 0)
+        {
+            AddLog("All files were excluded - nothing to delete");
             return;
         }
 

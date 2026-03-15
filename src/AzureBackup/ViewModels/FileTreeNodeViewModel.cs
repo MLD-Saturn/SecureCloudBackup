@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
 
@@ -157,7 +158,7 @@ public partial class FileTreeNodeViewModel : ObservableObject
         get
         {
             if (!IsFolder)
-                return FormatBytes(_model.File?.FileSize ?? 0);
+                return FormatHelper.FormatBytes(_model.File?.FileSize ?? 0);
 
             var fileCount = _model.FileCount;
             var folderCount = _model.FolderCount;
@@ -168,7 +169,7 @@ public partial class FileTreeNodeViewModel : ObservableObject
                 parts.Add($"{fileCount} file{(fileCount != 1 ? "s" : "")}");
             if (folderCount > 0)
                 parts.Add($"{folderCount} folder{(folderCount != 1 ? "s" : "")}");
-            parts.Add(FormatBytes(totalSize));
+            parts.Add(FormatHelper.FormatBytes(totalSize));
 
             return string.Join(", ", parts);
         }
@@ -177,7 +178,7 @@ public partial class FileTreeNodeViewModel : ObservableObject
     /// <summary>
     /// File size formatted for display.
     /// </summary>
-    public string FileSizeText => IsFile ? FormatBytes(_model.File?.FileSize ?? 0) : string.Empty;
+    public string FileSizeText => IsFile ? FormatHelper.FormatBytes(_model.File?.FileSize ?? 0) : string.Empty;
 
     /// <summary>
     /// Last modified date for files.
@@ -392,19 +393,6 @@ public partial class FileTreeNodeViewModel : ObservableObject
         {
             child.CollapseAll();
         }
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 
     /// <summary>

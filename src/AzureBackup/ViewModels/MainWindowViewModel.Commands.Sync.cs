@@ -305,10 +305,25 @@ public partial class MainWindowViewModel
                 return;
             }
 
+            // Remove files the user excluded in the preview dialog
+            var excluded = preview.ExcludedFilePaths;
+            if (excluded.Count > 0)
+            {
+                selectedFiles = selectedFiles
+                    .Where(f => !excluded.Contains(f.FullPath))
+                    .ToList();
+            }
+
+            if (selectedFiles.Count == 0)
+            {
+                AddLog("All files were excluded - nothing to backup");
+                return;
+            }
+
             // Proceed with backup
             IsOperationInProgress = true;
             CurrentOperationType = "Backing up";
-            TotalFilesInOperation = preview.FilesToCreate.Count + preview.FilesToOverwrite.Count;
+            TotalFilesInOperation = preview.IncludedCreateCount + preview.IncludedOverwriteCount;
             CompletedFilesCount = 0;
             TotalBytesToProcess = preview.TotalBytesToTransfer;
             TotalBytesProcessed = 0;
@@ -331,17 +346,17 @@ public partial class MainWindowViewModel
                     if (p.currentFileSize > 0)
                     {
                         CurrentFileProgress = (double)p.currentFileBytes / p.currentFileSize * 100;
-                        CurrentFileProgressText = $"{FormatBytesStatic(p.currentFileBytes)} / {FormatBytesStatic(p.currentFileSize)}";
+                        CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileBytes)} / {AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileSize)}";
                     }
                     else
                     {
                         CurrentFileProgress = 0;
                         CurrentFileProgressText = string.Empty;
                     }
-                    
+
                     OnPropertyChanged(nameof(FilesProgressText));
                     OnPropertyChanged(nameof(BytesProgressText));
-                    
+
                     // Update speed and ETA
                     UpdateSpeedAndEta();
                 });
@@ -483,9 +498,9 @@ public partial class MainWindowViewModel
                             if (p.currentFileSize > 0)
                             {
                                 CurrentFileProgress = (double)p.currentFileBytes / p.currentFileSize * 100;
-                                CurrentFileProgressText = $"{FormatBytesStatic(p.currentFileBytes)} / {FormatBytesStatic(p.currentFileSize)}";
+                                CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileBytes)} / {AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileSize)}";
                             }
-                            
+
                             OnPropertyChanged(nameof(FilesProgressText));
                             OnPropertyChanged(nameof(BytesProgressText));
                             
@@ -653,25 +668,25 @@ public partial class MainWindowViewModel
                     CompletedFilesCount = p.fileIndex;
                     CurrentFileName = p.fileName;
                     TotalBytesProcessed = p.bytesProcessed;
-                    
+
                     if (p.totalFiles > 0)
                         ProgressValue = (double)p.fileIndex / p.totalFiles * 100;
-                    
+
                     // Current file progress
                     if (p.currentFileSize > 0)
                     {
                         CurrentFileProgress = (double)p.currentFileBytes / p.currentFileSize * 100;
-                        CurrentFileProgressText = $"{FormatBytesStatic(p.currentFileBytes)} / {FormatBytesStatic(p.currentFileSize)}";
+                        CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileBytes)} / {AzureBackup.Core.FormatHelper.FormatBytes(p.currentFileSize)}";
                     }
                     else
                     {
                         CurrentFileProgress = 0;
                         CurrentFileProgressText = string.Empty;
                     }
-                    
+
                     OnPropertyChanged(nameof(FilesProgressText));
                     OnPropertyChanged(nameof(BytesProgressText));
-                    
+
                     // Update speed and ETA
                     UpdateSpeedAndEta();
                 });

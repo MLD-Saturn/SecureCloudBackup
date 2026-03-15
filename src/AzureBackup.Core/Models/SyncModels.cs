@@ -95,7 +95,7 @@ public class SyncProgress
     public double ProgressPercent => TotalBytes > 0 ? (double)BytesTransferred / TotalBytes * 100 : 0;
     
     /// <summary>Human-readable transfer speed.</summary>
-    public string SpeedText => $"{FormatBytes((long)BytesPerSecond)}/s";
+    public string SpeedText => $"{FormatHelper.FormatBytes((long)BytesPerSecond)}/s";
     
     /// <summary>Human-readable time remaining.</summary>
     public string TimeRemainingText
@@ -112,17 +112,4 @@ public class SyncProgress
     
     /// <summary>Current file being processed.</summary>
     public FileTransferProgress? CurrentFile { get; set; }
-    
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
-    }
 }

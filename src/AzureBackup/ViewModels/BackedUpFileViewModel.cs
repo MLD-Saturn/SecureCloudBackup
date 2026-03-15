@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using CommunityToolkit.Mvvm.ComponentModel;
 
@@ -58,7 +59,7 @@ public partial class BackedUpFileViewModel : ObservableObject
     /// <summary>
     /// Human-readable file size (e.g., "1.5 MB").
     /// </summary>
-    public string FileSize => FormatBytes(Model.FileSize);
+    public string FileSize => FormatHelper.FormatBytes(Model.FileSize);
 
     /// <summary>
     /// Human-readable file size (alias for FileSize for binding compatibility).
@@ -100,21 +101,5 @@ public partial class BackedUpFileViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(model);
         Model = model;
-    }
-
-    /// <summary>
-    /// Formats bytes into human-readable size string.
-    /// </summary>
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 }

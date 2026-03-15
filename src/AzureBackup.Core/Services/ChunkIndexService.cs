@@ -298,7 +298,7 @@ public class ChunkIndexService
         result.EstimatedMonthlyCost = CalculateMonthlyCost(result.OrphanedChunks);
 
         Log($"Orphan scan complete: {result.OrphanedChunks.Count} orphans found, " +
-            $"{FormatBytes(result.TotalOrphanSizeBytes)} total, " +
+            $"{FormatHelper.FormatBytes(result.TotalOrphanSizeBytes)} total, " +
             $"${result.EstimatedMonthlyCost:F4}/month");
 
         return result;
@@ -343,7 +343,7 @@ public class ChunkIndexService
         }
 
         Log($"Cleanup complete: {result.ChunksDeleted} deleted, {result.FailedDeletions} failed, " +
-            $"{FormatBytes(result.BytesFreed)} freed");
+            $"{FormatHelper.FormatBytes(result.BytesFreed)} freed");
 
         return result;
     }
@@ -453,7 +453,7 @@ public class ChunkIndexService
         catch { /* Ignore if legacy blob doesn't exist */ }
 
         _databaseService.SetIndexMetadata("LastAzureSyncAt", DateTime.UtcNow);
-        Log($"Index backup complete: {backup.Entries.Count} entries, {FormatBytes(data.Length)} stored (encrypted)");
+        Log($"Index backup complete: {backup.Entries.Count} entries, {FormatHelper.FormatBytes(data.Length)} stored (encrypted)");
     }
 
     /// <summary>
@@ -638,19 +638,6 @@ public class ChunkIndexService
     {
         var gbSize = sizeBytes / (1024m * 1024m * 1024m);
         return gbSize * TierPricingPerGbMonth.GetValueOrDefault(tier, 0.01m);
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 
     #endregion

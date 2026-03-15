@@ -282,7 +282,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// Formatted string showing bytes processed vs total.
     /// </summary>
     public string BytesProgressText => TotalBytesToProcess > 0
-        ? $"{FormatBytesStatic(TotalBytesProcessed)} / {FormatBytesStatic(TotalBytesToProcess)}"
+        ? $"{AzureBackup.Core.FormatHelper.FormatBytes(TotalBytesProcessed)} / {AzureBackup.Core.FormatHelper.FormatBytes(TotalBytesToProcess)}"
         : string.Empty;
 
     /// <summary>
@@ -292,19 +292,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public string FilesProgressText => TotalFilesInOperation > 0
         ? $"{Math.Max(CompletedFilesCount, _currentFileIndex + 1)} of {TotalFilesInOperation} files"
         : string.Empty;
-
-    private static string FormatBytesStatic(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
-    }
 
     // Collections
     public ObservableCollection<WatchedFolderViewModel> WatchedFolders { get; } = [];
@@ -530,7 +517,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             var count = RestorableFiles.Count;
             if (count == 0) return "No files in Azure backup";
             var totalSize = RestorableFiles.Sum(f => f.Model.FileSize);
-            return $"{count} files ({FormatBytesStatic(totalSize)})";
+            return $"{count} files ({AzureBackup.Core.FormatHelper.FormatBytes(totalSize)})";
         }
     }
 
@@ -825,7 +812,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         {
             CurrentFileName = fileName;
             CurrentFileProgress = fileSize > 0 ? (double)bytesProcessed / fileSize * 100 : 0;
-            CurrentFileProgressText = $"{FormatBytesStatic(bytesProcessed)} / {FormatBytesStatic(fileSize)}";
+            CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(bytesProcessed)} / {AzureBackup.Core.FormatHelper.FormatBytes(fileSize)}";
             
             // Update overall progress based on total bytes transferred
             TotalBytesProcessed = _lastBytesProcessed + bytesProcessed;
@@ -889,7 +876,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         if (elapsed.TotalSeconds > 1 && TotalBytesProcessed > 0)
         {
             var bytesPerSecond = TotalBytesProcessed / elapsed.TotalSeconds;
-            OperationSpeed = $"{FormatBytesStatic((long)bytesPerSecond)}/s";
+            OperationSpeed = $"{AzureBackup.Core.FormatHelper.FormatBytes((long)bytesPerSecond)}/s";
 
             if (bytesPerSecond > 0 && TotalBytesToProcess > TotalBytesProcessed)
             {

@@ -40,7 +40,7 @@ public class PreviewFileAction
     public long FileSize { get; set; }
     
     /// <summary>Human-readable file size.</summary>
-    public string FileSizeText => FormatBytes(FileSize);
+    public string FileSizeText => FormatHelper.FormatBytes(FileSize);
     
     /// <summary>Last modified date/time.</summary>
     public DateTime LastModified { get; set; }
@@ -53,22 +53,12 @@ public class PreviewFileAction
     
     /// <summary>Reason for this action (e.g., "File is newer", "Not in backup").</summary>
     public string Reason { get; set; } = string.Empty;
-    
+
+    /// <summary>Whether this file is included in the operation. Uncheck in preview to exclude.</summary>
+    public bool IsIncluded { get; set; } = true;
+
     /// <summary>Storage tier for this file (for backup operations).</summary>
     public StorageTier? StorageTier { get; set; }
-    
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
-    }
 }
 
 /// <summary>
@@ -132,21 +122,42 @@ public class OperationPreview
     
     /// <summary>Total count of files to create.</summary>
     public int CreateCount => FilesToCreate.Count;
-    
+
     /// <summary>Total count of files to overwrite.</summary>
     public int OverwriteCount => FilesToOverwrite.Count;
-    
+
     /// <summary>Total count of files to delete.</summary>
     public int DeleteCount => FilesToDelete.Count;
-    
+
     /// <summary>Total count of files to skip.</summary>
     public int SkipCount => FilesToSkip.Count;
-    
-    /// <summary>Total bytes that will be transferred.</summary>
-    public long TotalBytesToTransfer => FilesToCreate.Sum(f => f.FileSize) + FilesToOverwrite.Sum(f => f.FileSize);
-    
-    /// <summary>Total bytes that will be deleted.</summary>
-    public long TotalBytesToDelete => FilesToDelete.Sum(f => f.FileSize);
+
+    /// <summary>Count of included files to create.</summary>
+    public int IncludedCreateCount => FilesToCreate.Count(f => f.IsIncluded);
+
+    /// <summary>Count of included files to overwrite.</summary>
+    public int IncludedOverwriteCount => FilesToOverwrite.Count(f => f.IsIncluded);
+
+    /// <summary>Count of included files to delete.</summary>
+    public int IncludedDeleteCount => FilesToDelete.Count(f => f.IsIncluded);
+
+    /// <summary>Total bytes that will be transferred (included files only).</summary>
+    public long TotalBytesToTransfer => 
+        FilesToCreate.Where(f => f.IsIncluded).Sum(f => f.FileSize) + 
+        FilesToOverwrite.Where(f => f.IsIncluded).Sum(f => f.FileSize);
+
+    /// <summary>Total bytes that will be deleted (included files only).</summary>
+    public long TotalBytesToDelete => FilesToDelete.Where(f => f.IsIncluded).Sum(f => f.FileSize);
+
+    /// <summary>
+    /// File paths the user excluded from the operation via the preview dialog.
+    /// Callers should filter their operation lists against this set.
+    /// </summary>
+    public HashSet<string> ExcludedFilePaths => 
+        FilesToCreate.Concat(FilesToOverwrite).Concat(FilesToDelete)
+            .Where(f => !f.IsIncluded)
+            .Select(f => f.FilePath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     
     /// <summary>Whether this operation has any destructive actions (delete or overwrite).</summary>
     public bool HasDestructiveActions => FilesToDelete.Count > 0 || FilesToOverwrite.Count > 0;

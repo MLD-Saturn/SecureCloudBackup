@@ -331,7 +331,7 @@ public partial class MainWindowViewModel
                 
                 // Update statistics to reflect actual Azure storage
                 TotalFiles = files.Count;
-                TotalSize = FormatBytes(files.Sum(f => f.FileSize));
+                TotalSize = AzureBackup.Core.FormatHelper.FormatBytes(files.Sum(f => f.FileSize));
                 
                 // Build Azure file tree for tree view mode
                 if (UseTreeView)
@@ -458,22 +458,6 @@ public partial class MainWindowViewModel
         {
             IsOperationInProgress = false;
         }
-    }
-
-    /// <summary>
-    /// Formats bytes into human-readable size string.
-    /// </summary>
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 
     #endregion

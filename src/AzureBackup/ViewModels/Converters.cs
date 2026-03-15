@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Globalization;
+using AzureBackup.Core;
 using Avalonia.Data.Converters;
 using Avalonia.Media;
 
@@ -79,11 +80,11 @@ public class BytesToStringConverter : IValueConverter
     {
         if (value is long bytes)
         {
-            return FormatBytes(bytes);
+            return FormatHelper.FormatBytes(bytes);
         }
         if (value is int intBytes)
         {
-            return FormatBytes(intBytes);
+            return FormatHelper.FormatBytes(intBytes);
         }
         return "0 B";
     }
@@ -91,19 +92,6 @@ public class BytesToStringConverter : IValueConverter
     public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
         throw new NotImplementedException();
-    }
-
-    private static string FormatBytes(long bytes)
-    {
-        string[] sizes = ["B", "KB", "MB", "GB", "TB"];
-        var order = 0;
-        double size = bytes;
-        while (size >= 1024 && order < sizes.Length - 1)
-        {
-            order++;
-            size /= 1024;
-        }
-        return $"{size:0.##} {sizes[order]}";
     }
 }
 
