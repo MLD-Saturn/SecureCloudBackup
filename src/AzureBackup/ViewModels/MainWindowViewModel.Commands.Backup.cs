@@ -53,7 +53,7 @@ public partial class MainWindowViewModel
 
         try
         {
-            var preview = await _orchestrator.PreviewBackupSyncAsync(_operationCts.Token);
+            var preview = await _orchestrator.PreviewBackupSyncAsync(_operationCts!.Token);
 
             // Show preview dialog if there are files to backup
             IsOperationInProgress = false;
@@ -186,7 +186,7 @@ public partial class MainWindowViewModel
             List<string> allFiles = new();
             foreach (var folder in config.WatchedFolders.Where(f => f.IsEnabled))
             {
-                _operationCts.Token.ThrowIfCancellationRequested();
+                _operationCts!.Token.ThrowIfCancellationRequested();
                 var files = await _fileWatcherService.ScanFolderAsync(folder, _operationCts.Token);
                 allFiles.AddRange(files);
             }
@@ -242,7 +242,7 @@ public partial class MainWindowViewModel
                 });
             });
 
-            await _orchestrator.PerformFullScanAsync(progress, _operationCts.Token);
+            await _orchestrator.PerformFullScanAsync(progress, _operationCts!.Token);
             RefreshStatistics();
             AddLog("Full scan complete - all files queued for backup");
             

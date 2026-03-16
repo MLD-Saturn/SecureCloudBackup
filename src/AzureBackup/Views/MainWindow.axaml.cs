@@ -87,9 +87,14 @@ public partial class MainWindow : Window
             
             var password = dialog.Password;
             var (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(password);
-            
+
             if (success)
             {
+                if (errorMessage != null)
+                {
+                    // Password valid but Azure unavailable — show warning, don't block
+                    await ShowAzureWarningAsync(errorMessage);
+                }
                 return true;
             }
             
@@ -110,9 +115,13 @@ public partial class MainWindow : Window
                 
                 password = retryDialog.Password;
                 (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(password);
-                
+
                 if (success)
                 {
+                    if (errorMessage != null)
+                    {
+                        await ShowAzureWarningAsync(errorMessage);
+                    }
                     return true;
                 }
                 
@@ -123,6 +132,51 @@ public partial class MainWindow : Window
         // Max attempts reached
         vm.AddLogMessage("Maximum password attempts reached. Please try again later.");
         return false;
+    }
+
+    /// <summary>
+    /// Shows a non-blocking warning dialog when Azure is unavailable after successful unlock.
+    /// </summary>
+    private async Task ShowAzureWarningAsync(string message)
+    {
+        var dialog = new Window
+        {
+            Title = "Azure Connection Warning",
+            Width = 460,
+            Height = 200,
+            WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            CanResize = false,
+            Content = new StackPanel
+            {
+                Margin = new Avalonia.Thickness(24),
+                Spacing = 16,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = message,
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap
+                    },
+                    new TextBlock
+                    {
+                        Text = "Local files are still available. You can update connection settings in the Settings tab.",
+                        Opacity = 0.7,
+                        TextWrapping = Avalonia.Media.TextWrapping.Wrap
+                    },
+                    new Button
+                    {
+                        Content = "OK",
+                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Center,
+                        MinWidth = 80
+                    }
+                }
+            }
+        };
+
+        var okButton = (Button)((StackPanel)dialog.Content).Children[2];
+        okButton.Click += (_, _) => dialog.Close();
+
+        await dialog.ShowDialog(this);
     }
 
     private void OnDataContextChanged(object? sender, EventArgs e)

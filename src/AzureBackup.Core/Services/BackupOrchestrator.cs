@@ -49,7 +49,14 @@ public class BackupOrchestrator : IAsyncDisposable
 
     public bool IsRunning => _isRunning;
     public bool IsPaused => _isPaused;
-    
+
+    /// <summary>
+    /// Non-null if the last InitializeAsync succeeded (password valid) but the Azure
+    /// connection failed. The UI should show this as a warning, not a login failure.
+    /// Cleared on successful connection or when the user reconfigures.
+    /// </summary>
+    public string? AzureConnectionError { get; private set; }
+
     // Password strength requirements
     private const int MinPasswordLength = 12;
 
@@ -235,9 +242,22 @@ public class BackupOrchestrator : IAsyncDisposable
         }
 
         // Connect to Azure based on configured auth method
+        // Failures here are non-fatal — the password was valid, encryption is ready,
+        // and the user can fix connection issues from Settings without re-entering the password.
         Log("InitializeAsync: Connecting to Azure storage");
-        await ConnectToAzureAsync(config);
-        Log("InitializeAsync: Initialization complete");
+        try
+        {
+            await ConnectToAzureAsync(config);
+            Log("InitializeAsync: Initialization complete");
+        }
+        catch (Exception ex)
+        {
+            Log($"InitializeAsync: Azure connection failed (non-fatal): {ex.Message}");
+            AzureConnectionError = ex.Message;
+            ErrorOccurred?.Invoke(this,
+                $"Password accepted but Azure connection failed: {ex.Message}. " +
+                "You can fix connection settings and retry from Settings.");
+        }
 
         return true;
     }
@@ -247,6 +267,7 @@ public class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     private async Task ConnectToAzureAsync(BackupConfiguration config)
     {
+        AzureConnectionError = null;
         var containerName = config.ContainerName ?? "backup";
         Log($"ConnectToAzureAsync: AuthMethod={config.AuthMethod}, Container={containerName}");
         

@@ -356,25 +356,32 @@ public partial class MainWindowViewModel
             {
                 IsInitialized = true;
                 AddLog("Encryption initialized successfully!");
-                
+
+                // Check if Azure connection failed during initialization
+                if (_orchestrator.AzureConnectionError != null)
+                {
+                    AddLog($"Warning: Azure connection failed - {_orchestrator.AzureConnectionError}");
+                    AddLog("You can update connection settings in the Settings tab.");
+                }
+
                 // Clear sensitive data from UI memory
                 Password = string.Empty;
                 PasswordConfirm = string.Empty;
-                
+
                 // Update Entra ID status
                 IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
-                
-                // Check if Azure storage is configured (either Entra ID or connection string)
+
+                // Check if Azure storage is configured and connected
                 var config = _databaseService.GetConfiguration();
                 var hasEntraIdConfig = IsEntraIdAuthenticated && !string.IsNullOrEmpty(config.StorageAccountName);
                 var hasConnectionStringConfig = !UseEntraIdAuth && config.EncryptedConnectionString != null;
-                
-                if (hasEntraIdConfig || hasConnectionStringConfig)
+
+                if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
                 {
                     AddLog("Loading files from Azure...");
                     await RefreshFromAzureAsync();
                 }
-                else
+                else if (_orchestrator.AzureConnectionError == null)
                 {
                     if (UseEntraIdAuth)
                     {
@@ -385,7 +392,7 @@ public partial class MainWindowViewModel
                         AddLog("Please configure your Azure connection string in Settings.");
                     }
                 }
-                
+
                 // Refresh local files (watched folders)
                 await RefreshLocalFilesAsync();
             }
@@ -612,18 +619,25 @@ public partial class MainWindowViewModel
 
             // Step 6: Update status and load files
             IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
-            
+
+            // Check if Azure connection failed during initialization
+            if (_orchestrator.AzureConnectionError != null)
+            {
+                AddLog($"Warning: Azure connection failed - {_orchestrator.AzureConnectionError}");
+                AddLog("You can update connection settings in the Settings tab.");
+            }
+
             // Reload config to check for stored connection
             var finalConfig = _databaseService.GetConfiguration();
             var hasEntraIdConfig = IsEntraIdAuthenticated && !string.IsNullOrEmpty(finalConfig.StorageAccountName);
             var hasConnectionStringConfig = !UseEntraIdAuth && finalConfig.EncryptedConnectionString != null;
-            
-            if (hasEntraIdConfig || hasConnectionStringConfig)
+
+            if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
                 AddLog("Loading files from Azure...");
                 await RefreshFromAzureAsync();
             }
-            else if (!isNewSetup)
+            else if (_orchestrator.AzureConnectionError == null && !isNewSetup)
             {
                 // Returning user but no storage configured yet
                 if (UseEntraIdAuth)
@@ -767,7 +781,14 @@ public partial class MainWindowViewModel
 
             IsInitialized = true;
             AddLog("Unlocked successfully!");
-            
+
+            // Check if Azure connection failed during initialization
+            if (_orchestrator.AzureConnectionError != null)
+            {
+                AddLog($"Warning: Azure connection failed - {_orchestrator.AzureConnectionError}");
+                AddLog("You can update connection settings in the Settings tab.");
+            }
+
             // Update Entra ID status
             IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
             
@@ -775,15 +796,20 @@ public partial class MainWindowViewModel
             var config = _databaseService.GetConfiguration();
             var hasEntraIdConfig = IsEntraIdAuthenticated && !string.IsNullOrEmpty(config.StorageAccountName);
             var hasConnectionStringConfig = !UseEntraIdAuth && config.EncryptedConnectionString != null;
-            
-            if (hasEntraIdConfig || hasConnectionStringConfig)
+
+            if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
                 AddLog("Loading files from Azure...");
                 await RefreshFromAzureAsync();
-                await RefreshLocalFilesAsync();
             }
-            
-            return (true, null);
+
+            await RefreshLocalFilesAsync();
+
+            // Return success with optional Azure warning
+            var azureWarning = _orchestrator.AzureConnectionError;
+            return azureWarning != null
+                ? (true, $"Unlocked, but Azure is unavailable: {azureWarning}")
+                : (true, null);
         }
         catch (AzureBackup.Core.SecurityPolicyException ex)
         {
