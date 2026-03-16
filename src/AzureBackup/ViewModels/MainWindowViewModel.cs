@@ -65,6 +65,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(BackupStatusText))]
+    [NotifyPropertyChangedFor(nameof(CanUpdateConnectionString))]
     private bool _isInitialized;
 
 
@@ -171,6 +172,15 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     [ObservableProperty]
     private bool _showConnectionString;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanUpdateConnectionString))]
+    private bool _isEditingConnectionString;
+
+    /// <summary>
+    /// True when the user can click "Update Connection String" — initialized and not already editing.
+    /// </summary>
+    public bool CanUpdateConnectionString => IsInitialized && !IsEditingConnectionString;
 
     /// <summary>
     /// Returns true if passwords don't match (and both have values).

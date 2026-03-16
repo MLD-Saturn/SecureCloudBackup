@@ -28,6 +28,28 @@ public partial class MainWindowViewModel
         AddLog("Switched to Connection String authentication (for personal accounts)");
     }
 
+    /// <summary>
+    /// Clears the masked connection string so the user can enter a new one
+    /// without resetting the database or losing any data.
+    /// </summary>
+    [RelayCommand]
+    private void UpdateConnectionString()
+    {
+        ConnectionString = string.Empty;
+        IsEditingConnectionString = true;
+        AddLog("Enter a new connection string, then click 'Save & Connect'");
+    }
+
+    /// <summary>
+    /// Cancels editing and restores the masked placeholder.
+    /// </summary>
+    [RelayCommand]
+    private void CancelUpdateConnectionString()
+    {
+        ConnectionString = "[Encrypted - stored securely]";
+        IsEditingConnectionString = false;
+    }
+
     [RelayCommand]
     private void ToggleDiagnosticLogging()
     {
@@ -188,6 +210,7 @@ public partial class MainWindowViewModel
 
                 await _orchestrator.SaveConnectionStringAsync(ConnectionString, ContainerName);
                 ConnectionString = "[Encrypted - stored securely]";
+                IsEditingConnectionString = false;
                 AddLog("Connection string saved (encrypted) and connected!");
             }
             

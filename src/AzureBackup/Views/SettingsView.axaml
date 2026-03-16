@@ -34,7 +34,7 @@
                     <TextBlock Text="Azure Storage Connection" FontSize="18" FontWeight="SemiBold"/>
                     <TextBlock Text="Use this option with personal Microsoft accounts (@gmail.com, @outlook.com, etc.)" 
                                FontSize="11" Opacity="0.6" TextWrapping="Wrap"/>
-                    
+
                     <StackPanel Spacing="4">
                         <TextBlock Text="Connection String"/>
                         <Grid ColumnDefinitions="*,Auto">
@@ -48,16 +48,24 @@
                         <TextBlock Text="Find this in Azure Portal - Storage Account - Access keys" 
                                    FontSize="11" Opacity="0.6"/>
                     </StackPanel>
-                    
+
                     <StackPanel Spacing="4">
                         <TextBlock Text="Container Name"/>
                         <TextBox Text="{Binding ContainerName}" Watermark="backup"/>
                     </StackPanel>
-                    
+
                     <StackPanel Orientation="Horizontal" Spacing="8">
                         <Button Content="Test Connection" Command="{Binding TestConnectionCommand}"/>
+                        <Button Content="Save &amp; Connect" Command="{Binding SaveStorageSettingsCommand}"
+                                IsVisible="{Binding IsEditingConnectionString}"
+                                ToolTip.Tip="Save the new connection string and reconnect"/>
+                        <Button Content="Cancel" Command="{Binding CancelUpdateConnectionStringCommand}"
+                                IsVisible="{Binding IsEditingConnectionString}"/>
+                        <Button Content="Update Connection String" Command="{Binding UpdateConnectionStringCommand}"
+                                IsVisible="{Binding CanUpdateConnectionString}"
+                                ToolTip.Tip="Replace the stored connection string without losing any data"/>
                     </StackPanel>
-                    
+
                     <TextBlock Text="Your connection string will be encrypted before storage" 
                                FontSize="11" Foreground="Orange" TextWrapping="Wrap"/>
                 </StackPanel>
@@ -262,7 +270,7 @@
             <Border Classes="card" Margin="0,24,0,0" BorderBrush="IndianRed" BorderThickness="1">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Danger Zone" FontSize="16" FontWeight="SemiBold" Foreground="IndianRed"/>
-                    <TextBlock Text="Reset the application to change your connection string or start fresh. This will securely delete all local settings, credentials, and file tracking data. Your files in Azure Storage will NOT be affected." 
+                    <TextBlock Text="Reset the application to start fresh. This will securely delete all local settings, credentials, and file tracking data. Your files in Azure Storage will NOT be affected."
                                TextWrapping="Wrap" Opacity="0.8"/>
                     
                     <!-- Normal state: Show reset button -->
