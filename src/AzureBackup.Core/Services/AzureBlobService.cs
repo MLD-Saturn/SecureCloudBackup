@@ -378,10 +378,11 @@ public partial class AzureBlobService : IBlobStorageService
         ));
         
         var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
-        
-        // Store under path hash (deterministic for updates)
-        var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(fileInfo.LocalPath)));
+
+        // Use HMAC-SHA256 keyed by the derived encryption key for deterministic blob naming.
+        // This prevents an attacker with storage access from confirming file paths
+        // via dictionary attack (plain SHA-256 of a path is guessable).
+        var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
         var blobName = $"metadata/{metadataHash}";
         
         var blobClient = _containerClient!.GetBlobClient(blobName);

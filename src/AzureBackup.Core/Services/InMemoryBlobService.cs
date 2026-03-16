@@ -225,9 +225,8 @@ public partial class InMemoryBlobService : IBlobStorageService
         });
         
         var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
-        
-        var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(fileInfo.LocalPath)));
+
+        var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
         var blobName = $"metadata/{metadataHash}";
         
         _blobs[blobName] = encryptedMetadata;

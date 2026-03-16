@@ -986,14 +986,13 @@ public class BackupOrchestrator : IAsyncDisposable
             }
 
             // Save file metadata
-            // BlobName is deterministic from LocalPath so re-backups of the same file
-            // produce identical metadata records (avoids spurious diffs in LiteDB and JSON)
-            var pathHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(filePath)));
+            // BlobName uses HMAC-SHA256 keyed by the derived encryption key for deterministic
+            // naming that cannot be guessed without the password.
+            var metadataHash = _encryptionService.ComputeHmacHex(filePath);
             BackedUpFile backedUpFile = new()
             {
                 LocalPath = filePath,
-                BlobName = $"metadata/{pathHash}",
+                BlobName = $"metadata/{metadataHash}",
                 FileSize = fileInfo.Length,
                 LastModified = fileInfo.LastWriteTimeUtc,
                 FileHash = fileHash,

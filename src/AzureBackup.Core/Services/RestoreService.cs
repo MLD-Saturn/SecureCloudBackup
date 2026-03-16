@@ -814,8 +814,7 @@ public class RestoreService
             }
 
             // Delete metadata
-            var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(file.LocalPath)));
+            var metadataHash = _encryptionService.ComputeHmacHex(file.LocalPath);
             var metadataBlobName = $"metadata/{metadataHash}";
             await _blobService.DeleteBlobAsync(metadataBlobName, cancellationToken);
 

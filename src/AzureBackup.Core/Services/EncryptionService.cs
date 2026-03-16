@@ -110,6 +110,44 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
+    /// Computes HMAC-SHA256 of the input using the derived encryption key.
+    /// Returns the result as an uppercase hex string.
+    /// Used for generating metadata blob names that cannot be guessed without the key,
+    /// preventing an attacker with storage access from confirming file paths via dictionary attack.
+    /// </summary>
+    public string ComputeHmacHex(ReadOnlySpan<byte> data)
+    {
+        byte[] keyCopy;
+        lock (_keyLock)
+        {
+            EnsureInitialized();
+            keyCopy = new byte[KeySize];
+            Array.Copy(_derivedKey!, keyCopy, KeySize);
+        }
+
+        try
+        {
+            Span<byte> hash = stackalloc byte[32];
+            HMACSHA256.HashData(keyCopy, data, hash);
+            return Convert.ToHexString(hash);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyCopy);
+        }
+    }
+
+    /// <summary>
+    /// Computes HMAC-SHA256 of a string using the derived encryption key.
+    /// Convenience overload for path-based blob name generation.
+    /// </summary>
+    public string ComputeHmacHex(string input)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(input);
+        return ComputeHmacHex(Encoding.UTF8.GetBytes(input));
+    }
+
+    /// <summary>
     /// Creates a verification hash that can be stored to verify the password later.
     /// This is NOT the encryption key - it's a separate derivation for verification only.
     /// </summary>
