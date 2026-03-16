@@ -4,20 +4,6 @@
 
 This is a zero-knowledge encrypted backup tool that syncs your local files to Microsoft Azure Blob Storage. All encryption happens locally on your machine before any data is uploaded, ensuring that no one (including Microsoft) can read your backed-up data.
 
-## Cost Estimate
-
-Based on your requirements (6TB of data, Cool tier storage):
-
-| Component | Monthly Cost |
-|-----------|--------------|
-| Storage (6TB Cool tier) | ~$70 |
-| Write operations | ~$2-5 |
-| **Total** | **~$75-80/month** |
-
-This is well under your $150/month budget, leaving room for growth.
-
----
-
 ## Azure Setup Instructions
 
 ### Step 1: Create a Resource Group
@@ -41,14 +27,14 @@ This is well under your $150/month budget, leaving room for growth.
    - **Storage account name**: `stbackup<yourname>` (must be globally unique, lowercase, no special characters)
    - **Region**: Same region as your resource group
    - **Performance**: **Standard** (not Premium)
-   - **Redundancy**: **Locally-redundant storage (LRS)** - cheapest option
-     - Or **Geo-redundant storage (GRS)** if you want disaster recovery across regions (adds ~$20/month for 6TB)
+   - **Redundancy**: **Locally-redundant storage (LRS)**
+     - Or **Geo-redundant storage (GRS)** if you want disaster recovery across regions
 
 4. Click **Next: Advanced**
    - **Require secure transfer**: ? Enabled
    - **Enable blob public access**: ? Disabled
    - **Enable storage account key access**: ? Enabled
-   - **Default access tier**: **Cool** (important for cost savings!)
+   - **Default access tier**: **Cool** (recommended for backup workloads)
 
 5. Click **Review + create** ? **Create**
 
@@ -81,27 +67,22 @@ This is well under your $150/month budget, leaving room for growth.
 ### Initial Configuration
 
 1. Launch the application
-2. Go to **Settings** tab
-3. Enter your **Azure Connection String** (from Step 3)
-4. Enter a **Container Name** (default: `backup`)
-5. Click **Test Connection** to verify
-6. Enter a **Password** (this derives your encryption key)
-   
-   ?? **IMPORTANT**: If you forget this password, your data **CANNOT** be recovered!
+2. In the **Settings** view, choose an authentication method:
+   - **Connection String** -- paste the string from Azure Portal (from Step 3)
+   - **Microsoft Entra ID** -- click **Sign in with Microsoft** and enter your storage account name
+3. Enter a **Container Name** (default: `backup`)
+4. Click **Test Connection** to verify
+5. Enter a **Password** (this derives your encryption key)
 
-7. Add folders to watch for backup:
-   - Click **Add Folder**
-   - Browse to select folders
-   - Optionally add exclude patterns (e.g., `*.tmp;node_modules;.git`)
+   **IMPORTANT**: If you forget this password, your data **CANNOT** be recovered!
 
-8. Click **Save Settings**
-9. Click **Initialize** to start
+6. Click **Initialize & Connect** to encrypt the database, save settings, and connect
 
-### Starting Backup
+### Adding Folders and Starting Backup
 
-1. Go to **Dashboard**
-2. Click **Start Backup** to begin real-time monitoring
-3. Click **Full Scan** to immediately scan and backup all files in watched folders
+1. Go to the **Sync** view
+2. Click the **+** button in the Local Files panel to add watched folders
+3. Click **Start Monitoring** to begin real-time file watching and automatic backup
 
 ---
 
@@ -141,9 +122,11 @@ This means if you modify a 1GB file, only the changed portions are uploaded.
 
 | Tier | Used For |
 |------|----------|
-| **Cool** | All backup data (default) |
+| **Hot** | Frequently accessed data |
+| **Cool** | Backup data (default, recommended) |
+| **Cold** | Rarely accessed, long-term archival data |
 
-Cool tier provides the best cost/performance balance for backup data that is:
+Each watched folder can be configured with a different storage tier in Settings. Cool tier provides a good balance for backup data that is:
 - Written frequently
 - Read rarely (disaster recovery only)
 
@@ -153,33 +136,19 @@ Cool tier provides the best cost/performance balance for backup data that is:
 
 ### Individual File Restore
 
-1. Go to **Restore** tab
-2. Click **Refresh** to list all backed-up files
-3. Use **Search** to find specific files
-4. Select a file and click **Restore Selected**
-5. Choose destination folder
+1. Go to the **Sync** view
+2. In the **Azure Backup** panel (right side), check the files to restore
+3. Use the **Search** bar to filter by filename
+4. Choose **Restore to original location** or click **Browse...** for a different destination
+5. Click **Restore Selected**
+6. Review the preview dialog and click **Proceed**
 
-### Full Restore
+### Full Folder Restore
 
-1. Go to **Restore** tab
-2. Enter a **Restore Directory**
-3. Click **Restore All**
-4. Wait for completion (this may take hours for large backups)
-
----
-
-## Budget Monitoring
-
-The application automatically monitors Azure costs:
-
-- Current estimated cost is shown in the header
-- If cost reaches 90% of budget: Warning displayed
-- If cost exceeds budget: Backup pauses automatically and alerts you
-
-To change budget:
-1. Go to **Settings**
-2. Modify **Monthly Budget**
-3. Click **Save Settings**
+1. In the Azure Backup tree, select a folder
+2. Use the **Remap path** panel to set a target directory
+3. Click **Mirror Sync** to restore all files (and optionally remove extra local files)
+4. Review the preview and click **Proceed**
 
 ---
 
@@ -200,11 +169,6 @@ To change budget:
 - If a file remains locked, it will be skipped
 - Close applications using the file, or exclude it from backup
 
-### High costs
-- Check if many files are changing frequently
-- Large files that change often increase costs
-- Consider excluding temporary files and caches
-
 ---
 
 ## Security Best Practices
@@ -221,7 +185,7 @@ To change budget:
 
 | Component | Technology |
 |-----------|------------|
-| Runtime | .NET 8 |
+| Runtime | .NET 10 |
 | GUI | Avalonia UI 11 |
 | Encryption | AES-256-GCM |
 | Key Derivation | Argon2id (64MB memory, 3 iterations) |
@@ -243,9 +207,3 @@ To change budget:
 ## Support
 
 For issues or feature requests, please open an issue on the repository.
-
----
-
-## License
-
-MIT License - Free for personal and commercial use.

@@ -37,6 +37,13 @@ public class BackupOrchestrator : IAsyncDisposable
     // For a file with many chunks, upload up to 4 chunks simultaneously
     private const int MaxParallelChunkUploads = 4;
 
+    // File-level parallelism for multi-file operations
+    // 4 files x 4 chunks = 16 concurrent HTTP uploads max
+    private const int MaxParallelFileBackups = 4;
+
+    // Batch size for the background backup monitoring loop
+    private const int BackupLoopBatchSize = 50;
+
     public event EventHandler<BackupProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? StatusChanged;
     public event EventHandler<string>? ErrorOccurred;
@@ -675,6 +682,7 @@ public class BackupOrchestrator : IAsyncDisposable
     /// Performs an initial sync of all watched folders with Azure storage.
     /// Only queues files that are new or have changed since last backup.
     /// This is more efficient than PerformFullScanAsync for subsequent syncs.
+    /// Uses bulk database lookups instead of per-file queries for performance at scale.
     /// </summary>
     /// <param name="progress">Progress reporter for UI updates</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -702,27 +710,35 @@ public class BackupOrchestrator : IAsyncDisposable
         StatusChanged?.Invoke(this, $"Found {allFiles.Count} files - checking which need backup...");
         Log($"PerformInitialSyncAsync: Found {allFiles.Count} total files to check");
 
-        // Phase 2: Compare each file with existing backup records
+        // Phase 2: Bulk-load all backup records and pending paths into memory
+        // This replaces N sequential DB lookups with 2 bulk queries
+        StatusChanged?.Invoke(this, "Loading backup state from database...");
+        var backedUpFiles = _databaseService.GetAllBackedUpFiles()
+            .ToDictionary(f => f.LocalPath, f => f, StringComparer.OrdinalIgnoreCase);
+        var pendingPaths = _databaseService.GetAllPendingChangePaths();
+        Log($"PerformInitialSyncAsync: Loaded {backedUpFiles.Count} backup records and {pendingPaths.Count} pending paths");
+
+        // Phase 3: Compare each file against in-memory lookup tables
         for (var i = 0; i < allFiles.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            
+
             var filePath = allFiles[i];
             var fileName = Path.GetFileName(filePath);
-            
+
             try
             {
-                // Check if file is already pending
-                if (_databaseService.IsFileChangePending(filePath))
+                // Check if file is already pending (in-memory set lookup)
+                if (pendingPaths.Contains(filePath))
                 {
                     result.AlreadyPending++;
                     progress?.Report((i + 1, allFiles.Count, fileName, "Already queued"));
                     continue;
                 }
 
-                // Get existing backup record
-                var existingBackup = _databaseService.GetBackedUpFile(filePath);
-                
+                // Get existing backup record (in-memory dictionary lookup)
+                backedUpFiles.TryGetValue(filePath, out var existingBackup);
+
                 if (existingBackup == null)
                 {
                     // New file - never backed up
@@ -740,7 +756,7 @@ public class BackupOrchestrator : IAsyncDisposable
                 {
                     // File was previously backed up - check if it changed
                     FileInfo fileInfo = new(filePath);
-                    
+
                     // Quick check: compare last modified time and size
                     if (fileInfo.LastWriteTimeUtc > existingBackup.LastModified || 
                         fileInfo.Length != existingBackup.FileSize)
@@ -1073,48 +1089,62 @@ public class BackupOrchestrator : IAsyncDisposable
                     continue;
                 }
 
-                // Process pending changes
-                var pendingChanges = _databaseService.GetPendingChanges(10);
-                
+                // Process pending changes in larger batches
+                var pendingChanges = _databaseService.GetPendingChanges(BackupLoopBatchSize);
+
                 if (pendingChanges.Count == 0)
                 {
                     await Task.Delay(1000, cancellationToken);
                     continue;
                 }
 
+                // Separate deletions (sequential, involves index operations) from backups (parallelizable)
+                var deletions = pendingChanges.Where(c => c.ChangeType == FileChangeType.Deleted).ToList();
+                var backups = pendingChanges.Where(c => c.ChangeType != FileChangeType.Deleted).ToList();
 
-                foreach (var change in pendingChanges)
+                // Handle deletions sequentially - they involve chunk index operations
+                foreach (var change in deletions)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    if (change.ChangeType == FileChangeType.Deleted)
+                    var existingFile = _databaseService.GetBackedUpFile(change.FilePath);
+                    if (existingFile != null)
                     {
-                        // Mark as deleted but don't remove from Azure (for potential restore)
-                        var existingFile = _databaseService.GetBackedUpFile(change.FilePath);
-                        if (existingFile != null)
+                        if (_chunkIndexService != null)
                         {
-                            // Remove chunk references (this will delete orphaned chunks immediately)
-                            if (_chunkIndexService != null)
+                            var deletedChunks = await _chunkIndexService.RemoveFileReferencesAsync(
+                                change.FilePath, cancellationToken);
+                            if (deletedChunks > 0)
                             {
-                                var deletedChunks = await _chunkIndexService.RemoveFileReferencesAsync(
-                                    change.FilePath, cancellationToken);
-                                if (deletedChunks > 0)
-                                {
-                                    Log($"RunBackupLoopAsync: Deleted {deletedChunks} orphaned chunks " +
-                                        $"after file deletion: {change.FilePath}");
-                                }
+                                Log($"RunBackupLoopAsync: Deleted {deletedChunks} orphaned chunks " +
+                                    $"after file deletion: {change.FilePath}");
                             }
-                            
-                            existingFile.Status = BackupStatus.Excluded;
-                            _databaseService.SaveBackedUpFile(existingFile);
                         }
-                    }
-                    else
-                    {
-                        await BackupFileAsync(change.FilePath, cancellationToken);
+
+                        existingFile.Status = BackupStatus.Excluded;
+                        _databaseService.SaveBackedUpFile(existingFile);
                     }
 
                     _databaseService.RemovePendingChange(change.FilePath);
+                }
+
+                // Process backup files in parallel
+                if (backups.Count > 0)
+                {
+                    Log($"RunBackupLoopAsync: Processing {backups.Count} files in parallel (max {MaxParallelFileBackups})");
+
+                    await Parallel.ForEachAsync(
+                        backups,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = MaxParallelFileBackups,
+                            CancellationToken = cancellationToken
+                        },
+                        async (change, ct) =>
+                        {
+                            await BackupFileAsync(change.FilePath, ct);
+                            _databaseService.RemovePendingChange(change.FilePath);
+                        });
                 }
             }
             catch (OperationCanceledException)
@@ -1568,7 +1598,7 @@ public class BackupOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Backs up specific files to Azure.
+    /// Backs up specific files to Azure using parallel file processing.
     /// </summary>
     /// <param name="filePaths">List of file paths to backup</param>
     /// <param name="progress">Progress reporter with file index, total files, file name, overall bytes, total bytes, current file bytes, current file size</param>
@@ -1579,11 +1609,12 @@ public class BackupOrchestrator : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filePaths);
-        Log($"BackupFilesAsync: Starting backup of {filePaths.Count} files");
+        Log($"BackupFilesAsync: Starting parallel backup of {filePaths.Count} files (max {MaxParallelFileBackups} concurrent)");
 
         var totalFiles = filePaths.Count;
         long totalBytes = 0;
         long processedBytes = 0;
+        int completedFiles = 0;
 
         // Calculate total bytes
         foreach (var filePath in filePaths)
@@ -1600,64 +1631,77 @@ public class BackupOrchestrator : IAsyncDisposable
             }
         }
 
-        for (var i = 0; i < filePaths.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var filePath = filePaths[i];
-            var fileName = Path.GetFileName(filePath);
-
-            try
+        await Parallel.ForEachAsync(
+            filePaths,
+            new ParallelOptions
             {
-                FileInfo fileInfo = new(filePath);
-                if (!fileInfo.Exists)
-                {
-                    Log($"BackupFilesAsync: File not found, skipping: {filePath}");
-                    continue;
-                }
-
-                var currentFileSize = fileInfo.Length;
-                var fileIndex = i;
-                var baseProcessedBytes = processedBytes;
-                
-                // Report initial progress for this file
-                progress?.Report((fileIndex, totalFiles, fileName, processedBytes, totalBytes, 0, currentFileSize));
-                
-                StatusChanged?.Invoke(this, $"Backing up: {fileName}");
-                
-                // Create per-file progress reporter that updates both file and overall progress
-                Progress<(long current, long total)> fileProgress = new(p =>
-                {
-                    progress?.Report((fileIndex, totalFiles, fileName, baseProcessedBytes + p.current, totalBytes, p.current, currentFileSize));
-                });
-                
-                var success = await BackupFileAsync(filePath, fileProgress, cancellationToken);
-
-                if (success)
-                {
-                    processedBytes += currentFileSize;
-                    Log($"BackupFilesAsync: Successfully backed up: {fileName}");
-                    
-                    // Remove from pending changes queue if it was there
-                    _databaseService.RemovePendingChange(filePath);
-                }
-                else
-                {
-                    Log($"BackupFilesAsync: Failed to backup: {fileName}");
-                }
-
-                // Report completion of this file
-                progress?.Report((i + 1, totalFiles, fileName, processedBytes, totalBytes, currentFileSize, currentFileSize));
-            }
-            catch (Exception ex)
+                MaxDegreeOfParallelism = MaxParallelFileBackups,
+                CancellationToken = cancellationToken
+            },
+            async (filePath, ct) =>
             {
-                Log($"BackupFilesAsync: Error backing up {filePath}: {ex.Message}");
-                ErrorOccurred?.Invoke(this, $"Failed to backup {fileName}: {ex.Message}");
-            }
-        }
+                var fileName = Path.GetFileName(filePath);
+
+                try
+                {
+                    FileInfo fileInfo = new(filePath);
+                    if (!fileInfo.Exists)
+                    {
+                        Log($"BackupFilesAsync: File not found, skipping: {filePath}");
+                        return;
+                    }
+
+                    var currentFileSize = fileInfo.Length;
+                    StatusChanged?.Invoke(this, $"Backing up: {fileName}");
+
+                    // Track per-file byte deltas for accurate aggregate progress
+                    long lastReportedFileBytes = 0;
+
+                    Progress<(long current, long total)> fileProgress = new(p =>
+                    {
+                        var delta = p.current - Interlocked.Exchange(ref lastReportedFileBytes, p.current);
+                        if (delta > 0)
+                            Interlocked.Add(ref processedBytes, delta);
+
+                        progress?.Report((
+                            Volatile.Read(ref completedFiles), totalFiles, fileName,
+                            Interlocked.Read(ref processedBytes), totalBytes,
+                            p.current, currentFileSize));
+                    });
+
+                    var success = await BackupFileAsync(filePath, fileProgress, ct);
+
+                    if (success)
+                    {
+                        // Reconcile any remaining bytes not yet reported by progress callbacks
+                        var finalReported = Interlocked.Exchange(ref lastReportedFileBytes, currentFileSize);
+                        var remaining = currentFileSize - finalReported;
+                        if (remaining > 0)
+                            Interlocked.Add(ref processedBytes, remaining);
+
+                        var done = Interlocked.Increment(ref completedFiles);
+                        Log($"BackupFilesAsync: [{done}/{totalFiles}] Successfully backed up: {fileName}");
+                        _databaseService.RemovePendingChange(filePath);
+
+                        progress?.Report((
+                            done, totalFiles, fileName,
+                            Interlocked.Read(ref processedBytes), totalBytes,
+                            currentFileSize, currentFileSize));
+                    }
+                    else
+                    {
+                        Log($"BackupFilesAsync: Failed to backup: {fileName}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"BackupFilesAsync: Error backing up {filePath}: {ex.Message}");
+                    ErrorOccurred?.Invoke(this, $"Failed to backup {fileName}: {ex.Message}");
+                }
+            });
 
         StatusChanged?.Invoke(this, $"Backup complete: {totalFiles} files processed");
-        Log($"BackupFilesAsync: Complete - {totalFiles} files processed, {processedBytes} bytes");
+        Log($"BackupFilesAsync: Complete - {totalFiles} files processed, {Interlocked.Read(ref processedBytes)} bytes");
     }
 
     public async ValueTask DisposeAsync()

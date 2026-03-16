@@ -222,6 +222,8 @@ public class ChunkIndexService
 
     /// <summary>
     /// Scans for orphaned chunks in Azure that aren't referenced by any file.
+    /// Uses a lightweight index summary (hash + refcount only) to minimize memory,
+    /// then parallel Azure property queries for orphan details.
     /// </summary>
     /// <param name="progress">Progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -239,39 +241,71 @@ public class ChunkIndexService
         var totalChunks = azureChunks.Count;
         Log($"Found {totalChunks} chunks in Azure");
 
+        // Bulk-load lightweight chunk index summary for fast lookups
+        // Only loads hash + refcount + size + tier — not the full ReferencingFiles list
+        // At 1M chunks this uses ~80 MB vs ~1.5 GB for full ChunkIndexEntry objects
+        var indexSummary = _databaseService.GetChunkIndexSummaryMap();
+        Log($"Loaded lightweight index summary for {indexSummary.Count} chunks");
+
+        // Phase 1: Identify orphans using local lookups only (no HTTP)
+        var orphanHashes = new List<(string hash, long cachedSize, StorageTier cachedTier)>();
         var scanned = 0;
         foreach (var chunkHash in azureChunks)
         {
             cancellationToken.ThrowIfCancellationRequested();
             scanned++;
-            progress?.Report((scanned, totalChunks, chunkHash));
 
-            var entry = _databaseService.GetChunkIndexEntry(chunkHash);
-            
-            if (entry == null || entry.ReferenceCount == 0)
+            if (scanned % 500 == 0 || scanned == totalChunks)
             {
-                // This chunk is not in our index or has no references - it's an orphan
-                long sizeBytes = 0;
-                StorageTier tier = StorageTier.Hot;
+                progress?.Report((scanned, totalChunks, chunkHash));
+            }
 
-                // Try to get size and tier from Azure
+            if (indexSummary.TryGetValue(chunkHash, out var summary))
+            {
+                if (summary.ReferenceCount == 0)
+                {
+                    orphanHashes.Add((chunkHash, summary.SizeBytes, summary.Tier));
+                }
+            }
+            else
+            {
+                // Not in index at all — orphan with no cached info
+                orphanHashes.Add((chunkHash, 0, StorageTier.Hot));
+            }
+        }
+
+        Log($"Identified {orphanHashes.Count} potential orphans. Fetching details in parallel...");
+
+        // Phase 2: Fetch size/tier for orphans in parallel from Azure
+        const int maxParallelQueries = 32;
+        int queried = 0;
+        object resultLock = new();
+
+        await Parallel.ForEachAsync(
+            orphanHashes,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maxParallelQueries,
+                CancellationToken = cancellationToken
+            },
+            async (item, ct) =>
+            {
+                var (chunkHash, cachedSize, cachedTier) = item;
+                long sizeBytes = cachedSize;
+                StorageTier tier = cachedTier;
+
                 try
                 {
-                    var (size, blobTier) = await GetChunkInfoFromAzureAsync(chunkHash, cancellationToken);
+                    var (size, blobTier) = await GetChunkInfoFromAzureAsync(chunkHash, ct);
                     sizeBytes = size;
                     tier = blobTier;
                 }
                 catch
                 {
-                    // Use cached info if available
-                    if (entry != null)
-                    {
-                        sizeBytes = entry.SizeBytes;
-                        tier = entry.CurrentTier;
-                    }
+                    // Use cached values from index summary
                 }
 
-                var orphanEntry = entry ?? new ChunkIndexEntry
+                var orphanEntry = new ChunkIndexEntry
                 {
                     ChunkHash = chunkHash,
                     SizeBytes = sizeBytes,
@@ -280,10 +314,18 @@ public class ChunkIndexService
                     ReferencingFiles = []
                 };
 
-                result.OrphanedChunks.Add(orphanEntry);
-                result.TotalOrphanSizeBytes += sizeBytes;
-            }
-        }
+                lock (resultLock)
+                {
+                    result.OrphanedChunks.Add(orphanEntry);
+                    result.TotalOrphanSizeBytes += sizeBytes;
+                }
+
+                var count = Interlocked.Increment(ref queried);
+                if (count % 50 == 0 || count == orphanHashes.Count)
+                {
+                    progress?.Report((scanned, totalChunks, $"Querying orphan details... {count}/{orphanHashes.Count}"));
+                }
+            });
 
         result.ChunksScanned = scanned;
         result.ScanDuration = DateTime.UtcNow - startTime;
@@ -295,7 +337,7 @@ public class ChunkIndexService
     }
 
     /// <summary>
-    /// Deletes orphaned chunks from Azure.
+    /// Deletes orphaned chunks from Azure using parallel blob deletions.
     /// </summary>
     /// <param name="orphans">List of orphaned chunks to delete</param>
     /// <param name="progress">Progress reporter</param>
@@ -306,31 +348,50 @@ public class ChunkIndexService
         IProgress<(int deleted, int total, string currentChunk)>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        Log($"Starting cleanup of {orphans.Count} orphaned chunks...");
+        Log($"Starting parallel cleanup of {orphans.Count} orphaned chunks...");
         var result = new CleanupResult { CleanedAt = DateTime.UtcNow };
 
-        var deleted = 0;
-        foreach (var orphan in orphans)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report((deleted, orphans.Count, orphan.ChunkHash));
+        const int maxParallelDeletes = 16;
+        int deleted = 0;
+        object resultLock = new();
 
-            try
+        await Parallel.ForEachAsync(
+            orphans,
+            new ParallelOptions
             {
-                await _blobService.DeleteBlobAsync($"chunks/{orphan.ChunkHash}", cancellationToken);
-                _databaseService.DeleteChunkIndexEntry(orphan.ChunkHash);
-                result.ChunksDeleted++;
-                result.BytesFreed += orphan.SizeBytes;
-                deleted++;
-                Log($"Deleted orphan chunk {orphan.ChunkHash[..8]}...");
-            }
-            catch (Exception ex)
+                MaxDegreeOfParallelism = maxParallelDeletes,
+                CancellationToken = cancellationToken
+            },
+            async (orphan, ct) =>
             {
-                result.FailedDeletions++;
-                result.Errors.Add($"Failed to delete {orphan.ChunkHash[..8]}...: {ex.Message}");
-                Log($"Failed to delete orphan {orphan.ChunkHash[..8]}...: {ex.Message}");
-            }
-        }
+                try
+                {
+                    await _blobService.DeleteBlobAsync($"chunks/{orphan.ChunkHash}", ct);
+                    _databaseService.DeleteChunkIndexEntry(orphan.ChunkHash);
+
+                    lock (resultLock)
+                    {
+                        result.ChunksDeleted++;
+                        result.BytesFreed += orphan.SizeBytes;
+                    }
+
+                    var count = Interlocked.Increment(ref deleted);
+                    if (count % 20 == 0 || count == orphans.Count)
+                    {
+                        progress?.Report((count, orphans.Count, orphan.ChunkHash));
+                        Log($"Cleanup progress: {count}/{orphans.Count} orphans deleted");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (resultLock)
+                    {
+                        result.FailedDeletions++;
+                        result.Errors.Add($"Failed to delete {orphan.ChunkHash[..8]}...: {ex.Message}");
+                    }
+                    Log($"Failed to delete orphan {orphan.ChunkHash[..8]}...: {ex.Message}");
+                }
+            });
 
         Log($"Cleanup complete: {result.ChunksDeleted} deleted, {result.FailedDeletions} failed, " +
             $"{FormatHelper.FormatBytes(result.BytesFreed)} freed");
@@ -486,6 +547,7 @@ public class ChunkIndexService
 
     /// <summary>
     /// Rebuilds the chunk index by scanning all metadata blobs in Azure.
+    /// Uses parallel metadata downloads and batched chunk info lookups.
     /// </summary>
     /// <param name="progress">Progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
@@ -503,47 +565,108 @@ public class ChunkIndexService
         var total = metadataBlobs.Count;
         Log($"Found {total} metadata blobs to process");
 
+        // Phase 1: Download all metadata in parallel (same pattern as ListRestorableFilesAsync)
+        const int maxParallelMetadataDownloads = 32;
+        var allMetadata = new System.Collections.Concurrent.ConcurrentBag<BackedUpFile>();
+        int downloaded = 0;
+
+        await Parallel.ForEachAsync(
+            metadataBlobs,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maxParallelMetadataDownloads,
+                CancellationToken = cancellationToken
+            },
+            async (blobName, ct) =>
+            {
+                try
+                {
+                    var metadata = await _blobService.DownloadFileMetadataAsync(blobName, ct);
+                    if (metadata != null)
+                    {
+                        allMetadata.Add(metadata);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Error downloading metadata {blobName}: {ex.Message}");
+                }
+
+                var count = Interlocked.Increment(ref downloaded);
+                if (count % 50 == 0 || count == total)
+                {
+                    progress?.Report((count, total, $"Downloading metadata... {count}/{total}"));
+                }
+            });
+
+        Log($"Downloaded {allMetadata.Count} metadata entries. Collecting unique chunk hashes...");
+
+        // Phase 2: Collect all unique chunk hashes and fetch their properties in parallel
+        // This replaces N*M sequential HTTP calls with one parallel batch
+        var uniqueChunkHashes = allMetadata
+            .SelectMany(m => m.Chunks.Select(c => c.Hash))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        Log($"Found {uniqueChunkHashes.Count} unique chunks to query");
+
+        const int maxParallelChunkQueries = 32;
+        var chunkInfoCache = new System.Collections.Concurrent.ConcurrentDictionary<string, (long size, StorageTier tier)>(StringComparer.OrdinalIgnoreCase);
+        int queriedChunks = 0;
+
+        await Parallel.ForEachAsync(
+            uniqueChunkHashes,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maxParallelChunkQueries,
+                CancellationToken = cancellationToken
+            },
+            async (chunkHash, ct) =>
+            {
+                try
+                {
+                    var info = await GetChunkInfoFromAzureAsync(chunkHash, ct);
+                    chunkInfoCache.TryAdd(chunkHash, info);
+                }
+                catch
+                {
+                    // Will fall back to chunk.Length when processing
+                }
+
+                var count = Interlocked.Increment(ref queriedChunks);
+                if (count % 100 == 0 || count == uniqueChunkHashes.Count)
+                {
+                    progress?.Report((downloaded, total, $"Querying chunk info... {count}/{uniqueChunkHashes.Count}"));
+                }
+            });
+
+        Log($"Cached info for {chunkInfoCache.Count} chunks. Building index...");
+
+        // Phase 3: Build the index from cached data (all local, no HTTP)
         var processed = 0;
-        foreach (var blobName in metadataBlobs)
+        foreach (var metadata in allMetadata)
         {
             cancellationToken.ThrowIfCancellationRequested();
             processed++;
+            progress?.Report((processed, allMetadata.Count, metadata.LocalPath));
 
-            try
+            foreach (var chunk in metadata.Chunks)
             {
-                var metadata = await _blobService.DownloadFileMetadataAsync(blobName, cancellationToken);
-                if (metadata == null) continue;
+                var size = (long)chunk.Length;
+                var tier = StorageTier.Hot;
 
-                progress?.Report((processed, total, metadata.LocalPath));
-
-                // Add references for each chunk
-                foreach (var chunk in metadata.Chunks)
+                if (chunkInfoCache.TryGetValue(chunk.Hash, out var cached))
                 {
-                    // Get chunk tier from Azure
-                    StorageTier tier = StorageTier.Hot;
-                    long size = 0;
-                    try
-                    {
-                        var (chunkSize, chunkTier) = await GetChunkInfoFromAzureAsync(chunk.Hash, cancellationToken);
-                        tier = chunkTier;
-                        size = chunkSize;
-                    }
-                    catch
-                    {
-                        size = chunk.Length;
-                    }
-
-                    AddReference(chunk.Hash, metadata.LocalPath, chunk.Index, size, tier, false);
+                    size = cached.size;
+                    tier = cached.tier;
                 }
-            }
-            catch (Exception ex)
-            {
-                Log($"Error processing metadata {blobName}: {ex.Message}");
+
+                AddReference(chunk.Hash, metadata.LocalPath, chunk.Index, size, tier, false);
             }
         }
 
         _databaseService.SetIndexMetadata("LastFullRebuildAt", DateTime.UtcNow);
-        Log($"Index rebuild complete: processed {processed} files");
+        Log($"Index rebuild complete: processed {processed} files, {uniqueChunkHashes.Count} unique chunks");
 
         // Backup the newly rebuilt index
         await BackupIndexToAzureAsync(cancellationToken);

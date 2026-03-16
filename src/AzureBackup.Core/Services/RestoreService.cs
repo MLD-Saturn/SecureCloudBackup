@@ -21,6 +21,10 @@ public class RestoreService
     // In practice, most chunks are much smaller, so typical usage is ~100-500 MB
     private const int MaxParallelChunkDownloads = 12;
 
+    // File-level parallelism for multi-file restore operations
+    // 3 files x 12 chunks = 36 concurrent HTTP downloads max
+    private const int MaxParallelFileRestores = 3;
+
     public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? StatusChanged;
     public event EventHandler<string>? ErrorOccurred;
@@ -659,7 +663,7 @@ public class RestoreService
     }
 
     /// <summary>
-    /// Restores multiple files to a specified directory.
+    /// Restores multiple files to a specified directory using parallel file processing.
     /// </summary>
     public async Task<RestoreResult> RestoreFilesAsync(
         IEnumerable<BackedUpFile> files,
@@ -674,32 +678,48 @@ public class RestoreService
 
         RestoreResult result = new();
         var fileList = files.ToList();
+        var totalFiles = fileList.Count;
+        int completedFiles = 0;
+        object resultLock = new();
 
-        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
+        // Pre-compute relative paths (needs the full list for common root detection)
+        var allPaths = fileList.Select(f => f.LocalPath).ToList();
 
-        for (var i = 0; i < fileList.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
+        StatusChanged?.Invoke(this, $"Starting parallel restore of {totalFiles} files (max {MaxParallelFileRestores} concurrent)");
+        Log($"RestoreFilesAsync: Starting parallel restore of {totalFiles} files");
 
-            var file = fileList[i];
-            progress?.Report((i + 1, fileList.Count, file.LocalPath));
-
-            string targetPath;
-            if (preserveFolderStructure)
+        await Parallel.ForEachAsync(
+            fileList,
+            new ParallelOptions
             {
-                var relativePath = GetRelativePath(fileList.Select(f => f.LocalPath).ToList(), file.LocalPath);
-                targetPath = Path.Combine(restoreDirectory, relativePath);
-            }
-            else
+                MaxDegreeOfParallelism = MaxParallelFileRestores,
+                CancellationToken = cancellationToken
+            },
+            async (file, ct) =>
             {
-                targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
-            }
+                string targetPath;
+                if (preserveFolderStructure)
+                {
+                    var relativePath = GetRelativePath(allPaths, file.LocalPath);
+                    targetPath = Path.Combine(restoreDirectory, relativePath);
+                }
+                else
+                {
+                    targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
+                }
 
-            var logPrefix = $"RestoreFilesAsync: [{i + 1}/{fileList.Count}]";
-            var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-                file, targetPath, overwriteExisting, fileProgress: null, logPrefix, cancellationToken);
-            ApplyRestoreOutcome(result, outcome, file, targetPath, recoveredPath, unrecoverableChunks);
-        }
+                var done = Interlocked.Increment(ref completedFiles);
+                progress?.Report((done, totalFiles, file.LocalPath));
+
+                var logPrefix = $"RestoreFilesAsync: [{done}/{totalFiles}]";
+                var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
+                    file, targetPath, overwriteExisting, fileProgress: null, logPrefix, ct);
+
+                lock (resultLock)
+                {
+                    ApplyRestoreOutcome(result, outcome, file, targetPath, recoveredPath, unrecoverableChunks);
+                }
+            });
 
         StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
         return result;
@@ -847,94 +867,109 @@ public class RestoreService
 
         StatusChanged?.Invoke(this, $"Mirror sync: {fileList.Count} files from backup");
 
-        // Build a set of expected files in target directory
-        HashSet<string> expectedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
+        // Build a set of expected files in target directory (thread-safe for parallel access)
+        ConcurrentDictionary<string, byte> expectedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
 
-        // Phase 1: Restore/update files from backup
+        // Phase 1: Restore/update files from backup (parallel)
         var totalOperations = fileList.Count;
-        var currentOp = 0;
+        int completedOps = 0;
+        object resultLock = new();
 
-        foreach (var backupFile in fileList)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            currentOp++;
+        Log($"MirrorSyncToLocalAsync: Starting parallel restore phase ({totalOperations} files, max {MaxParallelFileRestores} concurrent)");
 
-            try
+        await Parallel.ForEachAsync(
+            fileList,
+            new ParallelOptions
             {
-                // Calculate target path by remapping base path
-                var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
-                var targetPath = Path.Combine(targetDirectory, relativePath);
-                expectedLocalFiles.Add(targetPath);
+                MaxDegreeOfParallelism = MaxParallelFileRestores,
+                CancellationToken = cancellationToken
+            },
+            async (backupFile, ct) =>
+            {
+                var currentOp = Interlocked.Increment(ref completedOps);
 
-                var targetDir = Path.GetDirectoryName(targetPath);
-                if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+                try
                 {
-                    Directory.CreateDirectory(targetDir);
-                }
+                    // Calculate target path by remapping base path
+                    var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
+                    var targetPath = Path.Combine(targetDirectory, relativePath);
+                    expectedLocalFiles.TryAdd(targetPath, 0);
 
-                // Check if local file exists and is up to date
-                if (File.Exists(targetPath))
-                {
-                    FileInfo localInfo = new(targetPath);
-                    
-                    // Compare size and modification time
-                    if (localInfo.Length == backupFile.FileSize && 
-                        Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
+                    var targetDir = Path.GetDirectoryName(targetPath);
+                    if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
                     {
-                        // File appears unchanged - verify with hash for certainty
-                        var localHash = await ComputeFileHashAsync(targetPath, cancellationToken);
-                        if (string.Equals(localHash, backupFile.FileHash, StringComparison.OrdinalIgnoreCase))
+                        Directory.CreateDirectory(targetDir);
+                    }
+
+                    // Check if local file exists and is up to date
+                    if (File.Exists(targetPath))
+                    {
+                        FileInfo localInfo = new(targetPath);
+
+                        // Compare size and modification time
+                        if (localInfo.Length == backupFile.FileSize && 
+                            Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
                         {
-                            result.FilesUnchanged++;
-                            progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Unchanged"));
-                            continue;
+                            // File appears unchanged - verify with hash for certainty
+                            var localHash = await ComputeFileHashAsync(targetPath, ct);
+                            if (string.Equals(localHash, backupFile.FileHash, StringComparison.OrdinalIgnoreCase))
+                            {
+                                lock (resultLock) { result.FilesUnchanged++; }
+                                progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Unchanged"));
+                                return;
+                            }
+                        }
+                    }
+
+                    // File is missing or outdated - restore it
+                    progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
+
+                    var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
+                    var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
+                        backupFile, targetPath, overwriteExisting: true, fileProgress: null, logPrefix, ct);
+
+                    lock (resultLock)
+                    {
+                        switch (outcome)
+                        {
+                            case FileRestoreOutcome.Success:
+                                result.FilesTransferred++;
+                                result.BytesTransferred += backupFile.FileSize;
+                                break;
+                            case FileRestoreOutcome.CorruptedRecovery:
+                                result.FilesCorruptedRecovered++;
+                                result.BytesTransferred += backupFile.FileSize;
+                                if (recoveredPath != null)
+                                    result.CorruptedRecoveryPaths.Add(recoveredPath);
+                                break;
+                            case FileRestoreOutcome.Failed:
+                                result.FilesErrored++;
+                                result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
+                                break;
                         }
                     }
                 }
-
-                // File is missing or outdated - restore it
-                progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
-
-                var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
-                var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
-                    backupFile, targetPath, overwriteExisting: true, fileProgress: null, logPrefix, cancellationToken);
-
-                switch (outcome)
+                catch (Exception ex)
                 {
-                    case FileRestoreOutcome.Success:
-                        result.FilesTransferred++;
-                        result.BytesTransferred += backupFile.FileSize;
-                        break;
-                    case FileRestoreOutcome.CorruptedRecovery:
-                        result.FilesCorruptedRecovered++;
-                        result.BytesTransferred += backupFile.FileSize;
-                        if (recoveredPath != null)
-                            result.CorruptedRecoveryPaths.Add(recoveredPath);
-                        break;
-                    case FileRestoreOutcome.Failed:
+                    lock (resultLock)
+                    {
                         result.FilesErrored++;
-                        result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
-                        break;
+                        result.Errors.Add($"Error restoring {backupFile.LocalPath}: {ex.Message}");
+                    }
+                    Log($"MirrorSyncToLocalAsync: Error restoring {backupFile.LocalPath}: {ex.Message}");
                 }
-            }
-            catch (Exception ex)
-            {
-                result.FilesErrored++;
-                result.Errors.Add($"Error restoring {backupFile.LocalPath}: {ex.Message}");
-                Log($"MirrorSyncToLocalAsync: Error restoring {backupFile.LocalPath}: {ex.Message}");
-            }
-        }
+            });
 
         // Phase 2: Delete local files that don't exist in backup (mirror mode)
         StatusChanged?.Invoke(this, "Scanning for files to delete...");
-        
+
         try
         {
             // Normalize target directory for comparison
             var normalizedTargetDir = Path.GetFullPath(targetDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            
+
             var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
-            
+
             foreach (var localFile in localFiles)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -954,11 +989,11 @@ public class RestoreService
                     continue;
                 }
 
-                if (!expectedLocalFiles.Contains(localFile))
+                if (!expectedLocalFiles.ContainsKey(localFile))
                 {
                     try
                     {
-                        progress?.Report((currentOp, totalOperations, Path.GetFileName(localFile), "Deleting"));
+                        progress?.Report((Volatile.Read(ref completedOps), totalOperations, Path.GetFileName(localFile), "Deleting"));
                         File.Delete(localFile);
                         result.FilesDeleted++;
                         Log($"MirrorSyncToLocalAsync: Deleted {localFile}");
