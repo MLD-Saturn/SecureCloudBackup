@@ -76,6 +76,7 @@ public partial class AzureBlobService : IBlobStorageService
         StorageTier.Hot => AccessTier.Hot,
         StorageTier.Cool => AccessTier.Cool,
         StorageTier.Cold => AccessTier.Cold,
+        StorageTier.Archive => AccessTier.Archive,
         _ => AccessTier.Cool // Default to Cool for unknown values
     };
 

@@ -22,7 +22,13 @@ public enum StorageTier
     /// Cold tier - even lower storage cost, higher access cost.
     /// Best for rarely accessed data stored for longer periods.
     /// </summary>
-    Cold
+    Cold,
+
+    /// <summary>
+    /// Archive tier - lowest storage cost, highest access cost and retrieval latency.
+    /// Best for long-term retention where hours of retrieval latency is acceptable.
+    /// </summary>
+    Archive
 }
 
 /// <summary>

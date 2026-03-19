@@ -1,0 +1,211 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:AzureBackup.ViewModels"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1200" d:DesignHeight="700"
+             x:Class="AzureBackup.Views.TierMigrationView"
+             x:DataType="vm:TierMigrationViewModel">
+
+    <Grid RowDefinitions="Auto,Auto,*">
+        <!-- Toolbar -->
+        <Border Classes="card" Margin="0,0,0,8">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto">
+                <Button Content="Load Files" Command="{Binding LoadFilesCommand}" Classes="primary"
+                        ToolTip.Tip="Load all backed-up files from Azure and group by storage tier"/>
+                <Button Grid.Column="1" Content="Deselect All" Command="{Binding DeselectAllFilesCommand}"
+                        Margin="8,0,0,0" Padding="8,4"
+                        ToolTip.Tip="Deselect all files in every tier"/>
+                <Button Grid.Column="2" Content="Cancel" Command="{Binding CancelOperationCommand}"
+                        Margin="8,0,0,0" Padding="8,4"
+                        IsEnabled="{Binding IsOperationInProgress}"
+                        ToolTip.Tip="Cancel the current operation"/>
+
+                <TextBlock Grid.Column="4" Text="{Binding StatusMessage}" VerticalAlignment="Center" Opacity="0.7"/>
+            </Grid>
+        </Border>
+
+        <!-- Progress bar -->
+        <ProgressBar Grid.Row="1" Value="{Binding ProgressValue}" Maximum="100" Margin="0,0,0,8"
+                     IsVisible="{Binding IsOperationInProgress}" Height="4"/>
+
+        <!-- 4 Tier Panes -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,6,*,6,*,6,*">
+
+            <!-- Hot Pane -->
+            <Border Grid.Column="0" Classes="card" x:Name="HotPane" DragDrop.AllowDrop="True">
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Margin="0,0,0,8">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Border Background="#FF5722" CornerRadius="3" Padding="8,2">
+                                    <TextBlock Text="Hot" FontWeight="Bold" Foreground="White" FontSize="13"/>
+                                </Border>
+                                <TextBlock Text="Frequent access" FontSize="11" Opacity="0.6" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                <Button Content="All" Padding="6,2" FontSize="10"
+                                        Command="{Binding #HotPane.((vm:TierMigrationViewModel)DataContext).LoadFilesCommand}"
+                                        Tag="SelectAllHot" x:Name="SelectAllHotBtn"/>
+                                <Button Content="None" Padding="6,2" FontSize="10"
+                                        Tag="DeselectAllHot" x:Name="DeselectAllHotBtn"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+
+                    <ListBox Grid.Row="1" ItemsSource="{Binding HotFiles}" x:Name="HotListBox"
+                             SelectionMode="Multiple">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:BackedUpFileViewModel">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayPath}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding LocalPath}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding FileSizeText}" Opacity="0.6" FontSize="11"
+                                               Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Border Grid.Row="2" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}"
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding HotSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="1" ResizeDirection="Columns" Background="Transparent"/>
+
+            <!-- Cool Pane -->
+            <Border Grid.Column="2" Classes="card" x:Name="CoolPane" DragDrop.AllowDrop="True">
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Margin="0,0,0,8">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Border Background="#2196F3" CornerRadius="3" Padding="8,2">
+                                    <TextBlock Text="Cool" FontWeight="Bold" Foreground="White" FontSize="13"/>
+                                </Border>
+                                <TextBlock Text="Infrequent access" FontSize="11" Opacity="0.6" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                <Button Content="All" Padding="6,2" FontSize="10"
+                                        Tag="SelectAllCool" x:Name="SelectAllCoolBtn"/>
+                                <Button Content="None" Padding="6,2" FontSize="10"
+                                        Tag="DeselectAllCool" x:Name="DeselectAllCoolBtn"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+
+                    <ListBox Grid.Row="1" ItemsSource="{Binding CoolFiles}" x:Name="CoolListBox"
+                             SelectionMode="Multiple">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:BackedUpFileViewModel">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayPath}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding LocalPath}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding FileSizeText}" Opacity="0.6" FontSize="11"
+                                               Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Border Grid.Row="2" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}"
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding CoolSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="3" ResizeDirection="Columns" Background="Transparent"/>
+
+            <!-- Cold Pane -->
+            <Border Grid.Column="4" Classes="card" x:Name="ColdPane" DragDrop.AllowDrop="True">
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Margin="0,0,0,8">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Border Background="#607D8B" CornerRadius="3" Padding="8,2">
+                                    <TextBlock Text="Cold" FontWeight="Bold" Foreground="White" FontSize="13"/>
+                                </Border>
+                                <TextBlock Text="Rare access" FontSize="11" Opacity="0.6" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                <Button Content="All" Padding="6,2" FontSize="10"
+                                        Tag="SelectAllCold" x:Name="SelectAllColdBtn"/>
+                                <Button Content="None" Padding="6,2" FontSize="10"
+                                        Tag="DeselectAllCold" x:Name="DeselectAllColdBtn"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+
+                    <ListBox Grid.Row="1" ItemsSource="{Binding ColdFiles}" x:Name="ColdListBox"
+                             SelectionMode="Multiple">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:BackedUpFileViewModel">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayPath}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding LocalPath}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding FileSizeText}" Opacity="0.6" FontSize="11"
+                                               Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Border Grid.Row="2" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}"
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding ColdSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <GridSplitter Grid.Column="5" ResizeDirection="Columns" Background="Transparent"/>
+
+            <!-- Archive Pane -->
+            <Border Grid.Column="6" Classes="card" x:Name="ArchivePane" DragDrop.AllowDrop="True">
+                <Grid RowDefinitions="Auto,*,Auto">
+                    <StackPanel Margin="0,0,0,8">
+                        <Grid ColumnDefinitions="Auto,*,Auto">
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                <Border Background="#795548" CornerRadius="3" Padding="8,2">
+                                    <TextBlock Text="Archive" FontWeight="Bold" Foreground="White" FontSize="13"/>
+                                </Border>
+                                <TextBlock Text="Long-term" FontSize="11" Opacity="0.6" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                <Button Content="All" Padding="6,2" FontSize="10"
+                                        Tag="SelectAllArchive" x:Name="SelectAllArchiveBtn"/>
+                                <Button Content="None" Padding="6,2" FontSize="10"
+                                        Tag="DeselectAllArchive" x:Name="DeselectAllArchiveBtn"/>
+                            </StackPanel>
+                        </Grid>
+                    </StackPanel>
+
+                    <ListBox Grid.Row="1" ItemsSource="{Binding ArchiveFiles}" x:Name="ArchiveListBox"
+                             SelectionMode="Multiple">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate x:DataType="vm:BackedUpFileViewModel">
+                                <Grid ColumnDefinitions="Auto,*,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayPath}" VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" ToolTip.Tip="{Binding LocalPath}"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding FileSizeText}" Opacity="0.6" FontSize="11"
+                                               Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <Border Grid.Row="2" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}"
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding ArchiveSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

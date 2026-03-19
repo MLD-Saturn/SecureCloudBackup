@@ -46,6 +46,15 @@ public partial class MainWindowViewModel
         {
             StorageHealthViewModel?.RefreshSummaryCommand.Execute(null);
         }
+
+        // Auto-load when switching to Migration view
+        if (view == "Migration" && IsInitialized && previousView != "Migration")
+        {
+            if (TierMigrationViewModel is { HotFiles.Count: 0, CoolFiles.Count: 0, ColdFiles.Count: 0, ArchiveFiles.Count: 0 })
+            {
+                TierMigrationViewModel.LoadFilesCommand.Execute(null);
+            }
+        }
     }
 
     /// <summary>

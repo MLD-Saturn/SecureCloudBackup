@@ -45,6 +45,11 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public StorageHealthViewModel? StorageHealthViewModel { get; private set; }
 
     /// <summary>
+    /// ViewModel for the Tier Migration tab.
+    /// </summary>
+    public TierMigrationViewModel? TierMigrationViewModel { get; private set; }
+
+    /// <summary>
     /// Window title including mode indicator (Portable or Installed).
     /// </summary>
     public string WindowTitle => $"Azure Backup - Encrypted Cloud Backup{AppMode.WindowTitleSuffix}";
@@ -579,6 +584,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         // Initialize Storage Health ViewModel
         StorageHealthViewModel = new StorageHealthViewModel(_chunkIndexService, _databaseService);
+
+        // Initialize Tier Migration ViewModel
+        TierMigrationViewModel = new TierMigrationViewModel(_blobService, _chunkIndexService, msg => AddLog(msg));
 
         // Wire up status events
         _orchestrator.StatusChanged += (s, msg) => AddLog(msg);
