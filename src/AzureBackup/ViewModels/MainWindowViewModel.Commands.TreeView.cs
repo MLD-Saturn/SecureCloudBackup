@@ -425,14 +425,6 @@ public partial class MainWindowViewModel
         });
     }
 
-    /// <summary>
-    /// Called when tree node selection changes.
-    /// </summary>
-    public void OnTreeNodeSelectionChanged()
-    {
-        NotifySelectionChanged();
-    }
-
     #endregion
 
     #region Folder Management Commands

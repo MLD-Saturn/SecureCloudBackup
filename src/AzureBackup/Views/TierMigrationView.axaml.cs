@@ -95,9 +95,11 @@ public partial class TierMigrationView : UserControl
 
             Log(vm, $"WireListBoxDrag: Drag initiated from {sourceTier} pane with {selectedCount} selected file(s)");
             _isDragging = true;
+#pragma warning disable CS0618 // DataObject and DoDragDrop are obsolete; new DataTransfer API requires non-trivial migration
             var data = new DataObject();
             data.Set(TierDragFormat, sourceTier.ToString());
             await DragDrop.DoDragDrop(args, data, DragDropEffects.Move);
+#pragma warning restore CS0618
             _isDragging = false;
         }, RoutingStrategies.Tunnel);
     }
@@ -109,9 +111,11 @@ public partial class TierMigrationView : UserControl
 
         pane.AddHandler(DragDrop.DragOverEvent, (_, args) =>
         {
+#pragma warning disable CS0618 // DragEventArgs.Data is obsolete; new DataTransfer API requires non-trivial migration
             if (args.Data.Contains(TierDragFormat))
             {
                 var sourceTierStr = args.Data.Get(TierDragFormat) as string;
+#pragma warning restore CS0618
                 if (Enum.TryParse<StorageTier>(sourceTierStr, out var source) && source != targetTier)
                 {
                     args.DragEffects = DragDropEffects.Move;
@@ -137,9 +141,11 @@ public partial class TierMigrationView : UserControl
             pane.BorderThickness = new Thickness(0);
             pane.BorderBrush = null;
 
+            #pragma warning disable CS0618 // DragEventArgs.Data is obsolete; new DataTransfer API requires non-trivial migration
             if (!args.Data.Contains(TierDragFormat)) return;
 
             var sourceTierStr = args.Data.Get(TierDragFormat) as string;
+#pragma warning restore CS0618
             if (!Enum.TryParse<StorageTier>(sourceTierStr, out var sourceTier)) return;
             if (sourceTier == targetTier) return;
 

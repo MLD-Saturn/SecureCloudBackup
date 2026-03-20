@@ -153,6 +153,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// Distinguished from IsOperationInProgress which includes simple refreshes.
     /// </summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private bool _isTransferInProgress;
 
     /// <summary>
@@ -278,11 +279,33 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private long _totalBytesToProcess;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private string _operationSpeed = string.Empty;
 
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private string _estimatedTimeRemaining = string.Empty;
+
+    /// <summary>
+    /// Dynamic tooltip text for the system tray icon.
+    /// Shows "Azure Backup — Idle" or "Azure Backup — Syncing — speed — ETA".
+    /// </summary>
+    public string TrayTooltipText
+    {
+        get
+        {
+            if (!IsTransferInProgress)
+                return "Azure Backup \u2014 Idle";
+
+            var text = "Azure Backup \u2014 Syncing";
+            if (!string.IsNullOrEmpty(OperationSpeed))
+                text += $" \u2014 {OperationSpeed}";
+            if (!string.IsNullOrEmpty(EstimatedTimeRemaining))
+                text += $" \u2014 {EstimatedTimeRemaining}";
+            return text;
+        }
+    }
 
     // Track current file index for display (0-based internally, shown as 1-based)
     private int _currentFileIndex;
@@ -384,6 +407,13 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// </summary>
     [ObservableProperty]
     private bool _enableDiagnosticLogging = true;
+
+    /// <summary>
+    /// Font size for log entries. Adjustable via Ctrl+= / Ctrl+- on the Logs tab.
+    /// Persists across tab navigation since the ViewModel outlives the view.
+    /// </summary>
+    [ObservableProperty]
+    private double _logFontSize = 12;
 
     #region Tree View Properties
 
@@ -601,6 +631,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         // Wire up local file selection change events
         LocalFileTreeNodeViewModel.SelectionChanged += OnLocalFileSelectionChanged;
+
+        // Wire up Azure file tree selection change events
+        FileTreeNodeViewModel.SelectionChanged += OnAzureFileSelectionChanged;
         
         // Wire up diagnostic logging events (detailed service logs)
         _orchestrator.DiagnosticLog += OnDiagnosticLog;
@@ -609,7 +642,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _encryptionService.DiagnosticLog += OnDiagnosticLog;
         _restoreService.DiagnosticLog += OnDiagnosticLog;
         _fileWatcherService.DiagnosticLog += OnDiagnosticLog;
-        
+
         // Wire up crash-safe file logger for all service diagnostic events
         if (Program.Logger != null)
         {
@@ -684,6 +717,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private void OnLocalFileSelectionChanged(object? sender, EventArgs e)
     {
         Avalonia.Threading.Dispatcher.UIThread.Post(NotifyLocalSelectionChanged);
+    }
+
+    /// <summary>
+    /// Handles Azure file tree selection changes (checkbox state changes).
+    /// </summary>
+    private void OnAzureFileSelectionChanged(object? sender, EventArgs e)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(NotifySelectionChanged);
     }
 
     private void LoadConfiguration()
@@ -1105,6 +1146,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     {
         // Unsubscribe from static events to prevent memory leaks
         LocalFileTreeNodeViewModel.SelectionChanged -= OnLocalFileSelectionChanged;
+        FileTreeNodeViewModel.SelectionChanged -= OnAzureFileSelectionChanged;
         
         // Cancel any ongoing operations
         _operationCts?.Cancel();

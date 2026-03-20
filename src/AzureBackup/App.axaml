@@ -8,11 +8,11 @@
     <Application.DataTemplates>
         <local:ViewLocator/>
     </Application.DataTemplates>
-  
+
     <Application.Styles>
         <FluentTheme />
     </Application.Styles>
-    
+
     <Application.Resources>
         <vm:BoolToColorConverter x:Key="BoolToColorConverter"/>
         <vm:BoolToStatusConverter x:Key="BoolToStatusConverter"/>
@@ -20,4 +20,19 @@
         <vm:BytesToStringConverter x:Key="BytesToStringConverter"/>
         <vm:PendingToColorConverter x:Key="PendingToColorConverter"/>
     </Application.Resources>
+
+    <TrayIcon.Icons>
+        <TrayIcons>
+            <TrayIcon Icon="/Assets/avalonia-logo.ico"
+                      ToolTipText="Azure Backup">
+                <TrayIcon.Menu>
+                    <NativeMenu>
+                        <NativeMenuItem Header="Show Azure Backup" />
+                        <NativeMenuItemSeparator />
+                        <NativeMenuItem Header="Exit" />
+                    </NativeMenu>
+                </TrayIcon.Menu>
+            </TrayIcon>
+        </TrayIcons>
+    </TrayIcon.Icons>
 </Application>

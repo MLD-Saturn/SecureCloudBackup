@@ -136,15 +136,18 @@ public partial class MainWindow : Window
 
     /// <summary>
     /// Shows a non-blocking warning dialog when Azure is unavailable after successful unlock.
+    /// The error message is selectable, scrollable, and supports Ctrl+C / right-click copy.
     /// </summary>
     private async Task ShowAzureWarningAsync(string message)
     {
         var dialog = new Window
         {
             Title = "Azure Connection Warning",
-            Width = 460,
-            Height = 200,
+            Width = 500,
+            MinHeight = 200,
+            MaxHeight = 500,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            SizeToContent = SizeToContent.Height,
             CanResize = false,
             Content = new StackPanel
             {
@@ -152,12 +155,16 @@ public partial class MainWindow : Window
                 Spacing = 16,
                 Children =
                 {
-                    new TextBlock
+                    new ScrollViewer
                     {
-                        Text = message,
-                        TextWrapping = Avalonia.Media.TextWrapping.Wrap
+                        MaxHeight = 300,
+                        Content = new SelectableTextBlock
+                        {
+                            Text = message,
+                            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+                        }
                     },
-                    new TextBlock
+                    new SelectableTextBlock
                     {
                         Text = "Local files are still available. You can update connection settings in the Settings tab.",
                         Opacity = 0.7,
