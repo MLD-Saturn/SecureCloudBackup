@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -15,7 +16,7 @@ public class ChunkingService
 
     // Size constants for readability
     private const int KB = 1024;
-    private const int MB = 1024 * KB;
+    private const int MB = KB * KB;
 
     // Default chunking parameters
     private const int DefaultMinChunkSize = 64 * KB;       // 64 KB minimum chunk
@@ -43,8 +44,8 @@ public class ChunkingService
     private const uint HashPrime = 31;
     private const int WindowSize = 48;
 
-    // Precomputed: HashPrime^(WindowSize-1)
-    private static readonly uint HashPrimePower = ComputePower(HashPrime, WindowSize - 1);
+    // Precomputed: HashPrime^(WindowSize-1) = 31^47 mod 2^32
+    private const uint HashPrimePower = 969_581_023;
 
     /// <summary>
     /// Chunk size configuration by file category.
@@ -174,27 +175,32 @@ public class ChunkingService
     }
 
     /// <summary>
-    /// Splits a file into content-defined chunks.
-    /// Returns chunk information including hash and boundaries.
-    /// Chunk sizes are adaptive based on file type and size.
+    /// Splits a file into content-defined chunks and computes the whole-file SHA-256 hash
+    /// in a single pass. Chunk sizes are adaptive based on file type and size.
     /// Files larger than 500 MB use 64 MB average chunks for efficiency.
     /// </summary>
-    public async Task<List<ChunkInfo>> ChunkFileAsync(string filePath, CancellationToken cancellationToken = default)
+    public async Task<(List<ChunkInfo> Chunks, string FileHash)> ChunkFileAsync(
+        string filePath, CancellationToken cancellationToken = default)
     {
         List<ChunkInfo> chunks = new();
-        
+        using var fileHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        // Scale FileStream internal buffer to file size — avoids 1 MB LOH allocation for tiny files
+        var streamBufferSize = (int)Math.Clamp(new FileInfo(filePath).Length, 4096, 1024 * 1024);
         await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 
-            bufferSize: 1024 * 1024, useAsync: true);
-        
+            bufferSize: streamBufferSize, useAsync: true);
+
         var fileLength = stream.Length;
         var config = GetChunkConfig(filePath, fileLength);
-        
+
         // For small files, treat as single chunk
         if (fileLength <= config.MinChunkSize)
         {
             byte[] data = new byte[fileLength];
             await stream.ReadExactlyAsync(data, cancellationToken);
-            
+
+            fileHasher.AppendData(data);
+
             chunks.Add(new ChunkInfo
             {
                 Index = 0,
@@ -202,13 +208,15 @@ public class ChunkingService
                 Length = (int)fileLength,
                 Hash = ComputeChunkHash(data)
             });
-            
-            return chunks;
+
+            return (chunks, FinalizeFileHash(fileHasher));
         }
 
         // Content-defined chunking for larger files
-        // Buffer size adapts to max chunk size for the file type
-        byte[] buffer = new byte[config.MaxChunkSize + WindowSize];
+        // Buffer must hold one full max-sized chunk + rolling hash window.
+        // Cap to file size for files smaller than MaxChunkSize to avoid oversized allocations.
+        var cdcBufferSize = (int)Math.Min((long)config.MaxChunkSize + WindowSize, fileLength);
+        byte[] buffer = new byte[cdcBufferSize];
         var chunkStart = 0L;
         var position = 0L;
         var chunkIndex = 0;
@@ -257,14 +265,17 @@ public class ChunkingService
                 
                 if (isChunkBoundary || isEndOfFile)
                 {
-                    var chunkData = buffer.AsSpan(0, chunkLength).ToArray();
-                    
+                    var chunkSpan = buffer.AsSpan(0, chunkLength);
+
+                    // Accumulate into file-level hash
+                    fileHasher.AppendData(chunkSpan);
+
                     chunks.Add(new ChunkInfo
                     {
                         Index = chunkIndex++,
                         Offset = chunkStart,
                         Length = chunkLength,
-                        Hash = ComputeChunkHash(chunkData)
+                        Hash = ComputeChunkHash(chunkSpan)
                     });
 
                     chunkStart += chunkLength;
@@ -278,12 +289,22 @@ public class ChunkingService
                     break; // Move to next buffer read
                 }
             }
-            
+
             // Handle case where we read the entire remaining file without hitting a boundary
             if (chunkStart >= fileLength) break;
         }
 
-        return chunks;
+        return (chunks, FinalizeFileHash(fileHasher));
+    }
+
+    /// <summary>
+    /// Finalizes an IncrementalHash and returns the hex string.
+    /// </summary>
+    private static string FinalizeFileHash(IncrementalHash hasher)
+    {
+        Span<byte> hash = stackalloc byte[32];
+        hasher.TryGetHashAndReset(hash, out _);
+        return Convert.ToHexString(hash);
     }
 
     /// <summary>
@@ -329,16 +350,4 @@ public class ChunkingService
         return data;
     }
 
-    private static uint ComputePower(uint baseVal, uint exp)
-    {
-        uint result = 1;
-        while (exp > 0)
-        {
-            if ((exp & 1) == 1)
-                result *= baseVal;
-            baseVal *= baseVal;
-            exp >>= 1;
-        }
-        return result;
     }
-}

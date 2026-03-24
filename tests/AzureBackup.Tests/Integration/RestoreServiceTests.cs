@@ -389,7 +389,7 @@ public class RestoreServiceTests : IAsyncLifetime
     {
         FileInfo fileInfo = new(filePath);
         var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Upload each chunk
         foreach (var chunk in chunks)

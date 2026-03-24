@@ -97,8 +97,8 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(file2, content);
 
         // Act
-        var chunks1 = await _chunkingService.ChunkFileAsync(file1);
-        var chunks2 = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
+        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
 
         // Assert - Same content should produce same chunk hashes
         Assert.Equal(chunks1.Count, chunks2.Count);
@@ -121,7 +121,7 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(sourceFile, content);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
 
         // Assert - Chunks should be contiguous
         var sortedChunks = chunks.OrderBy(c => c.Offset).ToList();
@@ -147,7 +147,7 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(sourceFile, content);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
 
         // Assert
         for (int i = 0; i < chunks.Count; i++)
@@ -164,7 +164,7 @@ public class DataIntegrityTests : IAsyncLifetime
         var sourceFile = Path.Combine(_sourceDirectory, "chunk_read_test.bin");
         await File.WriteAllBytesAsync(sourceFile, content);
 
-        var chunks = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
 
         // Act & Assert - Read each chunk and verify it matches the original data
         foreach (var chunk in chunks)
@@ -365,7 +365,7 @@ public class DataIntegrityTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
         var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
 
         foreach (var chunk in chunks)

@@ -226,7 +226,7 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         await File.WriteAllBytesAsync(fullPath, content);
 
         FileInfo fileInfo = new(fullPath);
-        var chunks = await _chunkingService.ChunkFileAsync(fullPath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(fullPath);
         var fileHash = await _chunkingService.ComputeFileHashAsync(fullPath);
 
         foreach (var chunk in chunks)

@@ -54,7 +54,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         var filePath = CreateTestFile($"boundary_{size}.bin", size);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.NotNull(chunks);
@@ -82,7 +82,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         var filePath = CreateTestFile($"adaptive{extension}", 500 * 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         if (expectSmallChunks)
@@ -110,7 +110,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         var filePath = CreateTestFile(filename, 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.Single(chunks);
@@ -126,7 +126,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         await File.WriteAllBytesAsync(filePath, new byte[1024]);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.Single(chunks);
@@ -144,7 +144,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         await File.WriteAllBytesAsync(filePath, new byte[500 * 1024]);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.NotEmpty(chunks);
@@ -162,7 +162,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         await File.WriteAllBytesAsync(filePath, data);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.True(chunks.Count > 1);
@@ -186,7 +186,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         await File.WriteAllBytesAsync(filePath, data);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.NotEmpty(chunks);
@@ -233,8 +233,8 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         await File.WriteAllBytesAsync(file2, data);
 
         // Act
-        var chunks1 = await _chunkingService.ChunkFileAsync(file1);
-        var chunks2 = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
+        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
 
         // Assert - Same content = same chunk hashes
         Assert.Equal(
@@ -342,7 +342,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         new Random(42).NextBytes(data);
         var filePath = Path.Combine(_testDirectory, "read_first.bin");
         await File.WriteAllBytesAsync(filePath, data);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Act
         var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunks[0]);
@@ -359,7 +359,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         new Random(42).NextBytes(data);
         var filePath = Path.Combine(_testDirectory, "read_last.bin");
         await File.WriteAllBytesAsync(filePath, data);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
         var lastChunk = chunks[^1];
 
         // Act
@@ -378,7 +378,7 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         new Random(42).NextBytes(data);
         var filePath = Path.Combine(_testDirectory, "read_middle.bin");
         await File.WriteAllBytesAsync(filePath, data);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
         
         if (chunks.Count < 3) return; // Skip if not enough chunks
         var middleChunk = chunks[chunks.Count / 2];
@@ -449,13 +449,13 @@ public class ChunkingServiceEdgeCaseTests : IAsyncLifetime
         var results = await Task.WhenAll(tasks);
 
         // Assert - All should return identical results
-        var firstResult = results[0];
+        var firstResult = results[0].Chunks;
         foreach (var result in results.Skip(1))
         {
-            Assert.Equal(firstResult.Count, result.Count);
+            Assert.Equal(firstResult.Count, result.Chunks.Count);
             for (int i = 0; i < firstResult.Count; i++)
             {
-                Assert.Equal(firstResult[i].Hash, result[i].Hash);
+                Assert.Equal(firstResult[i].Hash, result.Chunks[i].Hash);
             }
         }
     }

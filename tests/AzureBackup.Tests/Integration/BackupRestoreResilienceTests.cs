@@ -455,7 +455,7 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
         var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
 
         foreach (var chunk in chunks)

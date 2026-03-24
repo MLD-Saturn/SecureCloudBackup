@@ -833,33 +833,44 @@ public class BackupOrchestrator : IAsyncDisposable
                 }
             }
 
-
-            // Get file info
+            // Get file info and existing backup record
             FileInfo fileInfo = new(filePath);
-            var fileHash = await _chunkingService.ComputeFileHashAsync(filePath, cancellationToken);
-
-            // Check if file has changed
             var existingFile = _databaseService.GetBackedUpFile(filePath);
-            if (existingFile != null && existingFile.FileHash == fileHash)
+
+            // Quick metadata check: skip expensive file reads if size and timestamp match.
+            // For unchanged files this avoids reading the entire file just to hash it.
+            if (existingFile != null && existingFile.Status == BackupStatus.Completed &&
+                existingFile.FileSize == fileInfo.Length &&
+                Math.Abs((fileInfo.LastWriteTimeUtc - existingFile.LastModified).TotalSeconds) < 2)
             {
-                // File unchanged - report as complete
+                Log($"BackupFileAsync: Metadata unchanged, skipping: {Path.GetFileName(filePath)}");
                 progress?.Report((fileInfo.Length, fileInfo.Length));
                 return true;
             }
 
             StatusChanged?.Invoke(this, $"Backing up: {Path.GetFileName(filePath)}");
 
-            // Chunk the file
-            var chunks = await _chunkingService.ChunkFileAsync(filePath, cancellationToken);
+            // Chunk the file and compute file hash in a single pass.
+            // Eliminates a separate full-file read for hashing.
+            var (chunks, fileHash) = await _chunkingService.ChunkFileAsync(filePath, cancellationToken);
+
+            // Hash-level verification: if file content is actually identical despite metadata difference
+            // (e.g., file was touched but not modified), skip the upload
+            if (existingFile != null && existingFile.FileHash == fileHash)
+            {
+                Log($"BackupFileAsync: Hash unchanged despite metadata change, skipping: {Path.GetFileName(filePath)}");
+                progress?.Report((fileInfo.Length, fileInfo.Length));
+                return true;
+            }
 
             // Determine which chunks need uploading
             var existingChunks = existingFile?.Chunks ?? [];
             var chunksToUpload = _chunkingService.GetChangedChunks(existingChunks, chunks);
-            
+
             // For new files (no existing backup), skip existence checks - all chunks are new
             // This reduces API calls by 50% for new file uploads
             var isNewFile = existingFile == null;
-            
+
             // Get the storage tier based on the watched folder configuration
             var storageTier = GetStorageTierForFile(filePath);
             Log($"BackupFileAsync: File is {(isNewFile ? "NEW" : "EXISTING")}, {chunksToUpload.Count} chunks to upload, tier={storageTier}");

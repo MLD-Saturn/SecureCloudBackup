@@ -41,7 +41,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("small.txt", 1024); // 1 KB
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.Single(chunks);
@@ -57,7 +57,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("empty.txt", 0);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.Single(chunks);
@@ -75,7 +75,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("large.bin", 2 * 1024 * 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         Assert.True(chunks.Count >= 2);
@@ -98,7 +98,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("offsets.bin", 1024 * 1024); // 1 MB
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert - Offsets should be contiguous
         long expectedOffset = 0;
@@ -116,7 +116,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("hashes.bin", 512 * 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert
         foreach (var chunk in chunks)
@@ -141,8 +141,8 @@ public class ChunkingServiceTests : IAsyncLifetime
         await File.WriteAllBytesAsync(file2, content);
 
         // Act
-        var chunks1 = await _chunkingService.ChunkFileAsync(file1);
-        var chunks2 = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
+        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
 
         // Assert
         Assert.Equal(chunks1.Count, chunks2.Count);
@@ -161,7 +161,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var file1 = Path.Combine(_testDirectory, "original.bin");
         await File.WriteAllBytesAsync(file1, content);
         
-        var chunks1 = await _chunkingService.ChunkFileAsync(file1);
+        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
         
         // Modify content in the middle
         content[250 * 1024] = (byte)(content[250 * 1024] ^ 0xFF);
@@ -169,7 +169,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         await File.WriteAllBytesAsync(file2, content);
 
         // Act
-        var chunks2 = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
 
         // Assert - Some chunks should be the same (deduplication opportunity)
         var hashes1 = chunks1.Select(c => c.Hash).ToHashSet();
@@ -190,7 +190,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("code.cs", 500 * 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert - Should have more chunks due to smaller max size for code files
         Assert.True(chunks.Count >= 4); // 500KB / 128KB max = ~4 chunks
@@ -203,7 +203,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("video.mp4", 10 * 1024 * 1024); // 10 MB
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert - Should have fewer chunks due to larger max size
         Assert.True(chunks.Count <= 10); // 10MB / 1MB min = ~10 chunks max
@@ -259,7 +259,7 @@ public class ChunkingServiceTests : IAsyncLifetime
     {
         // Arrange
         var filePath = CreateTestFile("unchanged.bin", 256 * 1024);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Act
         var changed = _chunkingService.GetChangedChunks(chunks, chunks);
@@ -273,7 +273,7 @@ public class ChunkingServiceTests : IAsyncLifetime
     {
         // Arrange
         var filePath = CreateTestFile("new.bin", 256 * 1024);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
         List<AzureBackup.Core.Models.ChunkInfo> existingChunks = new();
 
         // Act
@@ -290,14 +290,14 @@ public class ChunkingServiceTests : IAsyncLifetime
         var content1 = CreateRandomContent(512 * 1024); // 512 KB
         var file1 = Path.Combine(_testDirectory, "v1.bin");
         await File.WriteAllBytesAsync(file1, content1);
-        var chunks1 = await _chunkingService.ChunkFileAsync(file1);
+        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
 
         // Create completely different content for v2 to ensure new chunks
         byte[] content2 = new byte[512 * 1024];
         new Random(999).NextBytes(content2); // Different seed = different content
         var file2 = Path.Combine(_testDirectory, "v2.bin");
         await File.WriteAllBytesAsync(file2, content2);
-        var chunks2 = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
 
         // Act
         var changed = _chunkingService.GetChangedChunks(chunks1, chunks2);
@@ -318,7 +318,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var content = CreateRandomContent(256 * 1024);
         var filePath = Path.Combine(_testDirectory, "readable.bin");
         await File.WriteAllBytesAsync(filePath, content);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Act
         var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunks[0]);
@@ -370,7 +370,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         }
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(largeFilePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(largeFilePath);
 
         // Assert - For large files, minimum chunk is 16 MB, so we should have fewer chunks
         // 600 MB / 16 MB min = ~37 chunks max (could be fewer with larger average)
@@ -391,7 +391,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         var filePath = CreateTestFile("medium_file.bin", 5 * 1024 * 1024);
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
 
         // Assert - Should use default chunking (64KB-1MB range)
         var totalSize = chunks.Sum(c => (long)c.Length);
@@ -419,7 +419,7 @@ public class ChunkingServiceTests : IAsyncLifetime
         }
 
         // Act
-        var chunks = await _chunkingService.ChunkFileAsync(largeVideoPath);
+        var (chunks, _) = await _chunkingService.ChunkFileAsync(largeVideoPath);
 
         // Assert - Large video files should use optimized large chunks
         // Because file size > 500MB, it overrides the video-specific config
