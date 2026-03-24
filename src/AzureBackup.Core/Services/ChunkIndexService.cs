@@ -353,7 +353,7 @@ public class ChunkIndexService
         Log($"Starting parallel cleanup of {orphans.Count} orphaned chunks...");
         var result = new CleanupResult { CleanedAt = DateTime.UtcNow };
 
-        const int maxParallelDeletes = 16;
+        const int maxParallelDeletes = 128;
         int deleted = 0;
         object resultLock = new();
 
@@ -569,10 +569,14 @@ public class ChunkIndexService
         var total = metadataBlobs.Count;
         Log($"Found {total} metadata blobs to process");
 
-        // Phase 1: Download all metadata in parallel, tracking blob names for cleanup
-        const int maxParallelMetadataDownloads = 32;
+        // Phase 1 & 2: Download metadata and list chunk blobs concurrently.
+        // These query different prefixes (metadata/ vs chunks/) so they don't contend.
+        const int maxParallelMetadataDownloads = 64;
         var allMetadata = new System.Collections.Concurrent.ConcurrentBag<(string blobName, BackedUpFile file)>();
         int downloaded = 0;
+
+        // Start chunk listing immediately — it doesn't depend on metadata results
+        var chunkListingTask = _blobService.ListChunkBlobsWithPropertiesAsync(cancellationToken);
 
         await Parallel.ForEachAsync(
             metadataBlobs,
@@ -603,12 +607,11 @@ public class ChunkIndexService
                 }
             });
 
-        Log($"Downloaded {allMetadata.Count} metadata entries. Listing chunks from Azure...");
+        Log($"Downloaded {allMetadata.Count} metadata entries. Awaiting chunk listing...");
 
-        // Phase 2: List all chunk blobs with properties in a single API call
-        // Replaces N individual GetBlobProperties HEAD requests with one paginated listing
+        // Await the chunk listing that was running concurrently with metadata downloads
         progress?.Report((0, 1, "Listing all chunks from Azure..."));
-        var chunkInfoCache = await _blobService.ListChunkBlobsWithPropertiesAsync(cancellationToken);
+        var chunkInfoCache = await chunkListingTask;
 
         Log($"Listed {chunkInfoCache.Count} chunks with properties. Checking integrity...");
 
@@ -659,7 +662,7 @@ public class ChunkIndexService
                     .ToList();
 
                 // Parallel deletion of incomplete metadata and orphaned chunks
-                const int maxParallelDeletes = 16;
+                const int maxParallelDeletes = 128;
                 int deletedCount = 0;
                 int deletedMetadata = 0;
                 int deletedChunks = 0;

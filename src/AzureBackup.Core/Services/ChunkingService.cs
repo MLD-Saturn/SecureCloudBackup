@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Threading.Channels;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -330,6 +331,168 @@ public class ChunkingService
         
         var existingHashes = existingChunks.Select(c => c.Hash).ToHashSet(StringComparer.Ordinal);
         return newChunks.Where(c => !existingHashes.Contains(c.Hash)).ToList();
+    }
+
+    /// <summary>
+    /// Chunks a file and streams only the changed chunks to a bounded channel in a single file open.
+    /// Phase 1: Sequential CDC pass — produces chunk metadata + file hash (no data retained).
+    /// Phase 2: Filtered seek pass — re-reads only chunks not in existingHashes from the same stream.
+    /// The caller provides consumer tasks that read ChunkPayloads from the channel for upload.
+    /// Backpressure is handled by the bounded channel — the producer blocks when consumers are busy.
+    /// </summary>
+    /// <param name="filePath">Path to the file to chunk</param>
+    /// <param name="existingHashes">Hashes of chunks already stored in Azure (from previous backup)</param>
+    /// <param name="channel">Bounded channel to write changed chunk payloads to</param>
+    /// <param name="cdcProgress">Reports CDC phase progress as (bytesProcessed, totalBytes)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>All chunk metadata and the file-level SHA-256 hash</returns>
+    public async Task<(List<ChunkInfo> Chunks, string FileHash)> ChunkAndStreamChangedAsync(
+        string filePath,
+        HashSet<string> existingHashes,
+        ChannelWriter<ChunkPayload> channel,
+        IProgress<(long bytesProcessed, long totalBytes, int chunksFound)>? cdcProgress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        ArgumentNullException.ThrowIfNull(existingHashes);
+        ArgumentNullException.ThrowIfNull(channel);
+
+        List<ChunkInfo> chunks = [];
+        using var fileHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        var streamBufferSize = (int)Math.Clamp(new FileInfo(filePath).Length, 4096, 1024 * 1024);
+        await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: streamBufferSize, useAsync: true);
+
+        var fileLength = stream.Length;
+        var config = GetChunkConfig(filePath, fileLength);
+
+        // Phase 1 & 2 combined for small files: single chunk, read once, write to channel if changed
+        if (fileLength <= config.MinChunkSize)
+        {
+            byte[] data = new byte[fileLength];
+            await stream.ReadExactlyAsync(data, cancellationToken);
+
+            fileHasher.AppendData(data);
+
+            var info = new ChunkInfo
+            {
+                Index = 0,
+                Offset = 0,
+                Length = (int)fileLength,
+                Hash = ComputeChunkHash(data)
+            };
+            chunks.Add(info);
+
+            cdcProgress?.Report((fileLength, fileLength, 1));
+
+            if (!existingHashes.Contains(info.Hash))
+            {
+                await channel.WriteAsync(new ChunkPayload(info, data), cancellationToken);
+            }
+            else
+            {
+                info.BlobName = $"chunks/{info.Hash}";
+            }
+
+            return (chunks, FinalizeFileHash(fileHasher));
+        }
+
+        // Phase 1: CDC pass — sequential read, builds chunk list + file hash, no data retained
+        var cdcBufferSize = (int)Math.Min((long)config.MaxChunkSize + WindowSize, fileLength);
+        byte[] buffer = new byte[cdcBufferSize];
+        var chunkStart = 0L;
+        var position = 0L;
+        var chunkIndex = 0;
+        var rollingHash = 0u;
+        byte[] window = new byte[WindowSize];
+        var windowPos = 0;
+        var windowFilled = false;
+
+        while (position < fileLength)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var bytesToRead = (int)Math.Min(buffer.Length, fileLength - chunkStart);
+            stream.Position = chunkStart;
+            var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, bytesToRead), cancellationToken);
+
+            if (bytesRead == 0) break;
+
+            var chunkLength = 0;
+
+            for (var i = 0; i < bytesRead; i++)
+            {
+                var b = buffer[i];
+                chunkLength++;
+
+                if (windowFilled)
+                {
+                    var outByte = window[windowPos];
+                    rollingHash = (rollingHash - outByte * HashPrimePower) * HashPrime + b;
+                }
+                else
+                {
+                    rollingHash = rollingHash * HashPrime + b;
+                }
+
+                window[windowPos] = b;
+                windowPos = (windowPos + 1) % WindowSize;
+                if (windowPos == 0) windowFilled = true;
+
+                var isChunkBoundary = chunkLength >= config.MinChunkSize &&
+                                      ((rollingHash & config.ChunkMask) == 0 || chunkLength >= config.MaxChunkSize);
+
+                var isEndOfFile = chunkStart + chunkLength >= fileLength;
+
+                if (isChunkBoundary || isEndOfFile)
+                {
+                    var chunkSpan = buffer.AsSpan(0, chunkLength);
+                    fileHasher.AppendData(chunkSpan);
+
+                    chunks.Add(new ChunkInfo
+                    {
+                        Index = chunkIndex++,
+                        Offset = chunkStart,
+                        Length = chunkLength,
+                        Hash = ComputeChunkHash(chunkSpan)
+                    });
+
+                    chunkStart += chunkLength;
+                    position = chunkStart;
+                    chunkLength = 0;
+                    rollingHash = 0;
+                    windowFilled = false;
+                    windowPos = 0;
+                    Array.Clear(window);
+
+                    cdcProgress?.Report((chunkStart, fileLength, chunks.Count));
+
+                    break;
+                }
+            }
+
+            if (chunkStart >= fileLength) break;
+        }
+
+        // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream
+        foreach (var chunk in chunks)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (existingHashes.Contains(chunk.Hash))
+            {
+                chunk.BlobName = $"chunks/{chunk.Hash}";
+                continue;
+            }
+
+            stream.Position = chunk.Offset;
+            byte[] data = new byte[chunk.Length];
+            await stream.ReadExactlyAsync(data, cancellationToken);
+            await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
+        }
+
+        return (chunks, FinalizeFileHash(fileHasher));
     }
 
     /// <summary>

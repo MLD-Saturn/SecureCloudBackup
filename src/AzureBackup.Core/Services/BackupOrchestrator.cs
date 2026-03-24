@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Threading.Channels;
 using Azure.Core;
 using Azure.Identity;
 using AzureBackup.Core.Models;
@@ -110,6 +111,17 @@ public class BackupOrchestrator : IAsyncDisposable
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [Orchestrator] {message}");
     }
     
+    /// <summary>
+    /// Formats a byte count as a human-readable string (e.g., "1.5 GB").
+    /// </summary>
+    private static string FormatBytes(long bytes) => bytes switch
+    {
+        >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
+        >= 1L << 20 => $"{bytes / (double)(1L << 20):F1} MB",
+        >= 1L << 10 => $"{bytes / (double)(1L << 10):F1} KB",
+        _ => $"{bytes} B"
+    };
+
     /// <summary>
     /// Gets the WatchedFolder that contains the specified file path.
     /// Returns null if the file is not in any watched folder.
@@ -843,134 +855,112 @@ public class BackupOrchestrator : IAsyncDisposable
                 existingFile.FileSize == fileInfo.Length &&
                 Math.Abs((fileInfo.LastWriteTimeUtc - existingFile.LastModified).TotalSeconds) < 2)
             {
+                StatusChanged?.Invoke(this, $"Unchanged, skipping: {Path.GetFileName(filePath)}");
                 Log($"BackupFileAsync: Metadata unchanged, skipping: {Path.GetFileName(filePath)}");
                 progress?.Report((fileInfo.Length, fileInfo.Length));
                 return true;
             }
 
-            StatusChanged?.Invoke(this, $"Backing up: {Path.GetFileName(filePath)}");
+            var fileName = Path.GetFileName(filePath);
+            StatusChanged?.Invoke(this, $"Analyzing: {fileName} ({FormatBytes(fileInfo.Length)})");
 
-            // Chunk the file and compute file hash in a single pass.
-            // Eliminates a separate full-file read for hashing.
-            var (chunks, fileHash) = await _chunkingService.ChunkFileAsync(filePath, cancellationToken);
-
-            // Hash-level verification: if file content is actually identical despite metadata difference
-            // (e.g., file was touched but not modified), skip the upload
-            if (existingFile != null && existingFile.FileHash == fileHash)
-            {
-                Log($"BackupFileAsync: Hash unchanged despite metadata change, skipping: {Path.GetFileName(filePath)}");
-                progress?.Report((fileInfo.Length, fileInfo.Length));
-                return true;
-            }
-
-            // Determine which chunks need uploading
+            // Determine which chunks need uploading using existing backup's chunk hashes
             var existingChunks = existingFile?.Chunks ?? [];
-            var chunksToUpload = _chunkingService.GetChangedChunks(existingChunks, chunks);
+            var existingHashes = existingChunks.Select(c => c.Hash).ToHashSet(StringComparer.Ordinal);
 
             // For new files (no existing backup), skip existence checks - all chunks are new
-            // This reduces API calls by 50% for new file uploads
             var isNewFile = existingFile == null;
 
             // Get the storage tier based on the watched folder configuration
             var storageTier = GetStorageTierForFile(filePath);
-            Log($"BackupFileAsync: File is {(isNewFile ? "NEW" : "EXISTING")}, {chunksToUpload.Count} chunks to upload, tier={storageTier}");
 
-            // Upload changed chunks with parallel processing for better bandwidth utilization
+            // Pipeline: CDC + filtered upload in a single file open.
+            // The bounded channel provides backpressure — the producer blocks when
+            // MaxParallelChunkUploads consumers are busy uploading.
+            var channel = Channel.CreateBounded<ChunkPayload>(new BoundedChannelOptions(MaxParallelChunkUploads)
+            {
+                SingleWriter = true,
+                FullMode = BoundedChannelFullMode.Wait
+            });
+
             long bytesUploaded = 0;
             var totalFileSize = fileInfo.Length;
-            object uploadLock = new();
-            
-            // Use parallel uploads for files with multiple chunks
-            if (chunksToUpload.Count > 1)
+
+            // CDC progress: report chunking phase to the user so large files don't appear hung
+            Progress<(long bytesProcessed, long totalBytes, int chunksFound)> cdcProgress = new(p =>
             {
-                // Parallel upload with semaphore to limit concurrency
-                using SemaphoreSlim semaphore = new(MaxParallelChunkUploads);
-                var uploadTasks = chunksToUpload.Select(async chunk =>
+                StatusChanged?.Invoke(this, $"Chunking: {fileName} — {FormatBytes(p.bytesProcessed)}/{FormatBytes(p.totalBytes)} ({p.chunksFound} chunks)");
+            });
+
+            // Producer: CDC pass + filtered seek pass, writes changed chunks to channel
+            var producerTask = Task.Run(async () =>
+            {
+                try
                 {
-                    await semaphore.WaitAsync(cancellationToken);
-                    var chunkData = Array.Empty<byte>();
+                    var (producedChunks, producedHash) = await _chunkingService.ChunkAndStreamChangedAsync(
+                        filePath, existingHashes, channel.Writer, cdcProgress, cancellationToken);
+                    return (producedChunks, producedHash);
+                }
+                finally
+                {
+                    channel.Writer.Complete();
+                }
+            }, cancellationToken);
+
+            // Track chunks uploaded for status messages
+            int chunksUploadedCount = 0;
+
+            // Consumers: upload workers read from channel in parallel
+            var consumerTasks = Enumerable.Range(0, MaxParallelChunkUploads).Select(async _ =>
+            {
+                await foreach (var payload in channel.Reader.ReadAllAsync(cancellationToken))
+                {
                     try
                     {
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                        chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
-
-                        // Use direct upload for new files (skip existence check)
-                        // Use regular upload for modified files (check for unchanged chunks)
-                        chunk.BlobName = isNewFile
-                            ? await _blobService.UploadChunkDirectAsync(chunkData, chunk.Hash, storageTier,
+                        payload.Info.BlobName = isNewFile
+                            ? await _blobService.UploadChunkDirectAsync(payload.Data, payload.Info.Hash, storageTier,
                                 new Progress<long>(b =>
                                 {
-                                    lock (uploadLock)
-                                    {
-                                        bytesUploaded += b;
-                                        progress?.Report((bytesUploaded, totalFileSize));
-                                    }
+                                    var uploaded = Interlocked.Add(ref bytesUploaded, b);
+                                    progress?.Report((uploaded, totalFileSize));
                                 }),
                                 cancellationToken)
-                            : await _blobService.UploadChunkAsync(chunkData, chunk.Hash, storageTier,
+                            : await _blobService.UploadChunkAsync(payload.Data, payload.Info.Hash, storageTier,
                                 new Progress<long>(b =>
                                 {
-                                    lock (uploadLock)
-                                    {
-                                        bytesUploaded += b;
-                                        progress?.Report((bytesUploaded, totalFileSize));
-                                    }
+                                    var uploaded = Interlocked.Add(ref bytesUploaded, b);
+                                    progress?.Report((uploaded, totalFileSize));
                                 }),
                                 cancellationToken);
+
+                        var completed = Interlocked.Increment(ref chunksUploadedCount);
+                        StatusChanged?.Invoke(this, $"Uploading: {fileName} — chunk {completed} ({FormatBytes(Interlocked.Read(ref bytesUploaded))}/{FormatBytes(totalFileSize)})");
                     }
                     finally
                     {
-                        CryptographicOperations.ZeroMemory(chunkData);
-                        semaphore.Release();
-                    }
-                }).ToList();
-                
-                await Task.WhenAll(uploadTasks);
-            }
-            else
-            {
-                // Single chunk - upload directly without parallelization overhead
-                foreach (var chunk in chunksToUpload)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    var chunkData = await _chunkingService.ReadChunkAsync(filePath, chunk, cancellationToken);
-                    try
-                    {
-                        // Use direct upload for new files (skip existence check)
-                        chunk.BlobName = isNewFile
-                            ? await _blobService.UploadChunkDirectAsync(chunkData, chunk.Hash, storageTier,
-                                new Progress<long>(b => 
-                                {
-                                    bytesUploaded += b;
-                                    progress?.Report((bytesUploaded, totalFileSize));
-                                }), 
-                                cancellationToken)
-                            : await _blobService.UploadChunkAsync(chunkData, chunk.Hash, storageTier,
-                                new Progress<long>(b => 
-                                {
-                                    bytesUploaded += b;
-                                    progress?.Report((bytesUploaded, totalFileSize));
-                                }), 
-                                cancellationToken);
-                    }
-                    finally
-                    {
-                        CryptographicOperations.ZeroMemory(chunkData);
+                        CryptographicOperations.ZeroMemory(payload.Data);
                     }
                 }
+            }).ToArray();
+
+            // Wait for both producer and all consumers to complete
+            var (chunks, fileHash) = await producerTask;
+            await Task.WhenAll(consumerTasks);
+
+            // Hash-level verification: if file content is actually identical despite metadata difference
+            if (existingFile != null && existingFile.FileHash == fileHash)
+            {
+                StatusChanged?.Invoke(this, $"Verified unchanged: {fileName}");
+                Log($"BackupFileAsync: Hash unchanged despite metadata change, skipping: {fileName}");
+                progress?.Report((fileInfo.Length, fileInfo.Length));
+                return true;
             }
 
-            // Update blob names for existing chunks
-            foreach (var chunk in chunks.Where(c => !chunksToUpload.Contains(c)))
-            {
-                chunk.BlobName = $"chunks/{chunk.Hash}";
-            }
+            var chunksToUpload = chunks.Where(c => !existingHashes.Contains(c.Hash)).ToList();
+            Log($"BackupFileAsync: File is {(isNewFile ? "NEW" : "EXISTING")}, {chunksToUpload.Count} chunks uploaded, tier={storageTier}");
 
             // Save file metadata
-            // BlobName uses HMAC-SHA256 keyed by the derived encryption key for deterministic
-            // naming that cannot be guessed without the password.
+            StatusChanged?.Invoke(this, $"Saving metadata: {fileName}");
             var metadataHash = _encryptionService.ComputeHmacHex(filePath);
             BackedUpFile backedUpFile = new()
             {
@@ -1048,6 +1038,8 @@ public class BackupOrchestrator : IAsyncDisposable
                 ChunksUploaded = chunksToUpload.Count,
                 TotalChunks = chunks.Count
             });
+
+            StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatBytes(bytesUploaded)})");
 
             return true;
         }

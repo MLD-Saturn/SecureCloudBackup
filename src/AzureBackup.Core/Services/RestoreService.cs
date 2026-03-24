@@ -761,7 +761,7 @@ public class RestoreService
     public async Task<bool> DeleteFileAsync(BackedUpFile file, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(file);
-        
+
         try
         {
             StatusChanged?.Invoke(this, $"Deleting: {Path.GetFileName(file.LocalPath)}");
@@ -786,6 +786,105 @@ public class RestoreService
             ErrorOccurred?.Invoke(this, $"Failed to delete {file.LocalPath}: {ex.Message}");
             return false;
         }
+    }
+
+    // Concurrency for parallel blob deletion — DELETE is stateless and carries no payload,
+    // so higher concurrency than upload/download is safe. 128 concurrent DELETEs produce
+    // ~1,280 req/s at 100ms average — well under Azure's 20,000 req/s account limit.
+    private const int MaxParallelBlobDeletes = 128;
+
+    /// <summary>
+    /// Deletes multiple files and their chunks from Azure storage in parallel.
+    /// Chunks across all files are collected and deleted with high concurrency,
+    /// then metadata blobs are deleted in a second parallel pass.
+    /// </summary>
+    /// <param name="files">Files to delete from Azure</param>
+    /// <param name="progress">Reports (filesCompleted, totalFiles, currentFileName)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>List of files that were successfully deleted</returns>
+    public async Task<List<BackedUpFile>> DeleteFilesAsync(
+        IReadOnlyList<BackedUpFile> files,
+        IProgress<(int filesCompleted, int totalFiles, string currentFileName)>? progress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+
+        if (files.Count == 0) return [];
+
+        StatusChanged?.Invoke(this, $"Deleting {files.Count} files from Azure...");
+
+        // Phase 1: Collect all blob names to delete (chunks + metadata) in one pass.
+        // This avoids per-file sequential chunk enumeration during the parallel delete phase.
+        List<(string blobName, int fileIndex)> allBlobs = [];
+        for (var i = 0; i < files.Count; i++)
+        {
+            var file = files[i];
+            foreach (var chunk in file.Chunks)
+            {
+                allBlobs.Add((chunk.BlobName, i));
+            }
+
+            var metadataHash = _encryptionService.ComputeHmacHex(file.LocalPath);
+            allBlobs.Add(($"metadata/{metadataHash}", i));
+        }
+
+        StatusChanged?.Invoke(this, $"Deleting {allBlobs.Count} blobs across {files.Count} files...");
+
+        // Phase 2: Delete all blobs with high concurrency.
+        // Track which files had failures so we can report partial success.
+        ConcurrentDictionary<int, bool> failedFileIndices = new();
+        int blobsDeleted = 0;
+
+        await Parallel.ForEachAsync(
+            allBlobs,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = MaxParallelBlobDeletes,
+                CancellationToken = cancellationToken
+            },
+            async (blob, ct) =>
+            {
+                try
+                {
+                    await _blobService.DeleteBlobAsync(blob.blobName, ct);
+
+                    var completed = Interlocked.Increment(ref blobsDeleted);
+                    // Report at file-granularity by estimating file completion from blob count
+                    if (completed % 50 == 0 || completed == allBlobs.Count)
+                    {
+                        var estimatedFilesComplete = (int)((long)completed * files.Count / allBlobs.Count);
+                        progress?.Report((estimatedFilesComplete, files.Count,
+                            $"{completed}/{allBlobs.Count} blobs deleted"));
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failedFileIndices.TryAdd(blob.fileIndex, true);
+                    Log($"DeleteFilesAsync: Failed to delete blob {blob.blobName}: {ex.Message}");
+                }
+            });
+
+        // Build success list
+        List<BackedUpFile> successfullyDeleted = [];
+        for (var i = 0; i < files.Count; i++)
+        {
+            if (!failedFileIndices.ContainsKey(i))
+            {
+                successfullyDeleted.Add(files[i]);
+            }
+        }
+
+        progress?.Report((files.Count, files.Count,
+            $"Done — {successfullyDeleted.Count} succeeded, {failedFileIndices.Count} failed"));
+
+        StatusChanged?.Invoke(this,
+            $"Deleted {successfullyDeleted.Count}/{files.Count} files ({allBlobs.Count} blobs)");
+
+        return successfullyDeleted;
     }
 
     /// <summary>

@@ -245,59 +245,51 @@ public partial class MainWindowViewModel
         {
             var totalBytes = filesToDelete.Sum(f => f.Model.FileSize);
             StartProgressTracking("Deleting", filesToDelete.Count, totalBytes);
-            
-            var successCount = 0;
-            var failCount = 0;
 
-            for (var i = 0; i < filesToDelete.Count; i++)
+            // Use parallel batch deletion — all blob deletes run concurrently
+            var models = filesToDelete.Select(f => f.Model).ToList();
+
+            var deleteProgress = new Progress<(int filesCompleted, int totalFiles, string currentFileName)>(p =>
             {
-                _operationCts!.Token.ThrowIfCancellationRequested();
-
-                var file = filesToDelete[i];
-                var fileName = Path.GetFileName(file.LocalPath);
-                var fileSize = file.Model.FileSize;
-                
-                UpdateFileProgress(fileName, 0, fileSize, i);
-
-                try
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                 {
-                    var success = await _restoreService.DeleteFileAsync(file.Model, _operationCts.Token);
-                    
-                    if (success)
+                    CompletedFilesCount = p.filesCompleted;
+                    ProgressValue = p.totalFiles > 0 ? (double)p.filesCompleted / p.totalFiles * 100 : 0;
+                    ProgressText = $"Deleting: {p.currentFileName}";
+                    CurrentFileName = p.currentFileName;
+                    OnPropertyChanged(nameof(FilesProgressText));
+                });
+            });
+
+            var successfullyDeleted = await _restoreService.DeleteFilesAsync(
+                models, deleteProgress, _operationCts!.Token);
+
+            var failCount = filesToDelete.Count - successfullyDeleted.Count;
+
+            // Single batched UI update — remove all successful deletions at once
+            var deletedPaths = successfullyDeleted.Select(f => f.LocalPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // Remove in reverse order to avoid index shifting during removal
+                for (var i = RestorableFiles.Count - 1; i >= 0; i--)
+                {
+                    if (deletedPaths.Contains(RestorableFiles[i].LocalPath))
                     {
-                        successCount++;
-                        CompleteFileProgress(fileSize);
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                        {
-                            RestorableFiles.Remove(file);
-                        });
-                    }
-                    else
-                    {
-                        failCount++;
+                        RestorableFiles.RemoveAt(i);
                     }
                 }
-                catch (Exception ex)
-                {
-                    AddLog($"Failed to delete {fileName}: {ex.Message}");
-                    failCount++;
-                }
-            }
 
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                // Clear selection state after deletion
                 SelectedTreeNode = null;
                 foreach (var file in RestorableFiles)
                 {
                     file.IsSelected = false;
                 }
-                
+
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
                 NotifySelectionChanged();
-                
-                // Rebuild tree if in tree view mode
+
                 if (UseTreeView)
                 {
                     BuildFileTree();
@@ -307,7 +299,7 @@ public partial class MainWindowViewModel
             // Refresh local files to update backup status indicators
             await RefreshLocalFilesAsync();
 
-            AddLog($"Delete complete: {successCount} succeeded, {failCount} failed");
+            AddLog($"Delete complete: {successfullyDeleted.Count} succeeded, {failCount} failed");
         }
         catch (OperationCanceledException)
         {

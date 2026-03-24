@@ -50,6 +50,12 @@ public class ChunkInfo
     public string BlobName { get; set; } = string.Empty;
 }
 
+/// <summary>
+/// Carries chunk metadata and raw data through the CDC-to-upload pipeline.
+/// The data is zeroed by the consumer after upload.
+/// </summary>
+public record ChunkPayload(ChunkInfo Info, byte[] Data);
+
 public enum BackupStatus
 {
     Pending,

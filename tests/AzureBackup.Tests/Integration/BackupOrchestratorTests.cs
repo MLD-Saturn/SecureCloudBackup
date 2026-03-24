@@ -346,7 +346,7 @@ public class BackupOrchestratorTests : IAsyncLifetime
 
         // Assert
         Assert.NotEmpty(statusMessages);
-        Assert.Contains(statusMessages, m => m.Contains("Backing up"));
+        Assert.Contains(statusMessages, m => m.Contains("Analyzing"));
     }
 
     #endregion
