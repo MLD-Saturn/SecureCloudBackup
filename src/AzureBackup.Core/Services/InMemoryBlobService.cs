@@ -218,11 +218,11 @@ public class InMemoryBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
-        
+
         // Validate blob name format - must start with "chunks/" (same as AzureBlobService)
         if (!blobName.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
-        
+
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Download chunk");
 
@@ -233,6 +233,15 @@ public class InMemoryBlobService : IBlobStorageService
 
         TotalOperations++;
         return _encryptionService.Decrypt(encryptedData);
+    }
+
+    /// <summary>
+    /// Streaming download variant — in-memory implementation delegates to <see cref="DownloadChunkAsync"/>
+    /// since there is no actual I/O stream to optimize.
+    /// </summary>
+    public virtual Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        return DownloadChunkAsync(blobName, cancellationToken);
     }
 
     /// <summary>

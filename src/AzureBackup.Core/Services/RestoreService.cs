@@ -1,5 +1,7 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Threading.Channels;
 using AzureBackup.Core.Models;
 
@@ -22,8 +24,27 @@ public class RestoreService
     private const int MaxParallelChunkDownloads = 12;
 
     // File-level parallelism for multi-file restore operations
-    // 3 files x 12 chunks = 36 concurrent HTTP downloads max
-    private const int MaxParallelFileRestores = 3;
+    // 8 files x 12 chunks = 96 concurrent HTTP downloads max
+    // Well within Azure's 20,000 req/s account limit
+    private const int MaxParallelFileRestores = 8;
+
+    // Cached sensitive directories for ValidateRestorePath — avoids repeated
+    // Environment.GetFolderPath calls across thousands of file restores
+    private static readonly string[] SensitiveDirectories = GetSensitiveDirectories();
+
+    private static string[] GetSensitiveDirectories()
+    {
+        return new[]
+        {
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            Environment.GetFolderPath(Environment.SpecialFolder.SystemX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles),
+            Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86),
+        }.Where(d => !string.IsNullOrEmpty(d)).ToArray();
+    }
 
     public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? StatusChanged;
@@ -71,22 +92,10 @@ public class RestoreService
                 SecurityPolicyType.InvalidBlobName);
         }
         
-        // Define sensitive system directories that should not be restore targets
-        var sensitiveDirectories = new[]
+        // Check against cached sensitive system directories
+        foreach (var sensitiveDir in SensitiveDirectories)
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            Environment.GetFolderPath(Environment.SpecialFolder.SystemX86),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86),
-        };
-        
-        foreach (var sensitiveDir in sensitiveDirectories)
-        {
-            if (!string.IsNullOrEmpty(sensitiveDir) && 
-                fullPath.StartsWith(sensitiveDir, StringComparison.OrdinalIgnoreCase))
+            if (fullPath.StartsWith(sensitiveDir, StringComparison.OrdinalIgnoreCase))
             {
                 throw new SecurityPolicyException(
                     $"Cannot restore to protected system directory: {sensitiveDir}",
@@ -239,19 +248,22 @@ public class RestoreService
                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
 
             long currentBytes = 0;
-            
+            string restoredHash;
+
             if (sortedChunks.Count > 1)
             {
                 Log($"RestoreFileAsync: Using bounded parallel downloads (max={MaxParallelChunkDownloads})");
                 // Use bounded producer-consumer pattern with channels
-                await RestoreWithBoundedParallelDownloadsAsync(
+                // Hash is computed incrementally as chunks are written in order — no file re-read needed
+                restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
                     sortedChunks, file, tempPath, progress, 
                     p => currentBytes = p, cancellationToken);
             }
             else
             {
                 Log("RestoreFileAsync: Single chunk, downloading directly");
-                // Single chunk - download and write directly
+                // Single chunk - download, write, and compute hash in one pass
+                using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 await using FileStream outputStream = new(tempPath, FileMode.Create, FileAccess.Write, 
                     FileShare.None, bufferSize: 81920, useAsync: true);
 
@@ -261,12 +273,13 @@ public class RestoreService
 
                     Log($"RestoreFileAsync: Downloading chunk {chunk.Index} ({chunk.Length} bytes) blob={chunk.BlobName}");
                     var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, cancellationToken);
-                    
+
                     // Verify chunk size and hash match metadata
                     Log($"RestoreFileAsync: Verifying chunk {chunk.Index} integrity");
                     VerifyChunkIntegrity(chunkData, chunk, file.LocalPath);
-                    
+
                     await outputStream.WriteAsync(chunkData, cancellationToken);
+                    incrementalHash.AppendData(chunkData);
 
                     currentBytes += chunk.Length;
                     progress?.Report((currentBytes, file.FileSize));
@@ -280,21 +293,22 @@ public class RestoreService
                         TotalChunks = sortedChunks.Count
                     });
                 }
-                
+
                 await outputStream.FlushAsync(cancellationToken);
+                restoredHash = Convert.ToHexString(incrementalHash.GetHashAndReset());
             }
-            
-            // Verify restored file integrity
-            Log($"RestoreFileAsync: Verifying file integrity of temp file: {tempPath}");
+
+            // Verify restored file integrity using incrementally computed hash
+            // (no file re-read needed — hash was computed as chunks were written in order)
+            Log($"RestoreFileAsync: Verifying file integrity (incremental hash): {restoredHash[..8]}...");
             StatusChanged?.Invoke(this, $"Verifying integrity: {Path.GetFileName(targetPath)}");
-            var restoredHash = await HashHelper.ComputeFileHashAsync(tempPath, cancellationToken);
-            
+
             if (!string.Equals(restoredHash, file.FileHash, StringComparison.Ordinal))
             {
                 Log($"RestoreFileAsync: HASH MISMATCH! expected={file.FileHash}, got={restoredHash}");
                 // Delete corrupted temp file
                 try { File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
-                
+
                 throw new DataIntegrityException(
                     $"File hash mismatch after restore: expected {file.FileHash}, got {restoredHash}",
                     file.LocalPath);
@@ -376,8 +390,11 @@ public class RestoreService
     /// Restores a file using bounded parallel downloads with a producer-consumer pattern.
     /// Downloads chunks in parallel but writes them sequentially, limiting memory usage
     /// to approximately MaxParallelChunkDownloads chunks at any time.
+    /// Computes the file hash incrementally as chunks are written in order,
+    /// eliminating the need to re-read the entire file from disk for verification.
     /// </summary>
-    private async Task RestoreWithBoundedParallelDownloadsAsync(
+    /// <returns>The SHA-256 hash of the restored file, computed incrementally during write.</returns>
+    private async Task<string> RestoreWithBoundedParallelDownloadsAsync(
         List<ChunkInfo> sortedChunks,
         BackedUpFile file,
         string tempPath,
@@ -402,8 +419,11 @@ public class RestoreService
                 $"({MaxParallelChunkDownloads} parallel x {maxChunkBytes:N0} bytes x 3 copies). " +
                 $"Risk of OutOfMemoryException for large chunks.");
         }
-        
-        var channelOptions = new BoundedChannelOptions(MaxParallelChunkDownloads)
+
+        // Channel capacity is 2x download parallelism so disk writes don't stall network downloads.
+        // While the consumer writes chunk N to disk, chunk N+1..N+12 can already be buffered.
+        var channelCapacity = MaxParallelChunkDownloads * 2;
+        var channelOptions = new BoundedChannelOptions(channelCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -438,7 +458,8 @@ public class RestoreService
                         {
                             linkedCts.Token.ThrowIfCancellationRequested();
 
-                            var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, linkedCts.Token);
+                            // Use streaming download to reduce LOH allocations via ArrayPool
+                            var chunkData = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, linkedCts.Token);
 
                             VerifyChunkIntegrity(chunkData, chunk, file.LocalPath);
 
@@ -506,16 +527,32 @@ public class RestoreService
             }
         }, linkedCts.Token);
         
-        // Consumer task: Read chunks from channel and write to file in order
+        // Consumer task: Read chunks from channel, write to file in order,
+        // and compute the file hash incrementally (avoids re-reading the entire file afterward)
+        string? computedFileHash = null;
         var writerTask = Task.Run(async () =>
         {
             var pendingChunks = new Dictionary<int, byte[]>();
             int nextChunkToWrite = 0;
-            
+            using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
             Log($"BoundedParallelDownload.Consumer: Opening output file: {tempPath}");
             await using FileStream outputStream = new(tempPath, FileMode.Create, FileAccess.Write, 
                 FileShare.None, bufferSize: 81920, useAsync: true);
-            
+
+            // Pre-allocate the file to its final size to reduce NTFS fragmentation
+            // and avoid repeated metadata updates as the file grows
+            if (file.FileSize > 0)
+            {
+                outputStream.SetLength(file.FileSize);
+                outputStream.Seek(0, SeekOrigin.Begin);
+            }
+
+            // Throttle progress reports to avoid flooding the UI thread
+            // (~200ms minimum between reports instead of per-chunk)
+            var progressStopwatch = Stopwatch.StartNew();
+            const long ProgressThrottleMs = 200;
+
             try
             {
                 await foreach (var (index, data) in channel.Reader.ReadAllAsync(linkedCts.Token))
@@ -523,23 +560,29 @@ public class RestoreService
                     if (index == nextChunkToWrite)
                     {
                         await outputStream.WriteAsync(data, linkedCts.Token);
+                        incrementalHash.AppendData(data);
                         currentBytes += data.Length;
                         chunksWritten++;
                         nextChunkToWrite++;
-                        updateCurrentBytes(currentBytes);
-                        progress?.Report((currentBytes, file.FileSize));
-                        
+
                         while (pendingChunks.TryGetValue(nextChunkToWrite, out var pendingData))
                         {
                             pendingChunks.Remove(nextChunkToWrite);
                             await outputStream.WriteAsync(pendingData, linkedCts.Token);
+                            incrementalHash.AppendData(pendingData);
                             currentBytes += pendingData.Length;
                             chunksWritten++;
                             nextChunkToWrite++;
+                        }
+
+                        // Throttled progress reporting to reduce UI thread pressure
+                        if (progressStopwatch.ElapsedMilliseconds >= ProgressThrottleMs)
+                        {
                             updateCurrentBytes(currentBytes);
                             progress?.Report((currentBytes, file.FileSize));
+                            progressStopwatch.Restart();
                         }
-                        
+
                         if (chunksWritten % 50 == 0)
                         {
                             Log($"BoundedParallelDownload.Consumer: Written {chunksWritten}/{sortedChunks.Count} chunks, {currentBytes} bytes, {pendingChunks.Count} buffered");
@@ -557,9 +600,14 @@ public class RestoreService
                         }
                     }
                 }
-                
+
+                // Final progress report to ensure 100% is reported
+                updateCurrentBytes(currentBytes);
+                progress?.Report((currentBytes, file.FileSize));
+
                 await outputStream.FlushAsync(linkedCts.Token);
-                Log($"BoundedParallelDownload.Consumer: Flushed output, {chunksWritten} chunks written, {currentBytes} bytes");
+                computedFileHash = Convert.ToHexString(incrementalHash.GetHashAndReset());
+                Log($"BoundedParallelDownload.Consumer: Flushed output, {chunksWritten} chunks written, {currentBytes} bytes, hash={computedFileHash[..8]}...");
             }
             catch (ChannelClosedException)
             {
@@ -642,10 +690,13 @@ public class RestoreService
         
         Log($"BoundedParallelDownload: Completed, wrote {chunksWritten} chunks, {currentBytes} bytes, " +
             $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
+
+        return computedFileHash!;
     }
 
     /// <summary>
     /// Restores multiple files to a specified directory using parallel file processing.
+    /// Delegates to <see cref="RestoreFilesWithRemappingAsync"/> for a single parallel implementation.
     /// </summary>
     public async Task<RestoreResult> RestoreFilesAsync(
         IEnumerable<BackedUpFile> files,
@@ -658,53 +709,25 @@ public class RestoreService
         ArgumentNullException.ThrowIfNull(files);
         ArgumentException.ThrowIfNullOrWhiteSpace(restoreDirectory);
 
-        RestoreResult result = new();
         var fileList = files.ToList();
-        var totalFiles = fileList.Count;
-        int completedFiles = 0;
-        object resultLock = new();
 
         // Pre-compute relative paths (needs the full list for common root detection)
         var allPaths = fileList.Select(f => f.LocalPath).ToList();
 
-        StatusChanged?.Invoke(this, $"Starting parallel restore of {totalFiles} files (max {MaxParallelFileRestores} concurrent)");
-        Log($"RestoreFilesAsync: Starting parallel restore of {totalFiles} files");
+        // Build (file, targetPath) pairs and delegate to the unified parallel implementation
+        var filesWithPaths = fileList.Select(file =>
+        {
+            var targetPath = preserveFolderStructure
+                ? Path.Combine(restoreDirectory, GetRelativePath(allPaths, file.LocalPath))
+                : Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
+            return (file, targetPath);
+        }).ToList();
 
-        await Parallel.ForEachAsync(
-            fileList,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = MaxParallelFileRestores,
-                CancellationToken = cancellationToken
-            },
-            async (file, ct) =>
-            {
-                string targetPath;
-                if (preserveFolderStructure)
-                {
-                    var relativePath = GetRelativePath(allPaths, file.LocalPath);
-                    targetPath = Path.Combine(restoreDirectory, relativePath);
-                }
-                else
-                {
-                    targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
-                }
+        Log($"RestoreFilesAsync: Delegating {fileList.Count} files to RestoreFilesWithRemappingAsync");
 
-                var done = Interlocked.Increment(ref completedFiles);
-                progress?.Report((done, totalFiles, file.LocalPath));
-
-                var logPrefix = $"RestoreFilesAsync: [{done}/{totalFiles}]";
-                var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-                    file, targetPath, overwriteExisting, fileProgress: null, logPrefix, ct);
-
-                lock (resultLock)
-                {
-                    ApplyRestoreOutcome(result, outcome, file, targetPath, recoveredPath, unrecoverableChunks);
-                }
-            });
-
-        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
-        return result;
+        return await RestoreFilesWithRemappingAsync(
+            filesWithPaths, overwriteExisting, progress,
+            fileByteProgress: null, cancellationToken);
     }
 
     /// <summary>
@@ -1296,8 +1319,10 @@ public class RestoreService
     }
 
     /// <summary>
-    /// Restores files with path remapping support.
+    /// Restores files with path remapping support using size-aware parallelism.
     /// Each file can have a custom target path.
+    /// Small files (&lt;1 MB) are processed with high parallelism (latency-bound),
+    /// while large files use moderate parallelism with deep chunk-level concurrency.
     /// </summary>
     /// <param name="filesWithPaths">Files with their target paths</param>
     /// <param name="overwriteExisting">Whether to overwrite existing files</param>
@@ -1312,58 +1337,144 @@ public class RestoreService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filesWithPaths);
-        
+
         RestoreResult result = new();
         var fileList = filesWithPaths.ToList();
+        var totalFiles = fileList.Count;
+        int[] completedFiles = [0];
+        object resultLock = new();
 
-        Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping");
-        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
+        Log($"RestoreFilesWithRemappingAsync: Restoring {totalFiles} files with path remapping (parallel)");
+        StatusChanged?.Invoke(this, $"Starting restore of {totalFiles} files");
+
+        // Size-aware parallelism: small files are latency-bound (high parallelism),
+        // large files are bandwidth-bound (moderate parallelism with deep chunk concurrency)
+        const long SmallFileThreshold = 1L * 1024 * 1024; // 1 MB
+        const int MaxParallelSmallFiles = 32;
+
+        var smallFiles = new List<(BackedUpFile file, string targetPath, int originalIndex)>();
+        var largeFiles = new List<(BackedUpFile file, string targetPath, int originalIndex)>();
 
         for (var i = 0; i < fileList.Count; i++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var (file, targetPath) = fileList[i];
-            Log($"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}] '{Path.GetFileName(file.LocalPath)}' -> '{targetPath}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
-            progress?.Report((i + 1, fileList.Count, file.LocalPath));
-
-            // Security: Validate target path doesn't contain suspicious patterns
-            var normalizedPath = Path.GetFullPath(targetPath);
-            if (normalizedPath.Contains(".." + Path.DirectorySeparatorChar) || 
-                normalizedPath.Contains(".." + Path.AltDirectorySeparatorChar))
-            {
-                Log($"RestoreFilesWithRemappingAsync: Skipping suspicious path: {targetPath}");
-                result.FailedFiles.Add(file.LocalPath);
-                ErrorOccurred?.Invoke(this, $"Invalid target path (contains path traversal): {targetPath}");
-                continue;
-            }
-
-            // Ensure target directory exists
-            var targetDir = Path.GetDirectoryName(normalizedPath);
-            if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
-            {
-                Log($"RestoreFilesWithRemappingAsync: Creating directory: {targetDir}");
-                Directory.CreateDirectory(targetDir);
-            }
-
-            // Create byte-level progress reporter for this file
-            var fileIndex = i;
-            var individualFileProgress = fileByteProgress != null
-                ? new Progress<(long current, long total)>(p =>
-                    fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
-                : null;
-
-            var logPrefix = $"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}]";
-            var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-                file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, cancellationToken);
-            ApplyRestoreOutcome(result, outcome, file, normalizedPath, recoveredPath, unrecoverableChunks);
+            if (fileList[i].file.FileSize <= SmallFileThreshold)
+                smallFiles.Add((fileList[i].file, fileList[i].targetPath, i));
+            else
+                largeFiles.Add((fileList[i].file, fileList[i].targetPath, i));
         }
+
+        Log($"RestoreFilesWithRemappingAsync: {smallFiles.Count} small files (≤1 MB, max {MaxParallelSmallFiles} concurrent), " +
+            $"{largeFiles.Count} large files (max {MaxParallelFileRestores} concurrent)");
+
+        // Run small and large file restores concurrently — they use different resources:
+        // small files are latency-bound (HTTP round-trips), large files are bandwidth-bound (chunk streaming).
+        // Running them together avoids wasting network bandwidth while small files do metadata I/O.
+        List<Task> restoreTasks = [];
+
+        if (smallFiles.Count > 0)
+        {
+            StatusChanged?.Invoke(this, $"Restoring {smallFiles.Count} small files...");
+            restoreTasks.Add(Parallel.ForEachAsync(
+                smallFiles,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = MaxParallelSmallFiles,
+                    CancellationToken = cancellationToken
+                },
+                async (item, ct) =>
+                {
+                    await RestoreOneFileWithRemappingAsync(
+                        item.file, item.targetPath, item.originalIndex, totalFiles,
+                        overwriteExisting, progress, fileByteProgress, result, resultLock,
+                        completedFiles, ct);
+                }));
+        }
+
+        if (largeFiles.Count > 0)
+        {
+            StatusChanged?.Invoke(this, $"Restoring {largeFiles.Count} large files...");
+            restoreTasks.Add(Parallel.ForEachAsync(
+                largeFiles,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = MaxParallelFileRestores,
+                    CancellationToken = cancellationToken
+                },
+                async (item, ct) =>
+                {
+                    await RestoreOneFileWithRemappingAsync(
+                        item.file, item.targetPath, item.originalIndex, totalFiles,
+                        overwriteExisting, progress, fileByteProgress, result, resultLock,
+                        completedFiles, ct);
+                }));
+        }
+
+        await Task.WhenAll(restoreTasks);
 
         Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, " +
             $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed, " +
             $"{result.TotalBytesRestored} bytes");
         StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
         return result;
+    }
+
+    /// <summary>
+    /// Restores a single file within a parallel batch, with path validation and thread-safe result aggregation.
+    /// Shared by both <see cref="RestoreFilesAsync"/> and <see cref="RestoreFilesWithRemappingAsync"/>.
+    /// </summary>
+    private async Task RestoreOneFileWithRemappingAsync(
+        BackedUpFile file,
+        string targetPath,
+        int fileIndex,
+        int totalFiles,
+        bool overwriteExisting,
+        IProgress<(int current, int total, string file)>? progress,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress,
+        RestoreResult result,
+        object resultLock,
+        int[] completedFiles,
+        CancellationToken cancellationToken)
+    {
+        var done = Interlocked.Increment(ref completedFiles[0]);
+        Log($"RestoreFilesWithRemappingAsync: [{done}/{totalFiles}] '{Path.GetFileName(file.LocalPath)}' -> '{targetPath}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
+        progress?.Report((done, totalFiles, file.LocalPath));
+
+        // Security: Validate target path doesn't contain suspicious patterns
+        var normalizedPath = Path.GetFullPath(targetPath);
+        if (normalizedPath.Contains(".." + Path.DirectorySeparatorChar) || 
+            normalizedPath.Contains(".." + Path.AltDirectorySeparatorChar))
+        {
+            Log($"RestoreFilesWithRemappingAsync: Skipping suspicious path: {targetPath}");
+            lock (resultLock)
+            {
+                result.FailedFiles.Add(file.LocalPath);
+            }
+            ErrorOccurred?.Invoke(this, $"Invalid target path (contains path traversal): {targetPath}");
+            return;
+        }
+
+        // Ensure target directory exists
+        var targetDir = Path.GetDirectoryName(normalizedPath);
+        if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+        {
+            Log($"RestoreFilesWithRemappingAsync: Creating directory: {targetDir}");
+            Directory.CreateDirectory(targetDir);
+        }
+
+        // Create byte-level progress reporter for this file
+        var individualFileProgress = fileByteProgress != null
+            ? new Progress<(long current, long total)>(p =>
+                fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
+            : null;
+
+        var logPrefix = $"RestoreFilesWithRemappingAsync: [{done}/{totalFiles}]";
+        var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
+            file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, cancellationToken);
+
+        lock (resultLock)
+        {
+            ApplyRestoreOutcome(result, outcome, file, normalizedPath, recoveredPath, unrecoverableChunks);
+        }
     }
 
     #region Preview Generation Methods

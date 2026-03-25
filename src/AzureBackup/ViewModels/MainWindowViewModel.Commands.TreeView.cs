@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -337,7 +338,8 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Executes a batch restore with standard progress tracking.
-    /// Uses RestoreFilesWithRemappingAsync for corrupted recovery support.
+    /// Uses RestoreFilesWithRemappingAsync for parallel, corrupted-recovery-aware restore.
+    /// Tracks per-file byte progress concurrently since multiple files restore in parallel.
     /// </summary>
     private async Task<AzureBackup.Core.Services.RestoreResult> ExecuteRestoreWithRemappingAsync(
         List<(BackedUpFile file, string targetPath)> filesWithPaths,
@@ -346,25 +348,61 @@ public partial class MainWindowViewModel
         var totalBytes = filesWithPaths.Sum(f => f.file.FileSize);
         StartProgressTracking("Restoring", filesWithPaths.Count, totalBytes);
 
+        // Track per-file bytes atomically for parallel progress aggregation.
+        // Each slot holds the latest reported bytes for that file index.
+        var perFileBytes = new long[filesWithPaths.Count];
+        var completedFileSet = new ConcurrentDictionary<int, byte>();
+
         Progress<(int current, int total, string file)> fileProgress = new(p =>
         {
-            // File-level progress handled by byte-level reporter below
+            // File-level progress is covered by byte-level reporter below
         });
 
-        var lastFileIndex = -1;
         Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
         {
-            if (p.fileIndex != lastFileIndex)
+            // Record latest bytes for this file (may arrive out of order across files)
+            Interlocked.Exchange(ref perFileBytes[p.fileIndex], p.bytesCompleted);
+
+            // Detect file completion: when bytesCompleted reaches fileSize
+            if (p.bytesCompleted >= p.fileSize)
             {
-                if (lastFileIndex >= 0)
+                if (completedFileSet.TryAdd(p.fileIndex, 0))
                 {
-                    CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
+                    Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+                    {
+                        CompletedFilesCount = completedFileSet.Count;
+                        OnPropertyChanged(nameof(FilesProgressText));
+                    });
                 }
-                lastFileIndex = p.fileIndex;
+            }
+
+            // Sum all per-file bytes for overall progress
+            long totalProcessed = 0;
+            for (var i = 0; i < perFileBytes.Length; i++)
+            {
+                totalProcessed += Volatile.Read(ref perFileBytes[i]);
             }
 
             var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
-            UpdateFileProgress(fileName, p.bytesCompleted, p.fileSize, p.fileIndex);
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                CurrentFileName = fileName;
+                CurrentFileProgress = p.fileSize > 0 ? (double)p.bytesCompleted / p.fileSize * 100 : 0;
+                CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(p.bytesCompleted)} / {AzureBackup.Core.FormatHelper.FormatBytes(p.fileSize)}";
+
+                TotalBytesProcessed = totalProcessed;
+                _lastBytesProcessed = totalProcessed;
+                ProgressValue = totalBytes > 0
+                    ? (double)totalProcessed / totalBytes * 100
+                    : 0;
+
+                ProgressText = $"Restoring: {fileName} ({completedFileSet.Count}/{filesWithPaths.Count})";
+
+                OnPropertyChanged(nameof(BytesProgressText));
+                OnPropertyChanged(nameof(FilesProgressText));
+
+                UpdateSpeedAndEta();
+            });
         });
 
         var result = await _restoreService.RestoreFilesWithRemappingAsync(
@@ -373,12 +411,6 @@ public partial class MainWindowViewModel
             fileProgress,
             byteProgress,
             cancellationToken);
-
-        // Mark the last file as complete so cumulative bytes are fully accurate
-        if (lastFileIndex >= 0)
-        {
-            CompleteFileProgress(filesWithPaths[lastFileIndex].file.FileSize);
-        }
 
         return result;
     }

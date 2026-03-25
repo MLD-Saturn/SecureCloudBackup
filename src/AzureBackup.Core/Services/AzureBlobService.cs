@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -487,6 +488,89 @@ public class AzureBlobService : IBlobStorageService
         {
             Log($"DownloadChunkBestEffortAsync: Failed for {blobName}: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Downloads and decrypts a chunk using streaming download to reduce memory allocations.
+    /// Uses <see cref="ArrayPool{T}"/> to rent the download buffer, avoiding LOH allocations.
+    /// The returned decrypted data is a regular array (not pooled) since it is passed to the channel consumer.
+    /// </summary>
+    public async Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+
+        try
+        {
+            // Use streaming download — reads directly into our buffer without BinaryData intermediate
+            var response = await blobClient.DownloadStreamingAsync(cancellationToken: cancellationToken);
+            var contentLength = response.Value.Details.ContentLength;
+            var storedContentHash = response.Value.Details.ContentHash;
+            TotalOperations++;
+
+            // Rent buffer from pool — avoids LOH allocation for large chunks
+            var rentedBuffer = ArrayPool<byte>.Shared.Rent((int)contentLength);
+            try
+            {
+                // Read entire stream into rented buffer
+                var bytesRead = 0;
+                var stream = response.Value.Content;
+                while (bytesRead < contentLength)
+                {
+                    var read = await stream.ReadAsync(
+                        rentedBuffer.AsMemory(bytesRead, (int)contentLength - bytesRead),
+                        cancellationToken);
+                    if (read == 0)
+                        throw new DataIntegrityException(
+                            $"Unexpected end of stream for {blobName} at {bytesRead}/{contentLength}", blobName);
+                    bytesRead += read;
+                }
+
+                // Verify download integrity against stored Content-MD5 (if available)
+                if (storedContentHash is { Length: > 0 })
+                {
+                    var downloadedHash = MD5.HashData(rentedBuffer.AsSpan(0, bytesRead));
+                    if (!downloadedHash.AsSpan().SequenceEqual(storedContentHash))
+                    {
+                        Log($"DownloadChunkStreamingAsync: MD5 MISMATCH for {blobName}");
+                        throw new DataIntegrityException(
+                            $"Download integrity check failed for {blobName} - data corrupted during transfer", blobName);
+                    }
+                }
+
+                Log($"DownloadChunkStreamingAsync: Downloaded {blobName} ({bytesRead:N0} bytes encrypted), decrypting...");
+
+                // Decrypt using the exact slice (not the full rented buffer)
+                var decrypted = _encryptionService.Decrypt(rentedBuffer.AsSpan(0, bytesRead));
+
+                Log($"DownloadChunkStreamingAsync: Decrypted {blobName}: {bytesRead:N0} -> {decrypted.Length:N0} bytes");
+                return decrypted;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rentedBuffer);
+            }
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            Log($"DownloadChunkStreamingAsync: Chunk not found (404): {blobName}");
+            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName, ex);
+        }
+        catch (RequestFailedException ex)
+        {
+            Log($"DownloadChunkStreamingAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            throw;
+        }
+        catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
+        {
+            Log($"DownloadChunkStreamingAsync: EXCEPTION for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
     }
 

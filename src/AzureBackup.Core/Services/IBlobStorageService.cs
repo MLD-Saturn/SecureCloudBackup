@@ -116,6 +116,13 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Downloads and decrypts a chunk using streaming download to reduce memory allocations.
+    /// Uses ArrayPool to rent the download buffer, avoiding LOH pressure.
+    /// Preferred over <see cref="DownloadChunkAsync"/> for large-scale restore operations.
+    /// </summary>
+    Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.
     /// Returns null for chunks that are completely unrecoverable (AES-GCM tag mismatch).
     /// Used for corrupted file recovery.
