@@ -1304,32 +1304,17 @@ public class BackupOrchestrator : IAsyncDisposable
         }
 
         Log($"PreviewBackupSyncAsync: Found {allFiles.Count} files to check");
-        
+
         // Get list of files that actually exist in Azure for validation
         HashSet<string>? azureFilePaths = null;
         if (_blobService.IsConnected)
         {
             try
             {
-                var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
-                azureFilePaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                
-                foreach (var blobName in metadataBlobs)
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    try
-                    {
-                        var metadata = await _blobService.DownloadFileMetadataAsync(blobName, cancellationToken);
-                        if (metadata?.LocalPath != null)
-                        {
-                            azureFilePaths.Add(metadata.LocalPath);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"PreviewBackupSyncAsync: Error downloading metadata {blobName}: {ex.Message}");
-                    }
-                }
+                var azureFiles = await _blobService.LoadAllFileMetadataAsync(cancellationToken: cancellationToken);
+                azureFilePaths = azureFiles
+                    .Select(f => f.LocalPath)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 Log($"PreviewBackupSyncAsync: Found {azureFilePaths.Count} files in Azure for validation");
             }
             catch (Exception ex)

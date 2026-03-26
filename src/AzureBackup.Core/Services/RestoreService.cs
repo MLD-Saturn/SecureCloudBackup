@@ -155,53 +155,25 @@ public class RestoreService
         CancellationToken cancellationToken = default)
     {
         Log("ListRestorableFilesAsync: Starting to list restorable files");
-        
+
         StatusChanged?.Invoke(this, "Retrieving file list from Azure...");
 
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
-        var total = metadataBlobs.Count;
-        Log($"ListRestorableFilesAsync: Found {total} metadata blobs");
-        
-        if (total == 0)
-        {
-            StatusChanged?.Invoke(this, "No files found in Azure");
-            return [];
-        }
-
-        StatusChanged?.Invoke(this, $"Loading metadata for {total} files...");
-        progress?.Report((0, total));
-
-        // Download metadata in parallel with bounded concurrency
-        const int maxParallelDownloads = 32;
-        ConcurrentBag<BackedUpFile> files = [];
-        var completed = 0;
-
-        await Parallel.ForEachAsync(
-            metadataBlobs,
-            new ParallelOptions
+        var wrappedProgress = progress != null
+            ? new Progress<(int completed, int total)>(p =>
             {
-                MaxDegreeOfParallelism = maxParallelDownloads,
-                CancellationToken = cancellationToken
-            },
-            async (blobName, ct) =>
-            {
-                var file = await _blobService.DownloadFileMetadataAsync(blobName, ct);
-                if (file != null)
+                progress.Report(p);
+                if (p.completed % 50 == 0 || p.completed == p.total)
                 {
-                    files.Add(file);
+                    StatusChanged?.Invoke(this, $"Loading file metadata... {p.completed:N0}/{p.total:N0}");
                 }
+            })
+            : null;
 
-                var count = Interlocked.Increment(ref completed);
-                if (count % 50 == 0 || count == total)
-                {
-                    progress?.Report((count, total));
-                    StatusChanged?.Invoke(this, $"Loading file metadata... {count:N0}/{total:N0}");
-                }
-            });
+        var files = await _blobService.LoadAllFileMetadataAsync(wrappedProgress, cancellationToken: cancellationToken);
 
         Log($"ListRestorableFilesAsync: Loaded {files.Count} file metadata entries");
         StatusChanged?.Invoke(this, $"Found {files.Count} files available for restore");
-        return files.ToList();
+        return files;
     }
 
     /// <summary>

@@ -122,28 +122,14 @@ public partial class TierMigrationViewModel : ViewModelBase
             _operationCts = new CancellationTokenSource();
             var ct = _operationCts.Token;
 
-            var metadataBlobs = await _blobService.ListMetadataBlobsAsync(ct);
-            var total = metadataBlobs.Count;
-            Log($"LoadFilesAsync: Found {total} metadata blobs");
-            var files = new List<BackedUpFile>();
-
-            for (var i = 0; i < total; i++)
+            var progress = new Progress<(int completed, int total)>(p =>
             {
-                ct.ThrowIfCancellationRequested();
-                var file = await _blobService.DownloadFileMetadataAsync(metadataBlobs[i], ct);
-                if (file != null)
-                {
-                    files.Add(file);
-                    Log($"LoadFilesAsync: [{i + 1}/{total}] '{file.LocalPath}' tier={file.CurrentStorageTier?.ToString() ?? "Unknown"} size={FormatHelper.FormatBytes(file.FileSize)} chunks={file.Chunks.Count}");
-                }
-                else
-                {
-                    Log($"LoadFilesAsync: [{i + 1}/{total}] Blob '{metadataBlobs[i]}' returned null metadata (skipped)");
-                }
+                ProgressValue = p.total > 0 ? (double)p.completed / p.total * 100 : 0;
+                ProgressText = $"{p.completed}/{p.total}";
+            });
 
-                ProgressValue = (double)(i + 1) / total * 100;
-                ProgressText = $"{i + 1}/{total}";
-            }
+            var files = await _blobService.LoadAllFileMetadataAsync(progress, cancellationToken: ct);
+            Log($"LoadFilesAsync: Downloaded {files.Count} metadata entries");
 
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -164,7 +150,7 @@ public partial class TierMigrationViewModel : ViewModelBase
             });
 
             Log($"LoadFilesAsync: Completed — Hot={HotFiles.Count}, Cool={CoolFiles.Count}, Cold={ColdFiles.Count}, Archive={ArchiveFiles.Count}");
-            StatusMessage = $"Loaded {files.Count} files across {total} metadata blobs.";
+            StatusMessage = $"Loaded {files.Count} files.";
         }
         catch (OperationCanceledException)
         {
