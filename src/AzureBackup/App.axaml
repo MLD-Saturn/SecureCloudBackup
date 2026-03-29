@@ -11,6 +11,13 @@
 
     <Application.Styles>
         <FluentTheme />
+
+        <!-- Global emoji font fallback: the default Avalonia/FluentTheme font (Segoe UI / system default)
+             lacks emoji glyphs on some platforms. Adding platform emoji fonts as fallbacks ensures
+             U+1Fxxx codepoints render everywhere (Windows, macOS, Linux). -->
+        <Style Selector="TextBlock">
+            <Setter Property="FontFamily" Value="avares://Avalonia.Themes.Fluent/Fonts#Inter,Segoe UI Emoji,Apple Color Emoji,Noto Color Emoji"/>
+        </Style>
     </Application.Styles>
 
     <Application.Resources>
