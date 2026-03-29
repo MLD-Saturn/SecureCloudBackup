@@ -631,6 +631,11 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             _blobService, _fileWatcherService);
         _restoreService = new RestoreService(_databaseService, _blobService, _encryptionService);
 
+        // Wire per-file diagnostics directory so .diag logs land next to the database
+        var diagDir = Path.Combine(AppMode.DataDirectory, "diagnostics");
+        _orchestrator.DiagnosticsDirectory = diagDir;
+        _restoreService.DiagnosticsDirectory = diagDir;
+
         // Initialize progress tab for backup/restore/mirror operations
         ProgressTab = new ProgressTabViewModel();
         ProgressTab.CompletionAcknowledged += (_, _) =>

@@ -489,6 +489,23 @@ public class ChunkingService
             stream.Position = chunk.Offset;
             byte[] data = new byte[chunk.Length];
             await stream.ReadExactlyAsync(data, cancellationToken);
+
+            // Verify the re-read data matches the Phase 1 hash.
+            // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
+            // Without this check, we'd silently upload data that doesn't match the stored hash,
+            // causing every future restore to fail chunk hash verification.
+            var rereadHash = ComputeChunkHash(data);
+            if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
+            {
+                FileOperationDiagnostics.RecordAmbient(
+                    $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
+                    $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
+                    $"offset={chunk.Offset}, length={chunk.Length}");
+                throw new IOException(
+                    $"File was modified during backup (chunk {chunk.Index} hash changed between CDC and upload). " +
+                    $"The file will be retried on the next backup cycle.");
+            }
+
             await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
         }
 

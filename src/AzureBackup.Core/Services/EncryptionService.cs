@@ -419,6 +419,52 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
+    /// Validates the CRC32 envelope of encrypted data without decrypting.
+    /// Returns true if the CRC matches, false otherwise.
+    /// Used for diagnostic verification immediately after encryption.
+    /// </summary>
+    public bool ValidateCrc(ReadOnlySpan<byte> encryptedData)
+    {
+        var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
+        if (encryptedData.Length < minLength)
+            return false;
+
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+        var storedChecksum = encryptedData[^ChecksumSize..];
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
+        return storedChecksum.SequenceEqual(computedChecksum);
+    }
+
+    /// <summary>
+    /// Returns diagnostic info about a CRC mismatch for logging.
+    /// Includes stored vs computed CRC, data length, and first/last bytes.
+    /// </summary>
+    public string DiagnoseCrcMismatch(ReadOnlySpan<byte> encryptedData)
+    {
+        var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
+        if (encryptedData.Length < minLength)
+            return $"Data too short: {encryptedData.Length} bytes (min={minLength})";
+
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+        var storedChecksum = encryptedData[^ChecksumSize..];
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
+        var match = storedChecksum.SequenceEqual(computedChecksum);
+        var lastDataBytes = encryptedData.Length >= 8
+            ? Convert.ToHexString(encryptedData[^8..])
+            : Convert.ToHexString(encryptedData);
+
+        return $"CRC {(match ? "OK" : "MISMATCH")}: " +
+               $"stored={Convert.ToHexString(storedChecksum)}, " +
+               $"computed={Convert.ToHexString(computedChecksum)}, " +
+               $"dataLen={encryptedData.Length}, " +
+               $"last8bytes={lastDataBytes}";
+    }
+
+    /// <summary>
     /// Writes CRC32 checksum directly into destination span, avoiding a heap allocation.
     /// </summary>
     private static void WriteChecksum(ReadOnlySpan<byte> data, Span<byte> destination)

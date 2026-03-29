@@ -515,7 +515,7 @@ public partial class MainWindowViewModel
     /// Reports per-file start/progress/complete events to <see cref="ProgressTab"/>.
     /// Small files (≤100 MB) are grouped into an aggregate row instead of individual rows.
     /// </summary>
-    private async Task<AzureBackup.Core.Services.RestoreResult> ExecuteRestoreWithRemappingAsync(
+    private async Task<AzureBackup.Core.Models.RestoreResult> ExecuteRestoreWithRemappingAsync(
         List<(BackedUpFile file, string targetPath)> filesWithPaths,
         CancellationToken cancellationToken)
     {
@@ -661,7 +661,7 @@ public partial class MainWindowViewModel
     /// <summary>
     /// Logs a restore result with corrupted recovery details.
     /// </summary>
-    private void LogRestoreResult(AzureBackup.Core.Services.RestoreResult result)
+    private void LogRestoreResult(AzureBackup.Core.Models.RestoreResult result)
     {
         AddLog($"Restore complete: {result.SuccessfulFiles.Count} succeeded, {result.FailedFiles.Count} failed");
 
