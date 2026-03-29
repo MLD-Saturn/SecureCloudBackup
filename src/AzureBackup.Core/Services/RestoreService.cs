@@ -1,6 +1,9 @@
+using System.Buffers;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
+using Azure;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -10,56 +13,42 @@ namespace AzureBackup.Core.Services;
 /// Supports both individual file and full restore operations.
 /// Uses parallel downloads with bounded memory for optimal performance.
 /// </summary>
-public class RestoreService
+public partial class RestoreService
 {
     private readonly LocalDatabaseService _databaseService;
     private readonly IBlobStorageService _blobService;
     private readonly EncryptionService _encryptionService;
     
     // Parallel download settings - increased for better bandwidth utilization
-    // Memory bounded by: MaxParallelChunkDownloads * MaxChunkSize = 12 * 128 MB = 1.5 GB max
-    // In practice, most chunks are much smaller, so typical usage is ~100-500 MB
-    private const int MaxParallelChunkDownloads = 12;
+    // Default concurrency for moderate chunk sizes; adaptive method below adjusts for extremes.
+    // Memory bounded by: effectiveConcurrency * maxChunkSize * ~3 copies
+    private const int DefaultParallelChunkDownloads = 12;
 
     // File-level parallelism for multi-file restore operations
-    // 3 files x 12 chunks = 36 concurrent HTTP downloads max
-    private const int MaxParallelFileRestores = 3;
+    // 16 files x 12 chunks = 192 concurrent HTTP downloads max
+    // Azure single-account egress limit is 50 Gbps; 16 files better saturates bandwidth.
+    private const int MaxParallelFileRestores = 16;
 
-    public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
-    public event EventHandler<string>? StatusChanged;
-    public event EventHandler<string>? ErrorOccurred;
-    
-    /// <summary>
-    /// Event for detailed debug/diagnostic logging.
-    /// </summary>
-    public event EventHandler<string>? DiagnosticLog;
-    
-    private void Log(string message)
-    {
-        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
-        DiagnosticLog?.Invoke(this, $"[{timestamp}] [Restore] {message}");
-    }
+    // Chunk-level retry settings for transient Azure failures (503, timeouts)
+    private const int MaxChunkRetries = 3;
+    private const int ChunkRetryBaseDelayMs = 500;
 
-    /// <summary>
-    /// Validates that a restore path is safe and not targeting sensitive system directories.
-    /// </summary>
-    private static void ValidateRestorePath(string path)
+    // Large FileStream buffer — reduces syscalls for multi-MB chunk writes
+    private const int LargeFileStreamBufferSize = 4 * 1024 * 1024; // 4 MB
+
+    // Machine-adaptive parallelism for local I/O + CPU operations (e.g., SHA-256 hashing).
+    // Uses logical processor count (cores × threads-per-core on hyperthreaded CPUs).
+    // Not used for Azure-network-bound operations — those have fixed constants
+    // tuned to Azure throughput limits, not local machine capability.
+    private static readonly int LocalIoParallelism = Math.Clamp(Environment.ProcessorCount, 2, 64);
+
+    // Cached sensitive directories for ValidateRestorePath — avoids repeated
+    // Environment.GetFolderPath calls across thousands of file restores
+    private static readonly string[] SensitiveDirectories = GetSensitiveDirectories();
+
+    private static string[] GetSensitiveDirectories()
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        
-        // Get the full path to normalize it and resolve any relative components
-        var fullPath = Path.GetFullPath(path);
-        
-        // Check for path traversal attempts
-        if (fullPath.Contains("..", StringComparison.Ordinal))
-        {
-            throw new SecurityPolicyException(
-                "Invalid restore path: path traversal detected",
-                SecurityPolicyType.InvalidBlobName);
-        }
-        
-        // Define sensitive system directories that should not be restore targets
-        var sensitiveDirectories = new[]
+        return new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.Windows),
             Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -68,26 +57,83 @@ public class RestoreService
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
             Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFiles),
             Environment.GetFolderPath(Environment.SpecialFolder.CommonProgramFilesX86),
-        };
-        
-        foreach (var sensitiveDir in sensitiveDirectories)
-        {
-            if (!string.IsNullOrEmpty(sensitiveDir) && 
-                fullPath.StartsWith(sensitiveDir, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new SecurityPolicyException(
-                    $"Cannot restore to protected system directory: {sensitiveDir}",
-                    SecurityPolicyType.InvalidBlobName);
-            }
-        }
-        
-        // Validate the path doesn't contain invalid characters
+        }.Where(d => !string.IsNullOrEmpty(d)).ToArray();
+    }
+
+    public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
+    public event EventHandler<string>? StatusChanged;
+    public event EventHandler<string>? ErrorOccurred;
+
+    /// <summary>
+    /// Directory where per-file .diag logs are written on error.
+    /// Set by the UI layer. When null, uses the system temp directory.
+    /// </summary>
+    public string? DiagnosticsDirectory { get; set; }
+
+    /// <summary>
+    /// Event for detailed debug/diagnostic logging.
+    /// </summary>
+    public event EventHandler<string>? DiagnosticLog;
+    
+    [Conditional("DIAGNOSTICLOG")]
+    private void Log(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        DiagnosticLog?.Invoke(this, $"[{timestamp}] [Restore] {message}");
+    }
+
+    /// <summary>
+    /// Computes adaptive chunk-level parallelism based on max chunk size.
+    /// Large chunks (64 MB) use fewer concurrent downloads to limit memory,
+    /// while small chunks (256 KB) use more to overcome HTTP latency.
+    /// </summary>
+    private static int ComputeAdaptiveChunkConcurrency(int maxChunkBytes)
+    {
+        // Target ~256 MB of in-flight chunk data (each chunk needs ~3x: encrypted + decrypted + channel buffer)
+        const long TargetInFlightBytes = 256L * 1024 * 1024;
+        var computed = (int)(TargetInFlightBytes / Math.Max(maxChunkBytes, 1));
+        return Math.Clamp(computed, 4, 24);
+    }
+
+    /// <summary>
+    /// Validates that a restore path is safe and not targeting sensitive system directories.
+    /// </summary>
+    private static void ValidateRestorePath(string path)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        // Validate the path doesn't contain invalid characters (check before normalization)
         var invalidChars = Path.GetInvalidPathChars();
         if (path.IndexOfAny(invalidChars) >= 0)
         {
             throw new SecurityPolicyException(
                 "Invalid restore path: contains invalid characters",
                 SecurityPolicyType.InvalidBlobName);
+        }
+
+        // Get the full path to normalize it and resolve any relative components
+        var fullPath = Path.GetFullPath(path);
+
+        // Check for path traversal attempts by looking for ".." as a directory segment
+        // in the original path. Path.GetFullPath resolves these, so if the original
+        // contains ".." segments, someone is attempting traversal.
+        var segments = path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (segments.Any(s => s == ".."))
+        {
+            throw new SecurityPolicyException(
+                "Invalid restore path: path traversal detected",
+                SecurityPolicyType.InvalidBlobName);
+        }
+        
+        // Check against cached sensitive system directories
+        foreach (var sensitiveDir in SensitiveDirectories)
+        {
+            if (fullPath.StartsWith(sensitiveDir, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new SecurityPolicyException(
+                    $"Cannot restore to protected system directory: {sensitiveDir}",
+                    SecurityPolicyType.InvalidBlobName);
+            }
         }
     }
 
@@ -115,53 +161,25 @@ public class RestoreService
         CancellationToken cancellationToken = default)
     {
         Log("ListRestorableFilesAsync: Starting to list restorable files");
-        
+
         StatusChanged?.Invoke(this, "Retrieving file list from Azure...");
 
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
-        var total = metadataBlobs.Count;
-        Log($"ListRestorableFilesAsync: Found {total} metadata blobs");
-        
-        if (total == 0)
-        {
-            StatusChanged?.Invoke(this, "No files found in Azure");
-            return [];
-        }
-
-        StatusChanged?.Invoke(this, $"Loading metadata for {total} files...");
-        progress?.Report((0, total));
-
-        // Download metadata in parallel with bounded concurrency
-        const int maxParallelDownloads = 32;
-        ConcurrentBag<BackedUpFile> files = [];
-        var completed = 0;
-
-        await Parallel.ForEachAsync(
-            metadataBlobs,
-            new ParallelOptions
+        var wrappedProgress = progress != null
+            ? new Progress<(int completed, int total)>(p =>
             {
-                MaxDegreeOfParallelism = maxParallelDownloads,
-                CancellationToken = cancellationToken
-            },
-            async (blobName, ct) =>
-            {
-                var file = await _blobService.DownloadFileMetadataAsync(blobName, ct);
-                if (file != null)
+                progress.Report(p);
+                if (p.completed % 50 == 0 || p.completed == p.total)
                 {
-                    files.Add(file);
+                    StatusChanged?.Invoke(this, $"Loading file metadata... {p.completed:N0}/{p.total:N0}");
                 }
+            })
+            : null;
 
-                var count = Interlocked.Increment(ref completed);
-                if (count % 50 == 0 || count == total)
-                {
-                    progress?.Report((count, total));
-                    StatusChanged?.Invoke(this, $"Loading file metadata... {count:N0}/{total:N0}");
-                }
-            });
+        var files = await _blobService.LoadAllFileMetadataAsync(wrappedProgress, cancellationToken: cancellationToken);
 
         Log($"ListRestorableFilesAsync: Loaded {files.Count} file metadata entries");
         StatusChanged?.Invoke(this, $"Found {files.Count} files available for restore");
-        return files.ToList();
+        return files;
     }
 
     /// <summary>
@@ -177,7 +195,10 @@ public class RestoreService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(file);
+        var diag = new FileOperationDiagnostics(file.LocalPath, "Restore", DiagnosticsDirectory);
+        using var _ = diag.SetAmbient();
         Log($"RestoreFileAsync: Starting restore of '{Path.GetFileName(file.LocalPath)}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
+        diag.Record($"File: size={file.FileSize:N0}, chunks={file.Chunks.Count}, hash={file.FileHash?[..8]}..., status={file.Status}");
         
         var targetPath = restorePath ?? file.LocalPath;
         
@@ -235,19 +256,23 @@ public class RestoreService
                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
 
             long currentBytes = 0;
-            
+            string restoredHash;
+
             if (sortedChunks.Count > 1)
             {
-                Log($"RestoreFileAsync: Using bounded parallel downloads (max={MaxParallelChunkDownloads})");
+                Log($"RestoreFileAsync: Using bounded parallel downloads (adaptive concurrency)");
                 // Use bounded producer-consumer pattern with channels
-                await RestoreWithBoundedParallelDownloadsAsync(
+                // Hash is computed incrementally as chunks are written in order — no file re-read needed
+                restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
                     sortedChunks, file, tempPath, progress, 
-                    p => currentBytes = p, cancellationToken);
+                    p => currentBytes = p, diag, cancellationToken);
             }
             else
             {
                 Log("RestoreFileAsync: Single chunk, downloading directly");
-                // Single chunk - download and write directly
+                diag.Record("Single-chunk restore path");
+                // Single chunk - download, write, and compute hash in one pass
+                using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 await using FileStream outputStream = new(tempPath, FileMode.Create, FileAccess.Write, 
                     FileShare.None, bufferSize: 81920, useAsync: true);
 
@@ -256,13 +281,40 @@ public class RestoreService
                     cancellationToken.ThrowIfCancellationRequested();
 
                     Log($"RestoreFileAsync: Downloading chunk {chunk.Index} ({chunk.Length} bytes) blob={chunk.BlobName}");
-                    var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, cancellationToken);
-                    
+
+                    // Download with retry for transient Azure failures — same pattern as multi-chunk path.
+                    // Single-chunk files (3,000 small files) are especially vulnerable to transient 503s
+                    // at high concurrency since they have no other chunks to amortize a failure across.
+                    byte[]? chunkData = null;
+                    for (var attempt = 0; attempt <= MaxChunkRetries; attempt++)
+                    {
+                        try
+                        {
+                            chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, cancellationToken);
+                            break;
+                        }
+                        catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))
+                        {
+                            var delay = ChunkRetryBaseDelayMs * (1 << attempt);
+                            diag.RecordChunk("TransientRetry", chunk.Index, chunk.Hash, chunk.Length,
+                                extra: $"attempt={attempt + 1}/{MaxChunkRetries + 1}, error={ex.GetType().Name}");
+                            Log($"RestoreFileAsync: Transient error on single chunk {chunk.Index} " +
+                                $"(attempt {attempt + 1}/{MaxChunkRetries + 1}): {ex.GetType().Name}: {ex.Message}, " +
+                                $"retrying in {delay}ms");
+                            await Task.Delay(delay, cancellationToken);
+                        }
+                    }
+
                     // Verify chunk size and hash match metadata
                     Log($"RestoreFileAsync: Verifying chunk {chunk.Index} integrity");
-                    VerifyChunkIntegrity(chunkData, chunk, file.LocalPath);
-                    
+                    diag.RecordChunk("Downloaded", chunk.Index, chunk.Hash, chunkData!.Length,
+                        extra: $"blob={chunk.BlobName}, expectedLen={chunk.Length}");
+                    VerifyChunkIntegrity(chunkData!, chunk, file.LocalPath);
+                    diag.RecordChunk("Verified", chunk.Index, chunk.Hash,
+                        chunkData.Length, extra: "hash+size OK");
+
                     await outputStream.WriteAsync(chunkData, cancellationToken);
+                    incrementalHash.AppendData(chunkData);
 
                     currentBytes += chunk.Length;
                     progress?.Report((currentBytes, file.FileSize));
@@ -276,21 +328,25 @@ public class RestoreService
                         TotalChunks = sortedChunks.Count
                     });
                 }
-                
+
                 await outputStream.FlushAsync(cancellationToken);
+                restoredHash = Convert.ToHexString(incrementalHash.GetHashAndReset());
             }
-            
-            // Verify restored file integrity
-            Log($"RestoreFileAsync: Verifying file integrity of temp file: {tempPath}");
+
+            // Verify restored file integrity using incrementally computed hash
+            // (no file re-read needed — hash was computed as chunks were written in order)
+            Log($"RestoreFileAsync: Verifying file integrity (incremental hash): {restoredHash[..8]}...");
+            diag.Record($"File hash verification: computed={restoredHash[..12]}..., expected={file.FileHash?[..12]}...");
             StatusChanged?.Invoke(this, $"Verifying integrity: {Path.GetFileName(targetPath)}");
-            var restoredHash = await ComputeFileHashAsync(tempPath, cancellationToken);
-            
+
             if (!string.Equals(restoredHash, file.FileHash, StringComparison.Ordinal))
             {
                 Log($"RestoreFileAsync: HASH MISMATCH! expected={file.FileHash}, got={restoredHash}");
+                diag.Record($"[HASH MISMATCH] expected={file.FileHash}, computed={restoredHash}, " +
+                    $"chunks={file.Chunks.Count}, fileSize={file.FileSize:N0}");
                 // Delete corrupted temp file
                 try { File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
-                
+
                 throw new DataIntegrityException(
                     $"File hash mismatch after restore: expected {file.FileHash}, got {restoredHash}",
                     file.LocalPath);
@@ -317,6 +373,15 @@ public class RestoreService
             Log($"RestoreFileAsync: DataIntegrityException: {ex.Message}, " +
                 $"file='{file.LocalPath}', size={file.FileSize:N0}, chunks={file.Chunks.Count}, " +
                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
+            diag.RecordError("RestoreFileAsync.DataIntegrity", ex);
+            var diagPath = diag.Flush($"Data integrity failure: {ex.Message}");
+            if (diagPath != null)
+            {
+                Log($"RestoreFileAsync: Diagnostics written to {diagPath}");
+            }
+            // Clean up temp file before re-throwing so callers (e.g., corrupted recovery)
+            // don't leave orphaned .tmp files on disk
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
             throw; // Re-throw integrity exceptions
         }
         catch (OperationCanceledException)
@@ -337,36 +402,20 @@ public class RestoreService
                 Log($"RestoreFileAsync: IOException HResult=0x{ioEx.HResult:X8}, " +
                     $"tempExists={File.Exists(tempPath)}, targetExists={File.Exists(targetPath)}");
             }
+            diag.RecordError("RestoreFileAsync.General", ex);
+            var diagPath = diag.Flush($"Restore failed: {ex.Message}");
+            if (diagPath != null)
+            {
+                Log($"RestoreFileAsync: Diagnostics written to {diagPath}");
+            }
             // Clean up temp file on error
             try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore */ }
-            
+
             ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
             return false;
         }
     }
     
-    /// <summary>
-    /// Computes SHA-256 hash of a file for integrity verification.
-    /// </summary>
-    private static async Task<string> ComputeFileHashAsync(string filePath, CancellationToken cancellationToken)
-    {
-        await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, 
-            FileShare.Read, bufferSize: 81920, useAsync: true);
-        
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
-        return Convert.ToHexString(hash);
-    }
-
-    /// <summary>
-    /// Computes SHA-256 hash of chunk data for integrity verification.
-    /// </summary>
-    private static string ComputeChunkHash(ReadOnlySpan<byte> data)
-    {
-        Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(data, hash);
-        return Convert.ToHexString(hash);
-    }
-
     /// <summary>
     /// Verifies downloaded chunk data matches expected hash and size.
     /// </summary>
@@ -381,7 +430,7 @@ public class RestoreService
         }
 
         // Verify chunk hash matches metadata
-        var actualHash = ComputeChunkHash(chunkData);
+        var actualHash = HashHelper.ComputeHash(chunkData);
         if (!string.Equals(actualHash, chunk.Hash, StringComparison.Ordinal))
         {
             throw new DataIntegrityException(
@@ -391,37 +440,73 @@ public class RestoreService
     }
 
     /// <summary>
-    /// Restores a file using bounded parallel downloads with a producer-consumer pattern.
-    /// Downloads chunks in parallel but writes them sequentially, limiting memory usage
-    /// to approximately MaxParallelChunkDownloads chunks at any time.
+    /// Determines whether an exception represents a transient Azure error worth retrying.
+    /// Covers HTTP 408/429/500/502/503/504 from Azure, I/O timeouts, and TaskCanceledException
+    /// caused by HttpClient timeouts (not user cancellation).
     /// </summary>
-    private async Task RestoreWithBoundedParallelDownloadsAsync(
+    private static bool IsTransientError(Exception ex)
+    {
+        // Azure SDK wraps transient HTTP errors in RequestFailedException
+        if (ex is Azure.RequestFailedException rfe)
+        {
+            return rfe.Status is 408 or 429 or 500 or 502 or 503 or 504;
+        }
+
+        // HttpClient timeout surfaces as TaskCanceledException with an inner TimeoutException
+        if (ex is TaskCanceledException { InnerException: TimeoutException })
+            return true;
+
+        // Network-level I/O failures
+        if (ex is IOException or System.Net.Http.HttpRequestException)
+            return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// Restores a file using bounded parallel downloads with a producer-consumer pattern.
+    /// Downloads chunks in parallel but writes them sequentially, limiting memory usage.
+    /// Chunk-level concurrency is adaptive based on chunk size (large chunks → fewer concurrent,
+    /// small chunks → more concurrent) to balance memory pressure vs HTTP latency.
+    /// Includes retry with exponential backoff for transient Azure failures.
+    /// Computes the file hash incrementally as chunks are written in order,
+    /// eliminating the need to re-read the entire file from disk for verification.
+    /// </summary>
+    /// <returns>The SHA-256 hash of the restored file, computed incrementally during write.</returns>
+    private async Task<string> RestoreWithBoundedParallelDownloadsAsync(
         List<ChunkInfo> sortedChunks,
         BackedUpFile file,
         string tempPath,
         IProgress<(long current, long total)>? progress,
         Action<long> updateCurrentBytes,
+        FileOperationDiagnostics diag,
         CancellationToken cancellationToken)
     {
         var maxChunkBytes = sortedChunks.Max(c => c.Length);
         var totalChunkBytes = sortedChunks.Sum(c => (long)c.Length);
         var gcMemBefore = GC.GetTotalMemory(false);
-        Log($"BoundedParallelDownload: Starting for '{Path.GetFileName(file.LocalPath)}' - " +
-            $"{sortedChunks.Count} chunks, max concurrency={MaxParallelChunkDownloads}, " +
-            $"maxChunkSize={maxChunkBytes:N0} bytes, totalChunkBytes={totalChunkBytes:N0}, " +
-            $"GC.TotalMemory={gcMemBefore:N0} bytes");
-        
+        var fileName = Path.GetFileName(file.LocalPath);
+
+        // Adaptive concurrency: scale inversely with chunk size to cap memory usage
+        var effectiveConcurrency = ComputeAdaptiveChunkConcurrency(maxChunkBytes);
+        Log($"BoundedParallelDownload: Starting for '{fileName}' - " +
+            $"{sortedChunks.Count} chunks, adaptive concurrency={effectiveConcurrency} " +
+            $"(default={DefaultParallelChunkDownloads}, maxChunk={maxChunkBytes:N0}), " +
+            $"totalChunkBytes={totalChunkBytes:N0}, GC.TotalMemory={gcMemBefore:N0} bytes");
+
         // Log if memory pressure could be dangerous:
         // Each parallel chunk needs ~3x memory (stream buffer + encrypted array + decrypted array)
-        var estimatedPeakMemory = (long)maxChunkBytes * 3 * MaxParallelChunkDownloads;
+        var estimatedPeakMemory = (long)maxChunkBytes * 3 * effectiveConcurrency;
         if (estimatedPeakMemory > 1_000_000_000) // >1 GB estimated peak
         {
-            Log($"BoundedParallelDownload: WARNING - Estimated peak memory={estimatedPeakMemory:N0} bytes " +
-                $"({MaxParallelChunkDownloads} parallel x {maxChunkBytes:N0} bytes x 3 copies). " +
+            Log($"BoundedParallelDownload: WARNING '{fileName}' - Estimated peak memory={estimatedPeakMemory:N0} bytes " +
+                $"({effectiveConcurrency} parallel x {maxChunkBytes:N0} bytes x 3 copies). " +
                 $"Risk of OutOfMemoryException for large chunks.");
         }
-        
-        var channelOptions = new BoundedChannelOptions(MaxParallelChunkDownloads)
+
+        // Channel capacity is 2x download parallelism so disk writes don't stall network downloads.
+        var channelCapacity = effectiveConcurrency * 2;
+        var channelOptions = new BoundedChannelOptions(channelCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
@@ -438,7 +523,7 @@ public class RestoreService
         // Producer task: Download chunks in parallel and write to channel
         var producerTask = Task.Run(async () =>
         {
-            var semaphore = new SemaphoreSlim(MaxParallelChunkDownloads);
+            var semaphore = new SemaphoreSlim(effectiveConcurrency);
             var downloadTasks = new List<Task>();
             try
             {
@@ -456,16 +541,40 @@ public class RestoreService
                         {
                             linkedCts.Token.ThrowIfCancellationRequested();
 
-                            var chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, linkedCts.Token);
+                            // Download with retry for transient Azure failures (503, timeouts).
+                            // At 192 concurrent downloads, transient errors are expected.
+                            byte[]? chunkData = null;
+                            for (var attempt = 0; attempt <= MaxChunkRetries; attempt++)
+                            {
+                                try
+                                {
+                                    chunkData = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, linkedCts.Token);
+                                    break; // success
+                                }
+                                catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))
+                                {
+                                    var delay = ChunkRetryBaseDelayMs * (1 << attempt); // exponential backoff
+                                    diag.RecordChunk("TransientRetry", chunk.Index, chunk.Hash, chunk.Length,
+                                        extra: $"attempt={attempt + 1}/{MaxChunkRetries + 1}, error={ex.GetType().Name}");
+                                    Log($"BoundedParallelDownload.Producer: '{fileName}' transient error on chunk {chunk.Index} " +
+                                        $"(attempt {attempt + 1}/{MaxChunkRetries + 1}): {ex.GetType().Name}: {ex.Message}, " +
+                                        $"retrying in {delay}ms");
+                                    await Task.Delay(delay, linkedCts.Token);
+                                }
+                            }
 
-                            VerifyChunkIntegrity(chunkData, chunk, file.LocalPath);
+                            diag.RecordChunk("Downloaded", chunk.Index, chunk.Hash,
+                                chunkData!.Length, extra: $"blob={chunk.BlobName}, expectedLen={chunk.Length}");
+                            VerifyChunkIntegrity(chunkData!, chunk, file.LocalPath);
+                            diag.RecordChunk("Verified", chunk.Index, chunk.Hash,
+                                chunkData.Length, extra: "hash+size OK");
 
                             await channel.Writer.WriteAsync((chunk.Index, chunkData), linkedCts.Token);
 
                             var count = Interlocked.Increment(ref chunksDownloaded);
                             if (count % 50 == 0 || count == sortedChunks.Count)
                             {
-                                Log($"BoundedParallelDownload.Producer: Downloaded {count}/{sortedChunks.Count} chunks, " +
+                                Log($"BoundedParallelDownload.Producer: '{fileName}' downloaded {count}/{sortedChunks.Count} chunks, " +
                                     $"lastChunkSize={chunkData.Length:N0}, GC.TotalMemory={GC.GetTotalMemory(false):N0}");
                             }
                         }
@@ -476,7 +585,9 @@ public class RestoreService
                         catch (Exception ex)
                         {
                             var wasFirst = downloadException == null;
-                            Log($"BoundedParallelDownload.Producer: EXCEPTION downloading chunk {chunk.Index} " +
+                            diag.RecordChunk("DownloadFailed", chunk.Index, chunk.Hash, chunk.Length,
+                                extra: $"error={ex.GetType().Name}: {ex.Message}, firstError={wasFirst}");
+                            Log($"BoundedParallelDownload.Producer: '{fileName}' EXCEPTION downloading chunk {chunk.Index} " +
                                 $"(blob={chunk.BlobName}, chunkLength={chunk.Length:N0}): " +
                                 $"{ex.GetType().Name}: {ex.Message} " +
                                 $"[thread={Environment.CurrentManagedThreadId}, firstError={wasFirst}]");
@@ -524,16 +635,32 @@ public class RestoreService
             }
         }, linkedCts.Token);
         
-        // Consumer task: Read chunks from channel and write to file in order
+        // Consumer task: Read chunks from channel, write to file in order,
+        // and compute the file hash incrementally (avoids re-reading the entire file afterward)
+        string? computedFileHash = null;
         var writerTask = Task.Run(async () =>
         {
             var pendingChunks = new Dictionary<int, byte[]>();
             int nextChunkToWrite = 0;
-            
+            using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
             Log($"BoundedParallelDownload.Consumer: Opening output file: {tempPath}");
             await using FileStream outputStream = new(tempPath, FileMode.Create, FileAccess.Write, 
-                FileShare.None, bufferSize: 81920, useAsync: true);
-            
+                FileShare.None, bufferSize: LargeFileStreamBufferSize, useAsync: true);
+
+            // Pre-allocate the file to its final size to reduce NTFS fragmentation
+            // and avoid repeated metadata updates as the file grows
+            if (file.FileSize > 0)
+            {
+                outputStream.SetLength(file.FileSize);
+                outputStream.Seek(0, SeekOrigin.Begin);
+            }
+
+            // Throttle progress reports to avoid flooding the UI thread
+            // (~200ms minimum between reports instead of per-chunk)
+            var progressStopwatch = Stopwatch.StartNew();
+            const long ProgressThrottleMs = 200;
+
             try
             {
                 await foreach (var (index, data) in channel.Reader.ReadAllAsync(linkedCts.Token))
@@ -541,47 +668,62 @@ public class RestoreService
                     if (index == nextChunkToWrite)
                     {
                         await outputStream.WriteAsync(data, linkedCts.Token);
+                        incrementalHash.AppendData(data);
                         currentBytes += data.Length;
                         chunksWritten++;
                         nextChunkToWrite++;
-                        updateCurrentBytes(currentBytes);
-                        progress?.Report((currentBytes, file.FileSize));
-                        
+
                         while (pendingChunks.TryGetValue(nextChunkToWrite, out var pendingData))
                         {
                             pendingChunks.Remove(nextChunkToWrite);
                             await outputStream.WriteAsync(pendingData, linkedCts.Token);
+                            incrementalHash.AppendData(pendingData);
                             currentBytes += pendingData.Length;
                             chunksWritten++;
                             nextChunkToWrite++;
+                        }
+
+                        // Throttled progress reporting to reduce UI thread pressure
+                        if (progressStopwatch.ElapsedMilliseconds >= ProgressThrottleMs)
+                        {
                             updateCurrentBytes(currentBytes);
                             progress?.Report((currentBytes, file.FileSize));
+                            progressStopwatch.Restart();
                         }
-                        
+
                         if (chunksWritten % 50 == 0)
                         {
-                            Log($"BoundedParallelDownload.Consumer: Written {chunksWritten}/{sortedChunks.Count} chunks, {currentBytes} bytes, {pendingChunks.Count} buffered");
+                            diag.Record($"[WRITER] '{fileName}' written {chunksWritten}/{sortedChunks.Count} chunks, " +
+                                $"{currentBytes:N0}/{file.FileSize:N0} bytes, {pendingChunks.Count} buffered");
+                            Log($"BoundedParallelDownload.Consumer: '{fileName}' written {chunksWritten}/{sortedChunks.Count} chunks, {currentBytes} bytes, {pendingChunks.Count} buffered");
                         }
                     }
                     else
                     {
                         pendingChunks[index] = data;
-                        if (pendingChunks.Count % 10 == 0 || pendingChunks.Count > MaxParallelChunkDownloads)
+                        if (pendingChunks.Count % 10 == 0 || pendingChunks.Count > effectiveConcurrency)
                         {
                             var bufferedBytes = pendingChunks.Values.Sum(d => (long)d.Length);
-                            Log($"BoundedParallelDownload.Consumer: Buffering chunk {index} (waiting for {nextChunkToWrite}), " +
+                            Log($"BoundedParallelDownload.Consumer: '{fileName}' buffering chunk {index} (waiting for {nextChunkToWrite}), " +
                                 $"{pendingChunks.Count} chunks buffered ({bufferedBytes:N0} bytes), " +
                                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
                         }
                     }
                 }
-                
+
+                // Final progress report to ensure 100% is reported
+                updateCurrentBytes(currentBytes);
+                progress?.Report((currentBytes, file.FileSize));
+
                 await outputStream.FlushAsync(linkedCts.Token);
-                Log($"BoundedParallelDownload.Consumer: Flushed output, {chunksWritten} chunks written, {currentBytes} bytes");
+                computedFileHash = Convert.ToHexString(incrementalHash.GetHashAndReset());
+                diag.Record($"[WRITER] Complete: {chunksWritten}/{sortedChunks.Count} chunks, " +
+                    $"{currentBytes:N0}/{file.FileSize:N0} bytes, hash={computedFileHash[..12]}...");
+                Log($"BoundedParallelDownload.Consumer: '{fileName}' flushed output, {chunksWritten} chunks written, {currentBytes} bytes, hash={computedFileHash[..8]}...");
             }
             catch (ChannelClosedException)
             {
-                Log($"BoundedParallelDownload.Consumer: Channel closed unexpectedly. " +
+                Log($"BoundedParallelDownload.Consumer: '{fileName}' channel closed unexpectedly. " +
                     $"chunksWritten={chunksWritten}, nextExpected={nextChunkToWrite}, " +
                     $"pendingBuffered={pendingChunks.Count}, " +
                     $"downloadException={downloadException?.GetType().Name ?? "none"}: {downloadException?.Message ?? "none"}");
@@ -591,7 +733,7 @@ public class RestoreService
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                Log($"BoundedParallelDownload.Consumer: EXCEPTION writing: {ex.GetType().Name}: {ex.Message}");
+                Log($"BoundedParallelDownload.Consumer: '{fileName}' EXCEPTION writing: {ex.GetType().Name}: {ex.Message}");
                 Log($"BoundedParallelDownload.Consumer: StackTrace: {ex.StackTrace}");
                 Log($"BoundedParallelDownload.Consumer: State - chunksWritten={chunksWritten}, " +
                     $"nextExpected={nextChunkToWrite}, pendingBuffered={pendingChunks.Count}, " +
@@ -616,13 +758,13 @@ public class RestoreService
         }
         catch (Exception ex)
         {
-            Log($"BoundedParallelDownload: EXCEPTION in WhenAll: {ex.GetType().Name}: {ex.Message}");
+            Log($"BoundedParallelDownload: '{fileName}' EXCEPTION in WhenAll: {ex.GetType().Name}: {ex.Message}");
             Log($"BoundedParallelDownload: WhenAll StackTrace: {ex.StackTrace}");
             
             // Unpack AggregateException to log ALL inner exceptions (Task.WhenAll only surfaces the first)
             if (ex is AggregateException agg)
             {
-                Log($"BoundedParallelDownload: AggregateException contains {agg.InnerExceptions.Count} inner exception(s):");
+                Log($"BoundedParallelDownload: '{fileName}' AggregateException contains {agg.InnerExceptions.Count} inner exception(s):");
                 for (int i = 0; i < agg.InnerExceptions.Count; i++)
                 {
                     var inner = agg.InnerExceptions[i];
@@ -658,922 +800,10 @@ public class RestoreService
                 file.LocalPath);
         }
         
-        Log($"BoundedParallelDownload: Completed, wrote {chunksWritten} chunks, {currentBytes} bytes, " +
+        Log($"BoundedParallelDownload: '{fileName}' completed, wrote {chunksWritten} chunks, {currentBytes} bytes, " +
             $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
+
+        return computedFileHash!;
     }
 
-    /// <summary>
-    /// Restores multiple files to a specified directory using parallel file processing.
-    /// </summary>
-    public async Task<RestoreResult> RestoreFilesAsync(
-        IEnumerable<BackedUpFile> files,
-        string restoreDirectory,
-        bool preserveFolderStructure = true,
-        bool overwriteExisting = false,
-        IProgress<(int current, int total, string file)>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(files);
-        ArgumentException.ThrowIfNullOrWhiteSpace(restoreDirectory);
-
-        RestoreResult result = new();
-        var fileList = files.ToList();
-        var totalFiles = fileList.Count;
-        int completedFiles = 0;
-        object resultLock = new();
-
-        // Pre-compute relative paths (needs the full list for common root detection)
-        var allPaths = fileList.Select(f => f.LocalPath).ToList();
-
-        StatusChanged?.Invoke(this, $"Starting parallel restore of {totalFiles} files (max {MaxParallelFileRestores} concurrent)");
-        Log($"RestoreFilesAsync: Starting parallel restore of {totalFiles} files");
-
-        await Parallel.ForEachAsync(
-            fileList,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = MaxParallelFileRestores,
-                CancellationToken = cancellationToken
-            },
-            async (file, ct) =>
-            {
-                string targetPath;
-                if (preserveFolderStructure)
-                {
-                    var relativePath = GetRelativePath(allPaths, file.LocalPath);
-                    targetPath = Path.Combine(restoreDirectory, relativePath);
-                }
-                else
-                {
-                    targetPath = Path.Combine(restoreDirectory, Path.GetFileName(file.LocalPath));
-                }
-
-                var done = Interlocked.Increment(ref completedFiles);
-                progress?.Report((done, totalFiles, file.LocalPath));
-
-                var logPrefix = $"RestoreFilesAsync: [{done}/{totalFiles}]";
-                var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-                    file, targetPath, overwriteExisting, fileProgress: null, logPrefix, ct);
-
-                lock (resultLock)
-                {
-                    ApplyRestoreOutcome(result, outcome, file, targetPath, recoveredPath, unrecoverableChunks);
-                }
-            });
-
-        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
-        return result;
-    }
-
-    /// <summary>
-    /// Performs a full restore of all backed up files.
-    /// </summary>
-    public async Task<RestoreResult> RestoreAllAsync(
-        string restoreDirectory,
-        bool overwriteExisting = false,
-        IProgress<(int current, int total, string file)>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        StatusChanged?.Invoke(this, "Starting full restore...");
-
-        var files = await ListRestorableFilesAsync(progress: null, cancellationToken);
-        return await RestoreFilesAsync(files, restoreDirectory, 
-            preserveFolderStructure: true, overwriteExisting, progress, cancellationToken);
-    }
-
-    /// <summary>
-    /// Gets the relative path from a list of paths.
-    /// </summary>
-    private static string GetRelativePath(List<string> allPaths, string currentPath)
-    {
-        if (allPaths.Count <= 1)
-            return Path.GetFileName(currentPath);
-
-        // Find common root directory
-        var directories = allPaths
-            .Select(p => Path.GetDirectoryName(p) ?? string.Empty)
-            .Where(d => !string.IsNullOrEmpty(d))
-            .ToList();
-
-        if (directories.Count == 0)
-            return Path.GetFileName(currentPath);
-
-        var commonRoot = directories[0];
-        foreach (var dir in directories.Skip(1))
-        {
-            while (!dir.StartsWith(commonRoot, StringComparison.OrdinalIgnoreCase) && commonRoot.Length > 0)
-            {
-                var parentDir = Path.GetDirectoryName(commonRoot);
-                if (string.IsNullOrEmpty(parentDir) || parentDir == commonRoot)
-                {
-                    commonRoot = string.Empty;
-                    break;
-                }
-                commonRoot = parentDir;
-            }
-        }
-
-        if (string.IsNullOrEmpty(commonRoot))
-            return Path.GetFileName(currentPath);
-
-        return Path.GetRelativePath(commonRoot, currentPath);
-    }
-
-    /// <summary>
-    /// Searches for files matching a pattern in the backup.
-    /// </summary>
-    public async Task<List<BackedUpFile>> SearchFilesAsync(
-        string searchPattern,
-        CancellationToken cancellationToken = default)
-    {
-        var allFiles = await ListRestorableFilesAsync(progress: null, cancellationToken);
-        
-        var pattern = searchPattern.ToLowerInvariant();
-        return allFiles.Where(f => 
-            Path.GetFileName(f.LocalPath).ToLowerInvariant().Contains(pattern) ||
-            f.LocalPath.ToLowerInvariant().Contains(pattern))
-            .ToList();
-    }
-
-    /// <summary>
-    /// Deletes a file and all its chunks from Azure storage.
-    /// </summary>
-    public async Task<bool> DeleteFileAsync(BackedUpFile file, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(file);
-        
-        try
-        {
-            StatusChanged?.Invoke(this, $"Deleting: {Path.GetFileName(file.LocalPath)}");
-
-            // Delete all chunks
-            foreach (var chunk in file.Chunks)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                await _blobService.DeleteBlobAsync(chunk.BlobName, cancellationToken);
-            }
-
-            // Delete metadata
-            var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(file.LocalPath)));
-            var metadataBlobName = $"metadata/{metadataHash}";
-            await _blobService.DeleteBlobAsync(metadataBlobName, cancellationToken);
-
-            StatusChanged?.Invoke(this, $"Deleted: {Path.GetFileName(file.LocalPath)}");
-            return true;
-        }
-        catch (Exception ex)
-        {
-            ErrorOccurred?.Invoke(this, $"Failed to delete {file.LocalPath}: {ex.Message}");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Performs a mirror sync from Azure backup to a local directory.
-    /// This will:
-    /// 1. Restore files that are missing or outdated locally
-    /// 2. Delete local files that don't exist in the backup
-    /// 3. Skip files that are identical
-    /// </summary>
-    /// <param name="backupFiles">Files from Azure backup to sync</param>
-    /// <param name="targetDirectory">Local directory to sync to</param>
-    /// <param name="sourceBasePath">Original base path in backup (e.g., "J:\")</param>
-    /// <param name="progress">Progress reporter</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    public async Task<MirrorSyncResult> MirrorSyncToLocalAsync(
-        IEnumerable<BackedUpFile> backupFiles,
-        string targetDirectory,
-        string sourceBasePath,
-        IProgress<(int current, int total, string file, string action)>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(backupFiles);
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sourceBasePath);
-        
-        Log($"MirrorSyncToLocalAsync: Starting mirror sync from '{sourceBasePath}' to '{targetDirectory}'");
-        MirrorSyncResult result = new();
-        var fileList = backupFiles.ToList();
-        
-        // Normalize paths
-        sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        targetDirectory = Path.GetFullPath(targetDirectory);
-        
-        if (!Directory.Exists(targetDirectory))
-        {
-            Directory.CreateDirectory(targetDirectory);
-        }
-
-        StatusChanged?.Invoke(this, $"Mirror sync: {fileList.Count} files from backup");
-
-        // Build a set of expected files in target directory (thread-safe for parallel access)
-        ConcurrentDictionary<string, byte> expectedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
-
-        // Phase 1: Restore/update files from backup (parallel)
-        var totalOperations = fileList.Count;
-        int completedOps = 0;
-        object resultLock = new();
-
-        Log($"MirrorSyncToLocalAsync: Starting parallel restore phase ({totalOperations} files, max {MaxParallelFileRestores} concurrent)");
-
-        await Parallel.ForEachAsync(
-            fileList,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = MaxParallelFileRestores,
-                CancellationToken = cancellationToken
-            },
-            async (backupFile, ct) =>
-            {
-                var currentOp = Interlocked.Increment(ref completedOps);
-
-                try
-                {
-                    // Calculate target path by remapping base path
-                    var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
-                    var targetPath = Path.Combine(targetDirectory, relativePath);
-                    expectedLocalFiles.TryAdd(targetPath, 0);
-
-                    var targetDir = Path.GetDirectoryName(targetPath);
-                    if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
-                    {
-                        Directory.CreateDirectory(targetDir);
-                    }
-
-                    // Check if local file exists and is up to date
-                    if (File.Exists(targetPath))
-                    {
-                        FileInfo localInfo = new(targetPath);
-
-                        // Compare size and modification time
-                        if (localInfo.Length == backupFile.FileSize && 
-                            Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
-                        {
-                            // File appears unchanged - verify with hash for certainty
-                            var localHash = await ComputeFileHashAsync(targetPath, ct);
-                            if (string.Equals(localHash, backupFile.FileHash, StringComparison.Ordinal))
-                            {
-                                lock (resultLock) { result.FilesUnchanged++; }
-                                progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Unchanged"));
-                                return;
-                            }
-                        }
-                    }
-
-                    // File is missing or outdated - restore it
-                    progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
-
-                    var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
-                    var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
-                        backupFile, targetPath, overwriteExisting: true, fileProgress: null, logPrefix, ct);
-
-                    lock (resultLock)
-                    {
-                        switch (outcome)
-                        {
-                            case FileRestoreOutcome.Success:
-                                result.FilesTransferred++;
-                                result.BytesTransferred += backupFile.FileSize;
-                                break;
-                            case FileRestoreOutcome.CorruptedRecovery:
-                                result.FilesCorruptedRecovered++;
-                                result.BytesTransferred += backupFile.FileSize;
-                                if (recoveredPath != null)
-                                    result.CorruptedRecoveryPaths.Add(recoveredPath);
-                                break;
-                            case FileRestoreOutcome.Failed:
-                                result.FilesErrored++;
-                                result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
-                                break;
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    lock (resultLock)
-                    {
-                        result.FilesErrored++;
-                        result.Errors.Add($"Error restoring {backupFile.LocalPath}: {ex.Message}");
-                    }
-                    Log($"MirrorSyncToLocalAsync: Error restoring {backupFile.LocalPath}: {ex.Message}");
-                }
-            });
-
-        // Phase 2: Delete local files that don't exist in backup (mirror mode)
-        StatusChanged?.Invoke(this, "Scanning for files to delete...");
-
-        try
-        {
-            // Normalize target directory for comparison
-            var normalizedTargetDir = Path.GetFullPath(targetDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-            var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
-
-            foreach (var localFile in localFiles)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                // Security: Verify file is actually within target directory (protection against symlink attacks)
-                var normalizedLocalFile = Path.GetFullPath(localFile);
-                if (!normalizedLocalFile.StartsWith(normalizedTargetDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                {
-                    Log($"MirrorSyncToLocalAsync: Skipping file outside target directory: {localFile}");
-                    continue;
-                }
-
-                // Preserve corrupted recovery files — these were created by AttemptCorruptedRecoveryAsync
-                // and should not be deleted by the mirror cleanup phase
-                if (normalizedLocalFile.Contains($"{Path.DirectorySeparatorChar}__corrupted__{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                if (!expectedLocalFiles.ContainsKey(localFile))
-                {
-                    try
-                    {
-                        progress?.Report((Volatile.Read(ref completedOps), totalOperations, Path.GetFileName(localFile), "Deleting"));
-                        File.Delete(localFile);
-                        result.FilesDeleted++;
-                        Log($"MirrorSyncToLocalAsync: Deleted {localFile}");
-                    }
-                    catch (Exception ex)
-                    {
-                        result.Errors.Add($"Failed to delete {localFile}: {ex.Message}");
-                    }
-                }
-            }
-
-            // Clean up empty directories
-            CleanEmptyDirectories(targetDirectory);
-        }
-        catch (Exception ex)
-        {
-            Log($"MirrorSyncToLocalAsync: Error during delete phase: {ex.Message}");
-        }
-
-        var summaryParts = new List<string>
-        {
-            $"{result.FilesTransferred} restored",
-            $"{result.FilesDeleted} deleted",
-            $"{result.FilesUnchanged} unchanged"
-        };
-        if (result.FilesCorruptedRecovered > 0)
-            summaryParts.Add($"{result.FilesCorruptedRecovered} recovered to __corrupted__");
-        if (result.FilesErrored > 0)
-            summaryParts.Add($"{result.FilesErrored} errors");
-
-        var summaryText = $"Mirror sync complete: {string.Join(", ", summaryParts)}";
-        StatusChanged?.Invoke(this, summaryText);
-        Log($"MirrorSyncToLocalAsync: {summaryText}");
-
-        return result;
-    }
-
-    /// <summary>
-    /// Gets the relative path from a base path.
-    /// </summary>
-    private static string GetRelativePathFromBase(string fullPath, string basePath)
-    {
-        // Normalize paths
-        fullPath = Path.GetFullPath(fullPath);
-        basePath = Path.GetFullPath(basePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
-        if (fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
-        {
-            var relative = fullPath.Substring(basePath.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return string.IsNullOrEmpty(relative) ? Path.GetFileName(fullPath) : relative;
-        }
-
-        // If not under base path, just return the filename
-        return Path.GetFileName(fullPath);
-    }
-
-    /// <summary>
-    /// Removes empty directories recursively.
-    /// </summary>
-    private static void CleanEmptyDirectories(string directory)
-    {
-        foreach (var subDir in Directory.EnumerateDirectories(directory))
-        {
-            CleanEmptyDirectories(subDir);
-            
-            if (!Directory.EnumerateFileSystemEntries(subDir).Any())
-            {
-                try
-                {
-                    Directory.Delete(subDir);
-                }
-                catch
-                {
-                    // Ignore errors when cleaning up directories
-                }
-            }
-        }
-    }
-
-    /// <summary>
-    /// Result of a single file restore attempt with corrupted recovery support.
-    /// </summary>
-    private enum FileRestoreOutcome
-    {
-        Success,
-        Failed,
-        CorruptedRecovery
-    }
-
-    /// <summary>
-    /// Restores a single file with full exception handling and corrupted recovery.
-    /// This is the shared logic used by all batch restore methods to ensure consistent behavior.
-    /// </summary>
-    /// <returns>Outcome, recovered path (if corrupted recovery), and unrecoverable chunk count.</returns>
-    private async Task<(FileRestoreOutcome outcome, string? recoveredPath, int unrecoverableChunks)> RestoreFileWithRecoveryAsync(
-        BackedUpFile file,
-        string targetPath,
-        bool overwriteExisting,
-        IProgress<(long current, long total)>? fileProgress,
-        string logPrefix,
-        CancellationToken cancellationToken)
-    {
-        try
-        {
-            var success = await RestoreFileAsync(file, targetPath, overwriteExisting,
-                fileProgress, cancellationToken);
-
-            if (success)
-            {
-                Log($"{logPrefix} OK");
-                return (FileRestoreOutcome.Success, null, 0);
-            }
-
-            Log($"{logPrefix} FAILED (returned false)");
-            return (FileRestoreOutcome.Failed, null, 0);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (DataIntegrityException ex)
-        {
-            Log($"{logPrefix} INTEGRITY FAILURE: {ex.Message}");
-            ErrorOccurred?.Invoke(this, $"Integrity error restoring {file.LocalPath}: {ex.Message}");
-
-            Log($"{logPrefix} Attempting corrupted recovery");
-            StatusChanged?.Invoke(this, $"Attempting corrupted recovery: {Path.GetFileName(file.LocalPath)}");
-
-            var recovery = await AttemptCorruptedRecoveryAsync(file, targetPath, cancellationToken);
-            if (recovery.HasValue)
-            {
-                var (recoveredPath, unrecoverableChunks) = recovery.Value;
-                var status = unrecoverableChunks > 0
-                    ? $"Recovered with {unrecoverableChunks} zero-filled chunk(s)"
-                    : "Recovered (CRC mismatch only, data intact)";
-                Log($"{logPrefix} RECOVERED to {recoveredPath} — {status}");
-                ErrorOccurred?.Invoke(this, $"Corrupted recovery: {file.LocalPath} → {recoveredPath} ({status})");
-                return (FileRestoreOutcome.CorruptedRecovery, recoveredPath, unrecoverableChunks);
-            }
-
-            Log($"{logPrefix} RECOVERY FAILED");
-            ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: integrity error and recovery failed");
-            return (FileRestoreOutcome.Failed, null, 0);
-        }
-        catch (Exception ex)
-        {
-            Log($"{logPrefix} EXCEPTION: {ex.GetType().Name}: {ex.Message}");
-            ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
-            return (FileRestoreOutcome.Failed, null, 0);
-        }
-    }
-
-    /// <summary>
-    /// Applies a single file restore outcome to a RestoreResult.
-    /// </summary>
-    private static void ApplyRestoreOutcome(
-        RestoreResult result,
-        FileRestoreOutcome outcome,
-        BackedUpFile file,
-        string targetPath,
-        string? recoveredPath,
-        int unrecoverableChunks)
-    {
-        switch (outcome)
-        {
-            case FileRestoreOutcome.Success:
-                result.SuccessfulFiles.Add(targetPath);
-                result.TotalBytesRestored += file.FileSize;
-                break;
-            case FileRestoreOutcome.CorruptedRecovery:
-                result.CorruptedRecoveryFiles.Add((file.LocalPath, recoveredPath!, unrecoverableChunks));
-                result.TotalBytesRestored += file.FileSize;
-                break;
-            case FileRestoreOutcome.Failed:
-                result.FailedFiles.Add(file.LocalPath);
-                break;
-        }
-    }
-
-    /// <summary>
-    /// Builds a summary status message from a RestoreResult.
-    /// </summary>
-    private static string BuildRestoreStatusMessage(RestoreResult result)
-    {
-        var parts = new List<string> { $"{result.SuccessfulFiles.Count} succeeded" };
-        if (result.CorruptedRecoveryFiles.Count > 0)
-            parts.Add($"{result.CorruptedRecoveryFiles.Count} recovered to __corrupted__");
-        if (result.FailedFiles.Count > 0)
-            parts.Add($"{result.FailedFiles.Count} failed");
-        return $"Restore complete: {string.Join(", ", parts)}";
-    }
-
-    /// <summary>
-    /// Attempts to recover a file with corrupted chunks to a __corrupted__ subfolder.
-    /// Downloads each chunk individually with best-effort decryption (skips CRC32 check).
-    /// Chunks that are completely unrecoverable (AES-GCM tag mismatch) are zero-filled
-    /// so the rest of the file remains usable (e.g., video files will play with brief glitches).
-    /// </summary>
-    /// <returns>
-    /// (recoveredPath, unrecoverableChunkCount) if recovery produced a file, or null if recovery failed entirely.
-    /// </returns>
-    private async Task<(string recoveredPath, int unrecoverableChunks)?> AttemptCorruptedRecoveryAsync(
-        BackedUpFile file,
-        string originalTargetPath,
-        CancellationToken cancellationToken)
-    {
-        var dir = Path.GetDirectoryName(originalTargetPath) ?? string.Empty;
-        var corruptedDir = Path.Combine(dir, "__corrupted__");
-        var corruptedPath = Path.Combine(corruptedDir, Path.GetFileName(originalTargetPath));
-
-        Log($"AttemptCorruptedRecoveryAsync: Recovering '{Path.GetFileName(file.LocalPath)}' to {corruptedPath}");
-        StatusChanged?.Invoke(this, $"Attempting corrupted recovery: {Path.GetFileName(file.LocalPath)}");
-
-        try
-        {
-            Directory.CreateDirectory(corruptedDir);
-
-            var sortedChunks = file.Chunks.OrderBy(c => c.Index).ToList();
-            var unrecoverableChunks = 0;
-            var recoveredChunks = 0;
-
-            // Shared zero buffer for efficient zero-fill (max 1 MB, reused across chunks)
-            var zeroBuffer = new byte[Math.Min(1024 * 1024, sortedChunks.Max(c => c.Length))];
-
-            await using FileStream outputStream = new(corruptedPath, FileMode.Create, FileAccess.Write,
-                FileShare.None, bufferSize: 81920, useAsync: true);
-
-            foreach (var chunk in sortedChunks)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var chunkData = await _blobService.DownloadChunkBestEffortAsync(chunk.BlobName, cancellationToken);
-
-                if (chunkData != null)
-                {
-                    await outputStream.WriteAsync(chunkData, cancellationToken);
-                    recoveredChunks++;
-                }
-                else
-                {
-                    // Zero-fill in blocks using shared buffer to avoid large allocations
-                    var remaining = chunk.Length;
-                    while (remaining > 0)
-                    {
-                        var writeSize = Math.Min(remaining, zeroBuffer.Length);
-                        await outputStream.WriteAsync(zeroBuffer.AsMemory(0, writeSize), cancellationToken);
-                        remaining -= writeSize;
-                    }
-                    unrecoverableChunks++;
-                    Log($"AttemptCorruptedRecoveryAsync: Chunk {chunk.Index} UNRECOVERABLE, zero-filled ({chunk.Length} bytes)");
-                }
-
-                // Early bailout: if no chunks have been recovered so far and we've tried several,
-                // the data is likely entirely unrecoverable (e.g., wrong key scenario)
-                var totalAttempted = recoveredChunks + unrecoverableChunks;
-                if (recoveredChunks == 0 && totalAttempted >= 3)
-                {
-                    Log($"AttemptCorruptedRecoveryAsync: Aborting — first {totalAttempted} chunks all unrecoverable");
-                    try { await outputStream.DisposeAsync(); } catch { /* closing stream */ }
-                    try { File.Delete(corruptedPath); } catch { /* best effort */ }
-                    return null;
-                }
-            }
-
-            Log($"AttemptCorruptedRecoveryAsync: Recovery complete — " +
-                $"{recoveredChunks}/{sortedChunks.Count} chunks recovered, " +
-                $"saved to {corruptedPath}");
-
-            return (corruptedPath, unrecoverableChunks);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Log($"AttemptCorruptedRecoveryAsync: Recovery failed entirely: {ex.Message}");
-
-            // Clean up partial file
-            try { File.Delete(corruptedPath); } catch { /* best effort */ }
-
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Restores files with path remapping support.
-    /// Each file can have a custom target path.
-    /// </summary>
-    /// <param name="filesWithPaths">Files with their target paths</param>
-    /// <param name="overwriteExisting">Whether to overwrite existing files</param>
-    /// <param name="progress">Reports file-level progress (current file index, total files, filename)</param>
-    /// <param name="fileByteProgress">Reports byte-level progress for current file (bytes completed, file index)</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    public async Task<RestoreResult> RestoreFilesWithRemappingAsync(
-        IEnumerable<(BackedUpFile file, string targetPath)> filesWithPaths,
-        bool overwriteExisting = false,
-        IProgress<(int current, int total, string file)>? progress = null,
-        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress = null,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(filesWithPaths);
-        
-        RestoreResult result = new();
-        var fileList = filesWithPaths.ToList();
-
-        Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping");
-        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
-
-        for (var i = 0; i < fileList.Count; i++)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var (file, targetPath) = fileList[i];
-            Log($"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}] '{Path.GetFileName(file.LocalPath)}' -> '{targetPath}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
-            progress?.Report((i + 1, fileList.Count, file.LocalPath));
-
-            // Security: Validate target path doesn't contain suspicious patterns
-            var normalizedPath = Path.GetFullPath(targetPath);
-            if (normalizedPath.Contains(".." + Path.DirectorySeparatorChar) || 
-                normalizedPath.Contains(".." + Path.AltDirectorySeparatorChar))
-            {
-                Log($"RestoreFilesWithRemappingAsync: Skipping suspicious path: {targetPath}");
-                result.FailedFiles.Add(file.LocalPath);
-                ErrorOccurred?.Invoke(this, $"Invalid target path (contains path traversal): {targetPath}");
-                continue;
-            }
-
-            // Ensure target directory exists
-            var targetDir = Path.GetDirectoryName(normalizedPath);
-            if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
-            {
-                Log($"RestoreFilesWithRemappingAsync: Creating directory: {targetDir}");
-                Directory.CreateDirectory(targetDir);
-            }
-
-            // Create byte-level progress reporter for this file
-            var fileIndex = i;
-            var individualFileProgress = fileByteProgress != null
-                ? new Progress<(long current, long total)>(p =>
-                    fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
-                : null;
-
-            var logPrefix = $"RestoreFilesWithRemappingAsync: [{i + 1}/{fileList.Count}]";
-            var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-                file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, cancellationToken);
-            ApplyRestoreOutcome(result, outcome, file, normalizedPath, recoveredPath, unrecoverableChunks);
-        }
-
-        Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, " +
-            $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed, " +
-            $"{result.TotalBytesRestored} bytes");
-        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
-        return result;
-    }
-
-    #region Preview Generation Methods
-
-    /// <summary>
-    /// Generates a preview of a mirror sync operation without making any changes.
-    /// </summary>
-    public async Task<OperationPreview> PreviewMirrorSyncAsync(
-        IEnumerable<BackedUpFile> backupFiles,
-        string targetDirectory,
-        string sourceBasePath,
-        CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(backupFiles);
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
-        ArgumentException.ThrowIfNullOrWhiteSpace(sourceBasePath);
-
-        OperationPreview preview = new()
-        {
-            OperationType = OperationType.MirrorSync,
-            OperationDescription = "Sync local folder to match Azure backup",
-            SourceDescription = $"Azure Backup ({sourceBasePath})",
-            TargetDescription = targetDirectory
-        };
-
-        var fileList = backupFiles.ToList();
-        sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        targetDirectory = Path.GetFullPath(targetDirectory);
-
-        HashSet<string> expectedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
-
-        // Check each backup file
-        foreach (var backupFile in fileList)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var relativePath = GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
-            var targetPath = Path.Combine(targetDirectory, relativePath);
-            expectedLocalFiles.Add(targetPath);
-
-            if (File.Exists(targetPath))
-            {
-                FileInfo localInfo = new(targetPath);
-                
-                // Compare to see if update needed
-                if (localInfo.Length == backupFile.FileSize && 
-                    Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
-                {
-                    // Quick check - likely unchanged, but verify with hash
-                    var localHash = await ComputeFileHashAsync(targetPath, cancellationToken);
-                    if (string.Equals(localHash, backupFile.FileHash, StringComparison.Ordinal))
-                    {
-                        preview.FilesToSkip.Add(new PreviewFileAction
-                        {
-                            FilePath = backupFile.LocalPath,
-                            FileSize = backupFile.FileSize,
-                            LastModified = backupFile.LastModified,
-                            TargetPath = targetPath,
-                            Action = FileActionType.Skip,
-                            Reason = "File is identical"
-                        });
-                        continue;
-                    }
-                }
-
-            // File exists but is different
-                preview.FilesToOverwrite.Add(new PreviewFileAction
-                {
-                    FilePath = backupFile.LocalPath,
-                    FileSize = backupFile.FileSize,
-                    LastModified = backupFile.LastModified,
-                    TargetPath = targetPath,
-                    Action = FileActionType.Overwrite,
-                    Reason = localInfo.Length != backupFile.FileSize 
-                        ? $"Size differs (local: {localInfo.Length}, backup: {backupFile.FileSize})"
-                        : "Content differs"
-                });
-            }
-            else
-            {
-            // New file
-                preview.FilesToCreate.Add(new PreviewFileAction
-                {
-                    FilePath = backupFile.LocalPath,
-                    FileSize = backupFile.FileSize,
-                    LastModified = backupFile.LastModified,
-                    TargetPath = targetPath,
-                    Action = FileActionType.Create,
-                    Reason = "File does not exist locally"
-                });
-            }
-        }
-
-        // Check for local files that don't exist in backup (will be deleted)
-        if (Directory.Exists(targetDirectory))
-        {
-            var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
-            foreach (var localFile in localFiles)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (!expectedLocalFiles.Contains(localFile))
-                {
-                FileInfo fileInfo = new(localFile);
-                    preview.FilesToDelete.Add(new PreviewFileAction
-                    {
-                        FilePath = localFile,
-                        FileSize = fileInfo.Length,
-                        LastModified = fileInfo.LastWriteTime,
-                        Action = FileActionType.Delete,
-                        Reason = "Not in backup"
-                    });
-                }
-            }
-        }
-
-        return preview;
-    }
-
-    /// <summary>
-    /// Generates a preview of deleting files from Azure storage.
-    /// </summary>
-    public OperationPreview PreviewDeleteFromAzure(IEnumerable<BackedUpFile> filesToDelete)
-    {
-        ArgumentNullException.ThrowIfNull(filesToDelete);
-
-        var fileList = filesToDelete.ToList();
-        OperationPreview preview = new()
-        {
-            OperationType = OperationType.DeleteFromAzure,
-            OperationDescription = $"Permanently delete {fileList.Count} file(s) from Azure storage",
-            SourceDescription = "Azure Blob Storage",
-            TargetDescription = "N/A (files will be removed)"
-        };
-
-        foreach (var file in fileList)
-        {
-            preview.FilesToDelete.Add(new PreviewFileAction
-            {
-                FilePath = file.LocalPath,
-                FileSize = file.FileSize,
-                LastModified = file.LastModified,
-                Action = FileActionType.Delete,
-                Reason = "User requested deletion"
-            });
-        }
-
-        return preview;
-    }
-
-    /// <summary>
-    /// Generates a preview of restoring files with path remapping.
-    /// </summary>
-    public OperationPreview PreviewRestoreWithRemapping(
-        IEnumerable<(BackedUpFile file, string targetPath)> filesWithPaths)
-    {
-        ArgumentNullException.ThrowIfNull(filesWithPaths);
-
-        var fileList = filesWithPaths.ToList();
-        OperationPreview preview = new()
-        {
-            OperationType = OperationType.Restore,
-            OperationDescription = $"Restore {fileList.Count} file(s) from Azure backup",
-            SourceDescription = "Azure Blob Storage",
-            TargetDescription = "Local file system (with path remapping)"
-        };
-
-        foreach (var (file, targetPath) in fileList)
-        {
-            if (File.Exists(targetPath))
-            {
-                FileInfo localInfo = new(targetPath);
-                preview.FilesToOverwrite.Add(new PreviewFileAction
-                {
-                    FilePath = file.LocalPath,
-                    FileSize = file.FileSize,
-                    LastModified = file.LastModified,
-                    TargetPath = targetPath,
-                    Action = FileActionType.Overwrite,
-                    Reason = $"Existing file will be replaced (local size: {localInfo.Length})"
-                });
-            }
-            else
-            {
-                preview.FilesToCreate.Add(new PreviewFileAction
-                {
-                    FilePath = file.LocalPath,
-                    FileSize = file.FileSize,
-                    LastModified = file.LastModified,
-                    TargetPath = targetPath,
-                    Action = FileActionType.Create,
-                    Reason = "New file"
-                });
-            }
-        }
-
-        return preview;
-    }
-
-    #endregion
-}
-
-public class RestoreProgressEventArgs : EventArgs
-{
-    public string FilePath { get; set; } = string.Empty;
-    public long BytesRestored { get; set; }
-    public long TotalBytes { get; set; }
-    public int ChunksRestored { get; set; }
-    public int TotalChunks { get; set; }
-    
-    public double PercentComplete => TotalBytes > 0 ? (double)BytesRestored / TotalBytes * 100 : 0;
-}
-
-public class RestoreResult
-{
-    public List<string> SuccessfulFiles { get; set; } = [];
-    public List<string> FailedFiles { get; set; } = [];
-
-    /// <summary>
-    /// Files that failed normal restore but were partially recovered to a __corrupted__ subfolder.
-    /// Each entry is (originalPath, corruptedPath, unrecoverableChunkCount).
-    /// </summary>
-    public List<(string OriginalPath, string RecoveredPath, int UnrecoverableChunks)> CorruptedRecoveryFiles { get; set; } = [];
-
-    public long TotalBytesRestored { get; set; }
-
-    public int TotalFilesProcessed => SuccessfulFiles.Count + FailedFiles.Count + CorruptedRecoveryFiles.Count;
-    public bool IsSuccess => FailedFiles.Count == 0 && CorruptedRecoveryFiles.Count == 0;
 }

@@ -16,74 +16,6 @@ public partial class MainWindowViewModel
     #region Restore Commands
 
     [RelayCommand]
-    private async Task RefreshRestorableFilesAsync()
-    {
-        if (!IsInitialized)
-        {
-            AddLog("Please unlock first - go to Settings and enter your password");
-            return;
-        }
-
-        // Check if blob service is connected
-        if (!_blobService.IsConnected)
-        {
-            if (UseEntraIdAuth)
-            {
-                AddLog("Not connected to Azure Storage. Please sign in with Microsoft Entra ID in Settings.");
-            }
-            else
-            {
-                AddLog("Not connected to Azure Storage. Please configure your connection string in Settings.");
-            }
-            return;
-        }
-
-        IsOperationInProgress = true;
-        AddLog("Loading files from Azure Storage...");
-        
-        try
-        {
-            Progress<(int completed, int total)> progress = new(p =>
-            {
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    StatusMessage = $"Loading file metadata... {p.completed:N0}/{p.total:N0}";
-                });
-            });
-
-            var files = await _restoreService.ListRestorableFilesAsync(progress: progress);
-            
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                RestorableFiles.Clear();
-                foreach (var file in files.OrderByDescending(f => f.LastModified))
-                {
-                    RestorableFiles.Add(new BackedUpFileViewModel(file));
-                }
-                OnPropertyChanged(nameof(RestorableFilesEmpty));
-                OnPropertyChanged(nameof(RestorableFilesCount));
-                OnPropertyChanged(nameof(ShowAzureEmptyState));
-                
-                // Build tree view if enabled
-                if (UseTreeView)
-                {
-                    BuildFileTree();
-                }
-                
-                AddLog($"Loaded {files.Count} files from Azure Storage");
-            });
-        }
-        catch (Exception ex)
-        {
-            AddLog($"Failed to load files: {ex.Message}");
-        }
-        finally
-        {
-            IsOperationInProgress = false;
-        }
-    }
-
-    [RelayCommand]
     private async Task SearchFilesAsync()
     {
         if (!IsInitialized || string.IsNullOrWhiteSpace(SearchPattern))
@@ -245,59 +177,51 @@ public partial class MainWindowViewModel
         {
             var totalBytes = filesToDelete.Sum(f => f.Model.FileSize);
             StartProgressTracking("Deleting", filesToDelete.Count, totalBytes);
-            
-            var successCount = 0;
-            var failCount = 0;
 
-            for (var i = 0; i < filesToDelete.Count; i++)
+            // Use parallel batch deletion — all blob deletes run concurrently
+            var models = filesToDelete.Select(f => f.Model).ToList();
+
+            var deleteProgress = new Progress<(int filesCompleted, int totalFiles, string currentFileName)>(p =>
             {
-                _operationCts!.Token.ThrowIfCancellationRequested();
-
-                var file = filesToDelete[i];
-                var fileName = Path.GetFileName(file.LocalPath);
-                var fileSize = file.Model.FileSize;
-                
-                UpdateFileProgress(fileName, 0, fileSize, i);
-
-                try
+                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
                 {
-                    var success = await _restoreService.DeleteFileAsync(file.Model, _operationCts.Token);
-                    
-                    if (success)
+                    CompletedFilesCount = p.filesCompleted;
+                    ProgressValue = p.totalFiles > 0 ? (double)p.filesCompleted / p.totalFiles * 100 : 0;
+                    ProgressText = $"Deleting: {p.currentFileName}";
+                    CurrentFileName = p.currentFileName;
+                    OnPropertyChanged(nameof(FilesProgressText));
+                });
+            });
+
+            var successfullyDeleted = await _restoreService.DeleteFilesAsync(
+                models, deleteProgress, _operationCts!.Token);
+
+            var failCount = filesToDelete.Count - successfullyDeleted.Count;
+
+            // Single batched UI update — remove all successful deletions at once
+            var deletedPaths = successfullyDeleted.Select(f => f.LocalPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            await Avalonia.Threading.Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                // Remove in reverse order to avoid index shifting during removal
+                for (var i = RestorableFiles.Count - 1; i >= 0; i--)
+                {
+                    if (deletedPaths.Contains(RestorableFiles[i].LocalPath))
                     {
-                        successCount++;
-                        CompleteFileProgress(fileSize);
-                        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                        {
-                            RestorableFiles.Remove(file);
-                        });
-                    }
-                    else
-                    {
-                        failCount++;
+                        RestorableFiles.RemoveAt(i);
                     }
                 }
-                catch (Exception ex)
-                {
-                    AddLog($"Failed to delete {fileName}: {ex.Message}");
-                    failCount++;
-                }
-            }
 
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                // Clear selection state after deletion
                 SelectedTreeNode = null;
                 foreach (var file in RestorableFiles)
                 {
                     file.IsSelected = false;
                 }
-                
+
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
                 NotifySelectionChanged();
-                
-                // Rebuild tree if in tree view mode
+
                 if (UseTreeView)
                 {
                     BuildFileTree();
@@ -307,7 +231,7 @@ public partial class MainWindowViewModel
             // Refresh local files to update backup status indicators
             await RefreshLocalFilesAsync();
 
-            AddLog($"Delete complete: {successCount} succeeded, {failCount} failed");
+            AddLog($"Delete complete: {successfullyDeleted.Count} succeeded, {failCount} failed");
         }
         catch (OperationCanceledException)
         {
@@ -318,40 +242,6 @@ public partial class MainWindowViewModel
             IsOperationInProgress = false;
             StopProgressTracking();
         }
-    }
-
-    [RelayCommand]
-    private void SelectAllRestorableFiles()
-    {
-        if (UseTreeView)
-        {
-            foreach (var root in FileTreeRoots)
-            {
-                root.IsSelected = true;
-            }
-        }
-        else
-        {
-            SelectAllFiles();
-        }
-        NotifySelectionChanged();
-    }
-
-    [RelayCommand]
-    private void DeselectAllRestorableFiles()
-    {
-        if (UseTreeView)
-        {
-            foreach (var root in FileTreeRoots)
-            {
-                root.IsSelected = false;
-            }
-        }
-        else
-        {
-            DeselectAllFiles();
-        }
-        NotifySelectionChanged();
     }
 
     [RelayCommand]

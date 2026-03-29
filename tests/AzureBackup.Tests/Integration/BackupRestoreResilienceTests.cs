@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
@@ -298,37 +299,30 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
     [Fact]
     public async Task RestoreFile_ReportsProgress()
     {
-        // This test is timing-dependent, so we retry up to 5 times
-        await FlakyTestHelper.RetryAsync(async () =>
-        {
-            // Arrange
-            InMemoryBlobService blobService = new(_encryptionService);
-            await blobService.ConnectAsync("fake", "container");
-            RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+        // Arrange
+        InMemoryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
 
-            var content = CreateRandomContent(200 * 1024);
-            var sourceFile = Path.Combine(_sourceDirectory, $"progress_{Guid.NewGuid():N}.txt");
-            await File.WriteAllBytesAsync(sourceFile, content);
-            
-            var backedUp = await BackupFileAsync(blobService, sourceFile);
-            var restorePath = Path.Combine(_restoreDirectory, $"progress_{Guid.NewGuid():N}.txt");
+        var content = CreateRandomContent(200 * 1024);
+        var sourceFile = Path.Combine(_sourceDirectory, $"progress_{Guid.NewGuid():N}.txt");
+        await File.WriteAllBytesAsync(sourceFile, content);
 
-            List<(long current, long total)> progressReports = new();
-            Progress<(long current, long total)> progress = new(p => progressReports.Add(p));
+        var backedUp = await BackupFileAsync(blobService, sourceFile);
+        var restorePath = Path.Combine(_restoreDirectory, $"progress_{Guid.NewGuid():N}.txt");
 
-            // Act
-            await restoreService.RestoreFileAsync(backedUp, restorePath, true, progress);
-            
-            // Allow time for async progress callbacks to complete
-            await Task.Delay(100);
+        List<(long current, long total)> progressReports = new();
+        SynchronousProgress<(long current, long total)> progress = new(p => progressReports.Add(p));
 
-            // Assert
-            Assert.NotEmpty(progressReports);
-            
-            // Final report should show completion
-            var last = progressReports.Last();
-            Assert.Equal(last.total, last.current);
-        });
+        // Act
+        await restoreService.RestoreFileAsync(backedUp, restorePath, true, progress);
+
+        // Assert
+        Assert.NotEmpty(progressReports);
+
+        // Final report should show completion
+        var last = progressReports.Last();
+        Assert.Equal(last.total, last.current);
     }
 
     #endregion
@@ -455,8 +449,8 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var chunks = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {

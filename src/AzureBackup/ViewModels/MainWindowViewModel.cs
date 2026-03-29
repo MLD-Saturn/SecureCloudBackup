@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -43,6 +44,11 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// ViewModel for the Storage Health tab.
     /// </summary>
     public StorageHealthViewModel? StorageHealthViewModel { get; private set; }
+
+    /// <summary>
+    /// ViewModel for the Tier Migration tab.
+    /// </summary>
+    public TierMigrationViewModel? TierMigrationViewModel { get; private set; }
 
     /// <summary>
     /// Window title including mode indicator (Portable or Installed).
@@ -148,7 +154,23 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// Distinguished from IsOperationInProgress which includes simple refreshes.
     /// </summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private bool _isTransferInProgress;
+
+    /// <summary>
+    /// True when the Progress nav button should be visible in the navigation bar.
+    /// Visible while an operation is active or when the completion summary is showing.
+    /// </summary>
+    [ObservableProperty]
+    private bool _showProgressNavButton;
+
+    /// <summary>
+    /// ViewModel for the Progress tab that appears during backup/restore/mirror operations.
+    /// </summary>
+    public ProgressTabViewModel ProgressTab { get; }
+
+    // Stores the view the user was on before the Progress tab auto-switched
+    private string _viewBeforeProgress = "Sync";
 
     /// <summary>
     /// True when a reset has been requested and is awaiting confirmation.
@@ -273,11 +295,33 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private long _totalBytesToProcess;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private string _operationSpeed = string.Empty;
 
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(TrayTooltipText))]
     private string _estimatedTimeRemaining = string.Empty;
+
+    /// <summary>
+    /// Dynamic tooltip text for the system tray icon.
+    /// Shows "Azure Backup — Idle" or "Azure Backup — Syncing — speed — ETA".
+    /// </summary>
+    public string TrayTooltipText
+    {
+        get
+        {
+            if (!IsTransferInProgress)
+                return "Azure Backup \u2014 Idle";
+
+            var text = "Azure Backup \u2014 Syncing";
+            if (!string.IsNullOrEmpty(OperationSpeed))
+                text += $" \u2014 {OperationSpeed}";
+            if (!string.IsNullOrEmpty(EstimatedTimeRemaining))
+                text += $" \u2014 {EstimatedTimeRemaining}";
+            return text;
+        }
+    }
 
     // Track current file index for display (0-based internally, shown as 1-based)
     private int _currentFileIndex;
@@ -302,6 +346,13 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public ObservableCollection<BackedUpFileViewModel> BackedUpFiles { get; } = [];
     public ObservableCollection<BackedUpFileViewModel> RestorableFiles { get; } = [];
     public ObservableCollection<string> LogMessages { get; } = [];
+
+    // Buffered log queue — ensures messages appear in chronological order regardless
+    // of which thread calls AddLog. Without this, concurrent Dispatcher.Post calls
+    // can interleave and insert messages out of timestamp order.
+    private readonly ConcurrentQueue<string> _pendingLogMessages = new();
+    private int _logDrainScheduled;
+    private string? _latestStatusMessage;
 
     /// <summary>
     /// True if no restorable files have been loaded.
@@ -379,6 +430,13 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// </summary>
     [ObservableProperty]
     private bool _enableDiagnosticLogging = true;
+
+    /// <summary>
+    /// Font size for log entries. Adjustable via Ctrl+= / Ctrl+- on the Logs tab.
+    /// Persists across tab navigation since the ViewModel outlives the view.
+    /// </summary>
+    [ObservableProperty]
+    private double _logFontSize = 12;
 
     #region Tree View Properties
 
@@ -573,12 +631,29 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             _blobService, _fileWatcherService);
         _restoreService = new RestoreService(_databaseService, _blobService, _encryptionService);
 
-        // Initialize chunk index service (requires blob service to be connected later)
+        // Wire per-file diagnostics directory so .diag logs land next to the database
+        var diagDir = Path.Combine(AppMode.DataDirectory, "diagnostics");
+        _orchestrator.DiagnosticsDirectory = diagDir;
+        _restoreService.DiagnosticsDirectory = diagDir;
+
+        // Initialize progress tab for backup/restore/mirror operations
+        ProgressTab = new ProgressTabViewModel();
+        ProgressTab.CompletionAcknowledged += (_, _) =>
+        {
+            ShowProgressNavButton = false;
+            CurrentView = _viewBeforeProgress;
+        };
+        ProgressTab.CancelRequested += (_, _) => _operationCts?.Cancel();
+
+        // Initialize chunk index service
         _chunkIndexService = new ChunkIndexService(_databaseService, _blobService, _encryptionService);
         _orchestrator.SetChunkIndexService(_chunkIndexService);
         
         // Initialize Storage Health ViewModel
         StorageHealthViewModel = new StorageHealthViewModel(_chunkIndexService, _databaseService);
+
+        // Initialize Tier Migration ViewModel
+        TierMigrationViewModel = new TierMigrationViewModel(_blobService, _chunkIndexService, msg => AddLog(msg));
 
         // Wire up status events
         _orchestrator.StatusChanged += (s, msg) => AddLog(msg);
@@ -593,6 +668,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         // Wire up local file selection change events
         LocalFileTreeNodeViewModel.SelectionChanged += OnLocalFileSelectionChanged;
+
+        // Wire up Azure file tree selection change events
+        FileTreeNodeViewModel.SelectionChanged += OnAzureFileSelectionChanged;
         
         // Wire up diagnostic logging events (detailed service logs)
         _orchestrator.DiagnosticLog += OnDiagnosticLog;
@@ -601,7 +679,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _encryptionService.DiagnosticLog += OnDiagnosticLog;
         _restoreService.DiagnosticLog += OnDiagnosticLog;
         _fileWatcherService.DiagnosticLog += OnDiagnosticLog;
-        
+
         // Wire up crash-safe file logger for all service diagnostic events
         if (Program.Logger != null)
         {
@@ -656,17 +734,8 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     {
         if (EnableDiagnosticLogging)
         {
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                // Add to log with diagnostic prefix
-                LogMessages.Add($"?? {message}");
-                
-                // Keep log size manageable
-                while (LogMessages.Count > 500)
-                {
-                    LogMessages.RemoveAt(0);
-                }
-            });
+            _pendingLogMessages.Enqueue($"\U0001f50d {message}");
+            DrainLogQueue();
         }
     }
 
@@ -676,6 +745,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private void OnLocalFileSelectionChanged(object? sender, EventArgs e)
     {
         Avalonia.Threading.Dispatcher.UIThread.Post(NotifyLocalSelectionChanged);
+    }
+
+    /// <summary>
+    /// Handles Azure file tree selection changes (checkbox state changes).
+    /// </summary>
+    private void OnAzureFileSelectionChanged(object? sender, EventArgs e)
+    {
+        Avalonia.Threading.Dispatcher.UIThread.Post(NotifySelectionChanged);
     }
 
     private void LoadConfiguration()
@@ -746,12 +823,39 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private void AddLog(string message)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss");
+        _pendingLogMessages.Enqueue($"[{timestamp}] {message}");
+        Interlocked.Exchange(ref _latestStatusMessage, message);
+        DrainLogQueue();
+    }
+
+    /// <summary>
+    /// Schedules a single UI-thread drain of the buffered log queue.
+    /// Multiple concurrent AddLog calls coalesce into one drain, preserving enqueue order.
+    /// </summary>
+    private void DrainLogQueue()
+    {
+        // Only one Post in flight at a time — subsequent calls are no-ops
+        // because the scheduled drain will pick up their enqueued messages too.
+        if (Interlocked.CompareExchange(ref _logDrainScheduled, 1, 0) != 0)
+            return;
+
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
-            LogMessages.Insert(0, $"[{timestamp}] {message}");
+            Volatile.Write(ref _logDrainScheduled, 0);
+
+            // Drain all buffered messages in FIFO order.
+            // Insert each at position 0 so the last dequeued (newest) ends up at the top.
+            while (_pendingLogMessages.TryDequeue(out var entry))
+            {
+                LogMessages.Insert(0, entry);
+            }
+
             while (LogMessages.Count > 1000)
                 LogMessages.RemoveAt(LogMessages.Count - 1);
-            StatusMessage = message;
+
+            var status = Interlocked.Exchange(ref _latestStatusMessage, null);
+            if (status != null)
+                StatusMessage = status;
         });
     }
 
@@ -839,6 +943,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// Marks a file as completed in the progress tracking.
+    /// Used by sequential operations (restore) where files complete one at a time.
     /// </summary>
     private void CompleteFileProgress(long fileSize)
     {
@@ -848,15 +953,46 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             _lastBytesProcessed += fileSize;
             TotalBytesProcessed = _lastBytesProcessed;
             CurrentFileProgress = 100;
-            
+
             // Update progress value based on bytes
             ProgressValue = TotalBytesToProcess > 0 
                 ? (double)TotalBytesProcessed / TotalBytesToProcess * 100 
                 : 0;
-            
+
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));
         });
+    }
+
+    /// <summary>
+    /// Updates overall progress using a pre-computed aggregate byte total.
+    /// Used by parallel operations where the service layer tracks aggregate bytes via Interlocked.
+    /// Avoids the single-file recomputation that causes jumps during parallel processing.
+    /// </summary>
+    private void UpdateOverallProgress(long aggregateBytesProcessed, int completedFiles)
+    {
+        TotalBytesProcessed = aggregateBytesProcessed;
+        CompletedFilesCount = completedFiles;
+        ProgressValue = TotalBytesToProcess > 0
+            ? (double)TotalBytesProcessed / TotalBytesToProcess * 100
+            : 0;
+
+        OnPropertyChanged(nameof(BytesProgressText));
+        OnPropertyChanged(nameof(FilesProgressText));
+        UpdateSpeedAndEta();
+    }
+
+    /// <summary>
+    /// Updates the current file display (name, per-file progress bar) without modifying
+    /// overall byte totals. Used alongside UpdateOverallProgress for parallel operations.
+    /// </summary>
+    private void UpdateCurrentFileDisplay(string fileName, long bytesProcessed, long fileSize, int fileIndex)
+    {
+        CurrentFileName = fileName;
+        CurrentFileProgress = fileSize > 0 ? (double)bytesProcessed / fileSize * 100 : 0;
+        CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(bytesProcessed)} / {AzureBackup.Core.FormatHelper.FormatBytes(fileSize)}";
+        _currentFileIndex = fileIndex;
+        ProgressText = $"{CurrentOperationType}: {fileName} ({fileIndex + 1}/{TotalFilesInOperation})";
     }
 
     /// <summary>
@@ -884,13 +1020,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             {
                 var remainingBytes = TotalBytesToProcess - TotalBytesProcessed;
                 var remainingSeconds = remainingBytes / bytesPerSecond;
-                
-                if (remainingSeconds < 60)
-                    EstimatedTimeRemaining = $"{remainingSeconds:F0}s remaining";
-                else if (remainingSeconds < 3600)
-                    EstimatedTimeRemaining = $"{remainingSeconds / 60:F0}m {remainingSeconds % 60:F0}s remaining";
-                else
-                    EstimatedTimeRemaining = $"{remainingSeconds / 3600:F0}h {(remainingSeconds % 3600) / 60:F0}m remaining";
+                EstimatedTimeRemaining = $"{AzureBackup.Core.FormatHelper.FormatDuration(remainingSeconds)} remaining";
             }
         }
     }
@@ -1097,6 +1227,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     {
         // Unsubscribe from static events to prevent memory leaks
         LocalFileTreeNodeViewModel.SelectionChanged -= OnLocalFileSelectionChanged;
+        FileTreeNodeViewModel.SelectionChanged -= OnAzureFileSelectionChanged;
         
         // Cancel any ongoing operations
         _operationCts?.Cancel();

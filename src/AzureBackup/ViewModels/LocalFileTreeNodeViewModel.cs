@@ -14,19 +14,19 @@ public enum LocalFileBackupStatus
 {
     /// <summary>Status not yet determined.</summary>
     Unknown,
-    
+
     /// <summary>File is backed up and unchanged.</summary>
     BackedUp,
-    
+
     /// <summary>File has been modified since last backup.</summary>
     Modified,
-    
+
     /// <summary>File has never been backed up.</summary>
     New,
-    
+
     /// <summary>Previous backup attempt failed.</summary>
     Failed,
-    
+
     /// <summary>File is excluded from backup.</summary>
     Excluded
 }
@@ -35,7 +35,7 @@ public enum LocalFileBackupStatus
 /// ViewModel for displaying local filesystem files in a tree structure.
 /// Shows backup status for each file by comparing with Azure backup records.
 /// </summary>
-public partial class LocalFileTreeNodeViewModel : ObservableObject
+public partial class LocalFileTreeNodeViewModel : TreeNodeViewModelBase<LocalFileTreeNodeViewModel>
 {
     /// <summary>
     /// Static event raised when any local file's selection state changes.
@@ -43,29 +43,20 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
     /// </summary>
     public static event EventHandler? SelectionChanged;
 
-    private LocalFileTreeNodeViewModel? _parent;
     private LocalFileBackupStatus _backupStatusValue = LocalFileBackupStatus.Unknown;
-    private bool _isUpdatingSelection;
 
-    /// <summary>
-    /// Name of this node (file or folder name).
-    /// </summary>
-    public string Name { get; }
+    /// <inheritdoc />
+    protected override void OnSelectionPropagationComplete()
+        => SelectionChanged?.Invoke(this, EventArgs.Empty);
 
-    /// <summary>
-    /// Full local path.
-    /// </summary>
-    public string FullPath { get; }
+    /// <inheritdoc />
+    public override string Name { get; }
 
-    /// <summary>
-    /// True if this is a folder node.
-    /// </summary>
-    public bool IsFolder { get; }
+    /// <inheritdoc />
+    public override string FullPath { get; }
 
-    /// <summary>
-    /// True if this is a file node.
-    /// </summary>
-    public bool IsFile => !IsFolder;
+    /// <inheritdoc />
+    public override bool IsFolder { get; }
 
     /// <summary>
     /// File size in bytes (0 for folders).
@@ -139,149 +130,6 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
     };
 
     /// <summary>
-    /// Child nodes.
-    /// </summary>
-    public ObservableCollection<LocalFileTreeNodeViewModel> Children { get; } = [];
-
-    /// <summary>
-    /// Parent node (null for root).
-    /// </summary>
-    public LocalFileTreeNodeViewModel? Parent
-    {
-        get => _parent;
-        set => SetProperty(ref _parent, value);
-    }
-
-    /// <summary>
-    /// Whether this node is expanded in the tree view.
-    /// Default is collapsed (false) to match Azure panel behavior.
-    /// </summary>
-    [ObservableProperty]
-    private bool _isExpanded;
-
-    /// <summary>
-    /// Whether this node is selected (checked) for backup.
-    /// When a folder is selected, all children are also selected.
-    /// </summary>
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsPartiallySelected))]
-    private bool _isSelected;
-
-    /// <summary>
-    /// True if this folder has some but not all children selected.
-    /// Used for showing indeterminate checkbox state.
-    /// </summary>
-    public bool IsPartiallySelected
-    {
-        get
-        {
-            if (!IsFolder || Children.Count == 0)
-                return false;
-
-            var selectedCount = Children.Count(c => c.IsSelected || c.IsPartiallySelected);
-            return selectedCount > 0 && selectedCount < Children.Count;
-        }
-    }
-
-    /// <summary>
-    /// Called when IsSelected changes. Propagates selection to children and updates parent.
-    /// </summary>
-    partial void OnIsSelectedChanged(bool value)
-    {
-        if (_isUpdatingSelection)
-            return;
-
-        _isUpdatingSelection = true;
-        try
-        {
-            // If this is a folder, select/deselect all children
-            if (IsFolder)
-            {
-                foreach (var child in Children)
-                {
-                    child.SetSelectionRecursive(value);
-                }
-            }
-
-            // Update parent's partial selection state
-            Parent?.OnChildSelectionChanged();
-        }
-        finally
-        {
-            _isUpdatingSelection = false;
-        }
-
-        // Notify that selection has changed
-        SelectionChanged?.Invoke(this, EventArgs.Empty);
-    }
-
-    /// <summary>
-    /// Called when IsExpanded changes. Auto-expands single-child folder chains
-    /// to improve navigation UX.
-    /// </summary>
-    partial void OnIsExpandedChanged(bool value)
-    {
-        if (!value || !IsFolder)
-            return;
-
-        // Auto-expand if this folder has exactly one child and it's a folder
-        // This continues recursively for chains like: Users > Username > Documents
-        if (Children.Count == 1 && Children[0].IsFolder)
-        {
-            Children[0].IsExpanded = true;
-        }
-    }
-
-    /// <summary>
-    /// Sets selection state recursively without triggering parent updates.
-    /// </summary>
-    private void SetSelectionRecursive(bool selected)
-    {
-        _isUpdatingSelection = true;
-        try
-        {
-            IsSelected = selected;
-            foreach (var child in Children)
-            {
-                child.SetSelectionRecursive(selected);
-            }
-        }
-        finally
-        {
-            _isUpdatingSelection = false;
-        }
-    }
-
-    /// <summary>
-    /// Called when a child's selection changes.
-    /// </summary>
-    private void OnChildSelectionChanged()
-    {
-        OnPropertyChanged(nameof(IsPartiallySelected));
-        
-        // Update our selection state based on children
-        _isUpdatingSelection = true;
-        try
-        {
-            var allSelected = Children.All(c => c.IsSelected);
-            var noneSelected = Children.All(c => !c.IsSelected && !c.IsPartiallySelected);
-            
-            if (allSelected)
-                IsSelected = true;
-            else if (noneSelected)
-                IsSelected = false;
-            // Otherwise keep current state (partial)
-        }
-        finally
-        {
-            _isUpdatingSelection = false;
-        }
-
-        // Propagate up
-        Parent?.OnChildSelectionChanged();
-    }
-
-    /// <summary>
     /// Summary counts for folders.
     /// </summary>
     public int TotalFileCount { get; private set; }
@@ -312,30 +160,6 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
         IsFolder = isFolder;
         FileSize = fileSize;
         LastModified = lastModified;
-    }
-
-    /// <summary>
-    /// Expands all nodes in this subtree.
-    /// </summary>
-    public void ExpandAll()
-    {
-        IsExpanded = true;
-        foreach (var child in Children)
-        {
-            child.ExpandAll();
-        }
-    }
-
-    /// <summary>
-    /// Collapses all nodes in this subtree.
-    /// </summary>
-    public void CollapseAll()
-    {
-        IsExpanded = false;
-        foreach (var child in Children)
-        {
-            child.CollapseAll();
-        }
     }
 
     /// <summary>
@@ -419,7 +243,7 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
             if (!Directory.Exists(folder.Path)) continue;
 
             LocalFileTreeNodeViewModel rootNode = new(
-                GetRootDisplayName(folder.Path),
+                AzureBackup.Core.PathHelper.GetDisplayName(folder.Path),
                 folder.Path,
                 isFolder: true);
 
@@ -429,22 +253,6 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
         }
 
         return roots;
-    }
-
-    /// <summary>
-    /// Gets a display name for a root watched folder path.
-    /// Handles drive roots (e.g. "J:\") where Path.GetFileName returns empty string.
-    /// </summary>
-    private static string GetRootDisplayName(string folderPath)
-    {
-        var trimmed = folderPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        var name = Path.GetFileName(trimmed);
-
-        // Path.GetFileName returns empty for drive roots like "J:" 
-        if (string.IsNullOrEmpty(name))
-            return trimmed + Path.DirectorySeparatorChar; // "J:\"
-
-        return name;
     }
 
     private static void BuildTreeRecursive(
@@ -459,17 +267,17 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
             foreach (var subDir in Directory.EnumerateDirectories(directoryPath))
             {
                 var dirName = Path.GetFileName(subDir);
-                
+
                 // Check exclusion patterns
-                if (ShouldExclude(dirName, excludePatterns)) continue;
+                if (AzureBackup.Core.GlobMatcher.MatchesAny(dirName, excludePatterns)) continue;
 
                 LocalFileTreeNodeViewModel dirNode = new(dirName, subDir, isFolder: true)
                 {
                     Parent = parentNode
                 };
-                
+
                 BuildTreeRecursive(dirNode, subDir, backedUpFiles, excludePatterns);
-                
+
                 // Only add non-empty directories
                 if (dirNode.Children.Count > 0)
                 {
@@ -481,10 +289,9 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
             foreach (var filePath in Directory.EnumerateFiles(directoryPath))
             {
                 var fileName = Path.GetFileName(filePath);
-                
-                // Check exclusion patterns
-                if (ShouldExclude(fileName, excludePatterns)) continue;
 
+                // Check exclusion patterns
+                if (AzureBackup.Core.GlobMatcher.MatchesAny(fileName, excludePatterns)) continue;
 
                 try
                 {
@@ -509,7 +316,7 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
                         var hasValidBackup = backup.Status == AzureBackup.Core.Models.BackupStatus.Completed &&
                                             !string.IsNullOrEmpty(backup.FileHash) &&
                                             backup.FileSize > 0;
-                        
+
                         if (backup.Status == AzureBackup.Core.Models.BackupStatus.Excluded)
                         {
                             fileNode.BackupStatusValue = LocalFileBackupStatus.Excluded;
@@ -565,22 +372,5 @@ public partial class LocalFileTreeNodeViewModel : ObservableObject
         {
             // Skip directories we can't access
         }
-    }
-
-    private static bool ShouldExclude(string name, List<string> patterns)
-    {
-        foreach (var pattern in patterns)
-        {
-            if (string.IsNullOrWhiteSpace(pattern)) continue;
-            
-            // Simple wildcard matching
-            if (pattern.StartsWith("*") && name.EndsWith(pattern[1..], StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (pattern.EndsWith("*") && name.StartsWith(pattern[..^1], StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (name.Equals(pattern, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-        return false;
     }
 }

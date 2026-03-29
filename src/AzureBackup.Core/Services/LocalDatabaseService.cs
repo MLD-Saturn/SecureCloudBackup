@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using Konscious.Security.Cryptography;
@@ -11,7 +12,7 @@ namespace AzureBackup.Core.Services;
 /// The database is encrypted using a key derived from the user's password via Argon2id,
 /// providing strong protection against brute force attacks.
 /// </summary>
-public class LocalDatabaseService : IDisposable
+public partial class LocalDatabaseService : IDisposable
 {
     private LiteDatabase? _database;
     private ILiteCollection<BackupConfiguration>? _configCollection;
@@ -42,6 +43,7 @@ public class LocalDatabaseService : IDisposable
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
     
+    [Conditional("DIAGNOSTICLOG")]
     private void Log(string message)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -400,46 +402,6 @@ public class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
-    /// Initializes the database at the specified path without encryption.
-    /// Only used for migration from unencrypted to encrypted database.
-    /// </summary>
-    [Obsolete("Use Initialize(string, string) with password for encrypted database. This method is only for migration.")]
-    public void InitializeUnencrypted(string databasePath)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        Log($"InitializeUnencrypted: Opening unencrypted database at {databasePath} (for migration)");
-        
-        _databasePath = databasePath;
-        
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-            Log($"InitializeUnencrypted: Created directory {directory}");
-        }
-
-        _database = new LiteDatabase(databasePath);
-        
-        _configCollection = _database.GetCollection<BackupConfiguration>("config");
-        _filesCollection = _database.GetCollection<BackedUpFile>("files");
-        _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
-        _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
-        _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
-
-        // Create indexes for faster queries
-        _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
-        _filesCollection.EnsureIndex(x => x.Status);
-        _filesCollection.EnsureIndex(x => x.FileHash);
-        
-        // Chunk index indexes
-        _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
-        _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
-        _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
-        
-        Log("InitializeUnencrypted: Database initialized successfully");
-    }
-
-    /// <summary>
     /// Closes the current database connection.
     /// Used when migrating to allow reopening with different settings.
     /// </summary>
@@ -502,20 +464,6 @@ public class LocalDatabaseService : IDisposable
                 throw;
             }
         }
-    }
-
-    /// <summary>
-    /// Checks if the application has been configured with Azure credentials.
-    /// </summary>
-    public bool IsConfigured()
-    {
-        var config = GetConfiguration();
-        // Check for either authentication method
-        bool hasAzureConfig = config.AuthMethod == AzureAuthMethod.EntraId
-            ? (!string.IsNullOrEmpty(config.StorageAccountName) && config.IsEntraIdAuthenticated)
-            : (config.EncryptedConnectionString != null);
-        
-        return hasAzureConfig && config.PasswordSalt != null;
     }
 
     #endregion
@@ -582,69 +530,6 @@ public class LocalDatabaseService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Gets files with a specific backup status.
-    /// </summary>
-    public List<BackedUpFile> GetFilesByStatus(BackupStatus status)
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _filesCollection!.Find(x => x.Status == status).ToList();
-        }
-    }
-
-    /// <summary>
-    /// Gets the count of files by status.
-    /// </summary>
-    public Dictionary<BackupStatus, int> GetFileStatusCounts()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            Dictionary<BackupStatus, int> counts = new();
-            foreach (var status in Enum.GetValues<BackupStatus>())
-            {
-                var count = _filesCollection!.Count(x => x.Status == status);
-                if (count > 0)
-                    counts[status] = count;
-            }
-            return counts;
-        }
-    }
-
-    /// <summary>
-    /// Deletes a backed up file record.
-    /// </summary>
-    public void DeleteBackedUpFile(string localPath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
-        
-        lock (_dbLock)
-        {
-            _filesCollection!.DeleteMany(x => x.LocalPath == localPath);
-        }
-    }
-
-    /// <summary>
-    /// Gets total size of all backed up files.
-    /// </summary>
-    public long GetTotalBackedUpSize()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            return _filesCollection!.Query()
-                .Select(x => x.FileSize)
-                .ToEnumerable()
-                .Sum();
-        }
-    }
-
     #endregion
 
     #region Pending Changes Queue
@@ -708,33 +593,6 @@ public class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
-    /// Gets count of pending changes.
-    /// </summary>
-    public int GetPendingChangesCount()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _pendingChangesCollection!.Count();
-        }
-    }
-
-    /// <summary>
-    /// Checks if a file change is already pending in the queue.
-    /// </summary>
-    public bool IsFileChangePending(string filePath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        lock (_dbLock)
-        {
-            return _pendingChangesCollection!.Exists(x => x.FilePath == filePath);
-        }
-    }
-
-    /// <summary>
     /// Gets all pending change file paths as a set for fast lookups.
     /// Use this instead of per-file IsFileChangePending calls when checking many files.
     /// </summary>
@@ -749,19 +607,6 @@ public class LocalDatabaseService : IDisposable
                 .Select(x => x.FilePath)
                 .ToEnumerable()
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-    }
-
-    /// <summary>
-    /// Clears all pending changes.
-    /// </summary>
-    public void ClearPendingChanges()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            _pendingChangesCollection!.DeleteAll();
         }
     }
 
@@ -817,387 +662,7 @@ public class LocalDatabaseService : IDisposable
 
     #endregion
 
-    #region Chunk Index
 
-    /// <summary>
-    /// Gets a chunk index entry by hash.
-    /// </summary>
-    public ChunkIndexEntry? GetChunkIndexEntry(string chunkHash)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-        
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.FindOne(x => x.ChunkHash == chunkHash);
-        }
-    }
-
-    /// <summary>
-    /// Saves or updates a chunk index entry.
-    /// </summary>
-    public void SaveChunkIndexEntry(ChunkIndexEntry entry)
-    {
-        EnsureInitialized();
-        ArgumentNullException.ThrowIfNull(entry);
-        
-        lock (_dbLock)
-        {
-            var existing = _chunkIndexCollection!.FindOne(x => x.ChunkHash == entry.ChunkHash);
-            if (existing != null)
-            {
-                _chunkIndexCollection.Update(entry);
-            }
-            else
-            {
-                _chunkIndexCollection.Insert(entry);
-            }
-        }
-    }
-
-    /// <summary>
-    /// Deletes a chunk index entry.
-    /// </summary>
-    public void DeleteChunkIndexEntry(string chunkHash)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-        
-        lock (_dbLock)
-        {
-            _chunkIndexCollection!.DeleteMany(x => x.ChunkHash == chunkHash);
-        }
-    }
-
-    /// <summary>
-    /// Gets all chunk index entries.
-    /// </summary>
-    public List<ChunkIndexEntry> GetAllChunkIndexEntries()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.FindAll().ToList();
-        }
-    }
-
-    /// <summary>
-    /// Gets a lightweight summary of all chunk index entries for fast lookups.
-    /// Returns only the hash, reference count, size, and tier — without loading
-    /// the ReferencingFiles list, which dominates memory at scale.
-    /// At 1M chunks, this uses ~80 MB vs ~1.5 GB for full entries.
-    /// </summary>
-    public Dictionary<string, (int ReferenceCount, long SizeBytes, StorageTier Tier)> GetChunkIndexSummaryMap()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            var result = new Dictionary<string, (int, long, StorageTier)>(StringComparer.Ordinal);
-            foreach (var entry in _chunkIndexCollection!.FindAll())
-            {
-                result[entry.ChunkHash] = (entry.ReferenceCount, entry.SizeBytes, entry.CurrentTier);
-            }
-            return result;
-        }
-    }
-
-    /// <summary>
-    /// Gets chunk entries that reference a specific file.
-    /// </summary>
-    public List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-        
-        lock (_dbLock)
-        {
-            // LiteDB doesn't support querying nested collections well,
-            // so we need to filter in memory
-            return _chunkIndexCollection!
-                .FindAll()
-                .Where(e => e.ReferencingFiles.Any(r => 
-                    r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-        }
-    }
-
-    /// <summary>
-    /// Gets orphaned chunks (reference count = 0).
-    /// </summary>
-    public List<ChunkIndexEntry> GetOrphanedChunks()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.Find(x => x.ReferenceCount == 0).ToList();
-        }
-    }
-
-    /// <summary>
-    /// Gets chunks by storage tier.
-    /// </summary>
-    public List<ChunkIndexEntry> GetChunksByTier(StorageTier tier)
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.Find(x => x.CurrentTier == tier).ToList();
-        }
-    }
-
-    /// <summary>
-    /// Clears all chunk index entries.
-    /// </summary>
-    public void ClearChunkIndex()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            _chunkIndexCollection!.DeleteAll();
-        }
-    }
-
-    /// <summary>
-    /// Gets index metadata by key.
-    /// </summary>
-    public DateTime? GetIndexMetadata(string key)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(key);
-        
-        lock (_dbLock)
-        {
-            var entry = _indexMetadataCollection!.FindOne(x => x.Key == key);
-            return entry?.Value;
-        }
-    }
-
-    /// <summary>
-    /// Sets index metadata by key.
-    /// </summary>
-    public void SetIndexMetadata(string key, DateTime value)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(key);
-        
-        lock (_dbLock)
-        {
-            var entry = _indexMetadataCollection!.FindOne(x => x.Key == key);
-            if (entry != null)
-            {
-                entry.Value = value;
-                _indexMetadataCollection.Update(entry);
-            }
-            else
-            {
-                _indexMetadataCollection.Insert(new IndexMetadata { Key = key, Value = value });
-            }
-        }
-    }
-
-    /// <summary>
-    /// Gets the total count of chunks in the index.
-    /// </summary>
-    public int GetChunkIndexCount()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.Count();
-        }
-    }
-
-    #endregion
-
-    #region Statistics
-
-    /// <summary>
-    /// Gets backup statistics.
-    /// </summary>
-    public BackupStatistics GetStatistics()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            var files = _filesCollection!.FindAll().ToList();
-            var config = _configCollection!.FindById(1) ?? new BackupConfiguration();
-
-            return new BackupStatistics
-            {
-                TotalFiles = files.Count,
-                TotalSize = files.Sum(x => x.FileSize),
-                CompletedFiles = files.Count(x => x.Status == BackupStatus.Completed),
-                PendingFiles = files.Count(x => x.Status == BackupStatus.Pending),
-                FailedFiles = files.Count(x => x.Status == BackupStatus.Failed),
-                PendingChanges = _pendingChangesCollection!.Count(),
-                LastBackupTime = config.LastBackupTime,
-                TotalBytesUploaded = config.TotalBytesUploaded
-            };
-        }
-    }
-
-    #endregion
-
-    #region Reset and Secure Delete
-
-    /// <summary>
-    /// Securely deletes all data and resets the database.
-    /// Overwrites sensitive data before deletion to prevent recovery.
-    /// After calling this method, the database is closed and the application 
-    /// should restart or call Initialize with a new password.
-    /// </summary>
-    public void SecureReset()
-    {
-        lock (_dbLock)
-        {
-            if (_database == null || string.IsNullOrEmpty(_databasePath))
-                return;
-
-            // First, overwrite sensitive data in the database
-            OverwriteSensitiveData();
-            
-            // Close the database
-            _database.Dispose();
-            _database = null;
-            _configCollection = null;
-            _filesCollection = null;
-            _pendingChangesCollection = null;
-            _chunkIndexCollection = null;
-            _indexMetadataCollection = null;
-            
-            // Securely delete the database file
-            SecureDeleteFile(_databasePath);
-            
-            // Also delete the journal file if it exists
-            var journalPath = _databasePath + "-journal";
-            if (File.Exists(journalPath))
-            {
-                SecureDeleteFile(journalPath);
-            }
-            
-            // Also delete the log file if it exists (LiteDB WAL)
-            var logPath = _databasePath + "-log";
-            if (File.Exists(logPath))
-            {
-                SecureDeleteFile(logPath);
-            }
-            
-            // Also delete the salt file
-            var saltPath = GetSaltFilePath(_databasePath);
-            if (File.Exists(saltPath))
-            {
-                SecureDeleteFile(saltPath);
-            }
-            
-            Log("SecureReset: Database and salt file have been securely deleted. Application restart required.");
-        }
-    }
-
-    /// <summary>
-    /// Overwrites sensitive data in the database before deletion.
-    /// </summary>
-    private void OverwriteSensitiveData()
-    {
-        if (_configCollection == null) return;
-
-        var config = _configCollection.FindById(1);
-        if (config != null)
-        {
-            // Overwrite password-related data
-            if (config.PasswordSalt != null)
-            {
-                RandomNumberGenerator.Fill(config.PasswordSalt);
-                config.PasswordSalt = null;
-            }
-
-            if (config.PasswordVerificationHash != null)
-            {
-                RandomNumberGenerator.Fill(config.PasswordVerificationHash);
-                config.PasswordVerificationHash = null;
-            }
-            
-            // Overwrite encrypted connection string
-            if (config.EncryptedConnectionString != null)
-            {
-                RandomNumberGenerator.Fill(config.EncryptedConnectionString);
-                config.EncryptedConnectionString = null;
-            }
-
-            // Reset authentication method to default
-            config.AuthMethod = AzureAuthMethod.ConnectionString;
-
-            // Reset Entra ID and storage account settings
-            config.StorageAccountName = null;
-            config.IsEntraIdAuthenticated = false;
-            config.EntraIdUserName = null;
-
-            // Reset other sensitive fields
-            config.FailedLoginAttempts = 0;
-            config.LockoutUntilUtc = null;
-            config.WatchedFolders = [];
-
-            _configCollection.Update(config);
-        }
-
-        // Clear all file records
-        _filesCollection?.DeleteAll();
-        _pendingChangesCollection?.DeleteAll();
-        _chunkIndexCollection?.DeleteAll();
-        _indexMetadataCollection?.DeleteAll();
-    }
-
-    /// <summary>
-    /// Securely deletes a file by overwriting with random data before deletion.
-    /// </summary>
-    private static void SecureDeleteFile(string filePath)
-    {
-        if (!File.Exists(filePath)) return;
-
-        try
-        {
-            FileInfo fileInfo = new(filePath);
-            var fileSize = fileInfo.Length;
-
-            // Overwrite file with random data (3 passes for extra security)
-            using (FileStream stream = new(filePath, FileMode.Open, FileAccess.Write, FileShare.None))
-            {
-                byte[] buffer = new byte[4096];
-                
-                for (var pass = 0; pass < 3; pass++)
-                {
-                    stream.Position = 0;
-                    var remaining = fileSize;
-                    
-                    while (remaining > 0)
-                    {
-                        var toWrite = (int)Math.Min(buffer.Length, remaining);
-                        RandomNumberGenerator.Fill(buffer.AsSpan(0, toWrite));
-                        stream.Write(buffer, 0, toWrite);
-                        remaining -= toWrite;
-                    }
-                    
-                    stream.Flush();
-                }
-            }
-
-            // Now delete the file
-            File.Delete(filePath);
-        }
-        catch (IOException)
-        {
-            // If secure delete fails, try regular delete
-            try { File.Delete(filePath); } catch { /* Best effort */ }
-        }
-    }
-
-    #endregion
 
     private void EnsureInitialized()
     {
@@ -1215,32 +680,4 @@ public class LocalDatabaseService : IDisposable
         }
         GC.SuppressFinalize(this);
     }
-}
-
-/// <summary>
-/// Statistics about the backup state.
-/// </summary>
-public class BackupStatistics
-{
-    public int TotalFiles { get; set; }
-    public long TotalSize { get; set; }
-    public int CompletedFiles { get; set; }
-    public int PendingFiles { get; set; }
-    public int FailedFiles { get; set; }
-    public int PendingChanges { get; set; }
-    public DateTime? LastBackupTime { get; set; }
-    public long TotalBytesUploaded { get; set; }
-
-    public string TotalSizeFormatted => FormatHelper.FormatBytes(TotalSize);
-    public string TotalBytesUploadedFormatted => FormatHelper.FormatBytes(TotalBytesUploaded);
-}
-
-/// <summary>
-/// Simple key-value storage for index metadata timestamps.
-/// </summary>
-public class IndexMetadata
-{
-    public int Id { get; set; }
-    public string Key { get; set; } = string.Empty;
-    public DateTime Value { get; set; }
 }

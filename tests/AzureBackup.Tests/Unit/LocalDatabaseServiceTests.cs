@@ -137,57 +137,6 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public void MigrateToEncrypted_MigratesDataSuccessfully()
-    {
-        // Arrange - create an unencrypted database using the obsolete method
-        var unencryptedPath = Path.Combine(_testDirectory, "unencrypted.db");
-        var encryptedPath = Path.Combine(_testDirectory, "migrated.db");
-        
-        // Create unencrypted database with test data
-        using (var unencryptedService = new LocalDatabaseService())
-        {
-#pragma warning disable CS0618 // Type or member is obsolete
-            unencryptedService.InitializeUnencrypted(unencryptedPath);
-#pragma warning restore CS0618
-            
-            var config = unencryptedService.GetConfiguration();
-            config.ContainerName = "migration-test-container";
-            config.StorageAccountName = "migrationteststorage";
-            unencryptedService.SaveConfiguration(config);
-            
-            // Add a test file record
-            unencryptedService.SaveBackedUpFile(new AzureBackup.Core.Models.BackedUpFile
-            {
-                LocalPath = "/test/migration/file.txt",
-                FileSize = 12345,
-                FileHash = "TESTHASH123"
-            });
-        }
-
-        // Verify it's unencrypted
-        Assert.True(LocalDatabaseService.IsUnencryptedDatabase(unencryptedPath));
-
-        // Act - migrate to encrypted
-        LocalDatabaseService.MigrateToEncrypted(unencryptedPath, encryptedPath, "MigrationPassword123!");
-
-        // Assert - verify encrypted database has the data
-        using var encryptedService = new LocalDatabaseService();
-        encryptedService.Initialize(encryptedPath, "MigrationPassword123!");
-        
-        var migratedConfig = encryptedService.GetConfiguration();
-        Assert.Equal("migration-test-container", migratedConfig.ContainerName);
-        Assert.Equal("migrationteststorage", migratedConfig.StorageAccountName);
-        
-        var migratedFile = encryptedService.GetBackedUpFile("/test/migration/file.txt");
-        Assert.NotNull(migratedFile);
-        Assert.Equal(12345, migratedFile.FileSize);
-        Assert.Equal("TESTHASH123", migratedFile.FileHash);
-        
-        // Verify the new database is encrypted (can't open without password)
-        Assert.False(LocalDatabaseService.IsUnencryptedDatabase(encryptedPath));
-    }
-
-    [Fact]
     public void MigrateToEncrypted_WithNonExistentSource_ThrowsFileNotFoundException()
     {
         // Arrange
@@ -355,52 +304,6 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
         Assert.Throws<ArgumentNullException>(() => _databaseService.SaveConfiguration(null!));
     }
 
-    [Fact]
-    public void IsConfigured_WithNoConfig_ReturnsFalse()
-    {
-        // Act
-        var isConfigured = _databaseService.IsConfigured();
-
-        // Assert
-        Assert.False(isConfigured);
-    }
-
-
-    [Fact]
-    public void IsConfigured_WithValidConfig_ReturnsTrue()
-    {
-        // Arrange - test with Connection String auth method
-        var config = _databaseService.GetConfiguration();
-        config.AuthMethod = AzureAuthMethod.ConnectionString;
-        config.EncryptedConnectionString = new byte[] { 1, 2, 3 };
-        config.PasswordSalt = new byte[] { 4, 5, 6 };
-        _databaseService.SaveConfiguration(config);
-
-        // Act
-        var isConfigured = _databaseService.IsConfigured();
-
-        // Assert
-        Assert.True(isConfigured);
-    }
-
-    [Fact]
-    public void IsConfigured_WithEntraIdConfig_ReturnsTrue()
-    {
-        // Arrange - test with Entra ID auth method
-        var config = _databaseService.GetConfiguration();
-        config.AuthMethod = AzureAuthMethod.EntraId;
-        config.StorageAccountName = "teststorageaccount";
-        config.IsEntraIdAuthenticated = true;
-        config.PasswordSalt = new byte[] { 4, 5, 6 };
-        _databaseService.SaveConfiguration(config);
-
-        // Act
-        var isConfigured = _databaseService.IsConfigured();
-
-        // Assert
-        Assert.True(isConfigured);
-    }
-
     #endregion
 
     #region BackedUpFile Tests
@@ -464,59 +367,6 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
 
         // Assert
         Assert.Equal(3, files.Count);
-    }
-
-    [Fact]
-    public void GetFilesByStatus_ReturnsFilteredFiles()
-    {
-        // Arrange
-        var completed = CreateTestBackedUpFile("C:\\completed.txt");
-        completed.Status = BackupStatus.Completed;
-        var pending = CreateTestBackedUpFile("C:\\pending.txt");
-        pending.Status = BackupStatus.Pending;
-        
-        _databaseService.SaveBackedUpFile(completed);
-        _databaseService.SaveBackedUpFile(pending);
-
-        // Act
-        var completedFiles = _databaseService.GetFilesByStatus(BackupStatus.Completed);
-
-        // Assert
-        Assert.Single(completedFiles);
-        Assert.Equal("C:\\completed.txt", completedFiles[0].LocalPath);
-    }
-
-    [Fact]
-    public void DeleteBackedUpFile_RemovesFile()
-    {
-        // Arrange
-        _databaseService.SaveBackedUpFile(CreateTestBackedUpFile("C:\\delete.txt"));
-
-        // Act
-        _databaseService.DeleteBackedUpFile("C:\\delete.txt");
-        var retrieved = _databaseService.GetBackedUpFile("C:\\delete.txt");
-
-        // Assert
-        Assert.Null(retrieved);
-    }
-
-    [Fact]
-    public void GetTotalBackedUpSize_ReturnsSumOfFileSizes()
-    {
-        // Arrange
-        var file1 = CreateTestBackedUpFile("C:\\file1.txt");
-        file1.FileSize = 1000;
-        var file2 = CreateTestBackedUpFile("C:\\file2.txt");
-        file2.FileSize = 2000;
-        
-        _databaseService.SaveBackedUpFile(file1);
-        _databaseService.SaveBackedUpFile(file2);
-
-        // Act
-        var totalSize = _databaseService.GetTotalBackedUpSize();
-
-        // Assert
-        Assert.Equal(3000, totalSize);
     }
 
     #endregion
@@ -625,20 +475,6 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
         // Assert
         Assert.Single(pending);
         Assert.Equal("C:\\keep.txt", pending[0].FilePath);
-    }
-
-    [Fact]
-    public void ClearPendingChanges_RemovesAllChanges()
-    {
-        // Arrange
-        _databaseService.QueueFileChange(new FileChangeEvent { FilePath = "C:\\file1.txt" });
-        _databaseService.QueueFileChange(new FileChangeEvent { FilePath = "C:\\file2.txt" });
-
-        // Act
-        _databaseService.ClearPendingChanges();
-
-        // Assert
-        Assert.Equal(0, _databaseService.GetPendingChangesCount());
     }
 
     #endregion
@@ -796,7 +632,7 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
         Assert.Null(newConfig.StorageAccountName);
         Assert.False(newConfig.IsEntraIdAuthenticated);
         Assert.Empty(_databaseService.GetAllBackedUpFiles());
-        Assert.Equal(0, _databaseService.GetPendingChangesCount());
+        Assert.Empty(_databaseService.GetPendingChanges(1));
     }
 
     [Fact]

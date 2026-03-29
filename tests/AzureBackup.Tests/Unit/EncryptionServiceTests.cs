@@ -259,40 +259,6 @@ public class EncryptionServiceTests : IDisposable
 
     #endregion
 
-    #region String Encryption Tests
-
-    [Fact]
-    public void EncryptDecryptString_RoundTrip_ReturnsOriginalString()
-    {
-        // Arrange
-        InitializeWithTestKey();
-        var original = "C:\\Users\\Test\\Documents\\Important File.docx";
-
-        // Act
-        var encrypted = _encryptionService.EncryptString(original);
-        var decrypted = _encryptionService.DecryptString(encrypted);
-
-        // Assert
-        Assert.Equal(original, decrypted);
-    }
-
-    [Fact]
-    public void EncryptString_ReturnsBase64()
-    {
-        // Arrange
-        InitializeWithTestKey();
-        var original = "Test";
-
-        // Act
-        var encrypted = _encryptionService.EncryptString(original);
-
-        // Assert - Should be valid Base64
-        var decoded = Convert.FromBase64String(encrypted);
-        Assert.NotEmpty(decoded);
-    }
-
-    #endregion
-
     #region Password Verification Tests
 
     [Fact]
@@ -442,4 +408,95 @@ public class EncryptionServiceTests : IDisposable
         RandomNumberGenerator.Fill(key);
         _encryptionService.Initialize(key);
     }
+
+    #region CRC Round-Trip Diagnostics
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(15)]
+    [InlineData(16)]
+    [InlineData(100)]
+    [InlineData(1024)]
+    [InlineData(8 * 1024)]           // 8 KB — matches small file pattern
+    [InlineData(10 * 1024)]          // 10 KB — small file boundary
+    [InlineData(64 * 1024)]          // 64 KB
+    [InlineData(256 * 1024)]         // 256 KB — typical small chunk
+    [InlineData(1024 * 1024)]        // 1 MB
+    [InlineData(4 * 1024 * 1024)]    // 4 MB
+    [InlineData(64 * 1024 * 1024)]   // 64 MB — typical large chunk
+    public void WhenEncryptedThenCrcIsImmediatelyValid(int dataSize)
+    {
+        InitializeWithTestKey();
+        var plaintext = new byte[dataSize];
+        Random.Shared.NextBytes(plaintext);
+
+        var encrypted = _encryptionService.Encrypt(plaintext);
+
+        Assert.True(_encryptionService.ValidateCrc(encrypted),
+            $"CRC invalid immediately after Encrypt for {dataSize} byte payload. " +
+            _encryptionService.DiagnoseCrcMismatch(encrypted));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(100)]
+    [InlineData(8 * 1024)]
+    [InlineData(64 * 1024 * 1024)]
+    public void WhenEncryptedThenDecryptSucceeds(int dataSize)
+    {
+        InitializeWithTestKey();
+        var plaintext = new byte[dataSize];
+        Random.Shared.NextBytes(plaintext);
+
+        var encrypted = _encryptionService.Encrypt(plaintext);
+        var decrypted = _encryptionService.Decrypt(encrypted);
+
+        Assert.Equal(plaintext, decrypted);
+    }
+
+    [Theory]
+    [InlineData(100)]
+    [InlineData(8 * 1024)]
+    [InlineData(64 * 1024 * 1024)]
+    public void WhenEncryptedRepeatedly_CrcIsAlwaysValid(int dataSize)
+    {
+        InitializeWithTestKey();
+        var plaintext = new byte[dataSize];
+        Random.Shared.NextBytes(plaintext);
+
+        for (var i = 0; i < 100; i++)
+        {
+            var encrypted = _encryptionService.Encrypt(plaintext);
+            Assert.True(_encryptionService.ValidateCrc(encrypted),
+                $"CRC invalid on iteration {i} for {dataSize} byte payload. " +
+                _encryptionService.DiagnoseCrcMismatch(encrypted));
+        }
+    }
+
+    [Theory]
+    [InlineData(100)]
+    [InlineData(8 * 1024)]
+    [InlineData(1024 * 1024)]
+    public void WhenEncryptedConcurrently_CrcIsAlwaysValid(int dataSize)
+    {
+        InitializeWithTestKey();
+
+        Parallel.For(0, 50, _ =>
+        {
+            var plaintext = new byte[dataSize];
+            Random.Shared.NextBytes(plaintext);
+            var encrypted = _encryptionService.Encrypt(plaintext);
+
+            Assert.True(_encryptionService.ValidateCrc(encrypted),
+                $"CRC invalid under concurrent Encrypt for {dataSize} byte payload. " +
+                _encryptionService.DiagnoseCrcMismatch(encrypted));
+
+            var decrypted = _encryptionService.Decrypt(encrypted);
+            Assert.Equal(plaintext, decrypted);
+        });
+    }
+
+    #endregion
 }

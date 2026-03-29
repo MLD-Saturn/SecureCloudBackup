@@ -46,6 +46,15 @@ public partial class MainWindowViewModel
         {
             StorageHealthViewModel?.RefreshSummaryCommand.Execute(null);
         }
+
+        // Auto-load when switching to Migration view
+        if (view == "Migration" && IsInitialized && previousView != "Migration")
+        {
+            if (TierMigrationViewModel is { HotFiles.Count: 0, CoolFiles.Count: 0, ColdFiles.Count: 0, ArchiveFiles.Count: 0 })
+            {
+                TierMigrationViewModel.LoadFilesCommand.Execute(null);
+            }
+        }
     }
 
     /// <summary>
@@ -430,6 +439,21 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// Refreshes both Azure and local file panes.
+    /// Does not manage <see cref="IsOperationInProgress"/> — callers are responsible.
+    /// Use after operations that change files on both sides (backup, restore, sync).
+    /// Refreshes Azure first (caches file paths), then local (uses cached paths).
+    /// </summary>
+    private async Task RefreshBothFilePanesAsync()
+    {
+        if (_blobService.IsConnected)
+        {
+            await RefreshFromAzureAsync();
+        }
+        await RefreshLocalFilesAsync();
+    }
+
+    /// <summary>
     /// Refreshes both local and Azure file trees.
     /// </summary>
     [RelayCommand]
@@ -444,14 +468,7 @@ public partial class MainWindowViewModel
         IsOperationInProgress = true;
         try
         {
-            // Refresh local files first (doesn't require Azure connection)
-            await RefreshLocalFilesAsync();
-
-            // Then refresh Azure files if connected
-            if (_blobService.IsConnected)
-            {
-                await RefreshFromAzureAsync();
-            }
+            await RefreshBothFilePanesAsync();
         }
         finally
         {

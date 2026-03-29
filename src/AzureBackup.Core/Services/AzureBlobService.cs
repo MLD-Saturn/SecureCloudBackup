@@ -1,6 +1,7 @@
+using System.Buffers;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Azure;
 using Azure.Core;
 using Azure.Identity;
@@ -17,7 +18,7 @@ namespace AzureBackup.Core.Services;
 /// Uploads encrypted chunks to Cool tier for cost optimization.
 /// Uses parallel transfers to maximize bandwidth utilization.
 /// </summary>
-public partial class AzureBlobService : IBlobStorageService
+public class AzureBlobService : IBlobStorageService
 {
     private BlobServiceClient? _serviceClient;
     private BlobContainerClient? _containerClient;
@@ -36,15 +37,7 @@ public partial class AzureBlobService : IBlobStorageService
     // Retry settings for upload integrity failures (MD5 mismatch from Azure)
     private const int MaxUploadRetries = 25;
     private const int UploadRetryBaseDelayMs = 500;
-    
-    // Regex for validating blob names (SHA-256 hex string)
-    [GeneratedRegex(@"^[A-Fa-f0-9]{64}$", RegexOptions.Compiled)]
-    private static partial Regex ValidHashPattern();
-    
-    // Regex for validating metadata blob names (Base64-like with replacements)
-    [GeneratedRegex(@"^[A-Za-z0-9_\-=]+$", RegexOptions.Compiled)]
-    private static partial Regex ValidMetadataHashPattern();
-    
+
     public bool IsConnected => _containerClient != null;
     public long TotalBytesUploaded { get; private set; }
     public int TotalOperations { get; private set; }
@@ -54,6 +47,7 @@ public partial class AzureBlobService : IBlobStorageService
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
     
+    [Conditional("DIAGNOSTICLOG")]
     private void Log(string message)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -74,33 +68,9 @@ public partial class AzureBlobService : IBlobStorageService
         StorageTier.Hot => AccessTier.Hot,
         StorageTier.Cool => AccessTier.Cool,
         StorageTier.Cold => AccessTier.Cold,
+        StorageTier.Archive => AccessTier.Archive,
         _ => AccessTier.Cool // Default to Cool for unknown values
     };
-
-    /// <summary>
-    /// Validates a chunk hash to prevent path traversal attacks.
-    /// </summary>
-    private static void ValidateChunkHash(string hash)
-    {
-        if (string.IsNullOrWhiteSpace(hash))
-            throw new SecurityPolicyException("Chunk hash cannot be empty", SecurityPolicyType.InvalidBlobName);
-        
-        
-        if (!ValidHashPattern().IsMatch(hash))
-            throw new SecurityPolicyException($"Invalid chunk hash format: {hash}", SecurityPolicyType.InvalidBlobName);
-    }
-    
-    /// <summary>
-    /// Validates a metadata hash to prevent path traversal attacks.
-    /// </summary>
-    private static void ValidateMetadataHash(string hash)
-    {
-        if (string.IsNullOrWhiteSpace(hash))
-            throw new SecurityPolicyException("Metadata hash cannot be empty", SecurityPolicyType.InvalidBlobName);
-        
-        if (!ValidMetadataHashPattern().IsMatch(hash) || hash.Length > 100)
-            throw new SecurityPolicyException($"Invalid metadata hash format", SecurityPolicyType.InvalidBlobName);
-    }
 
     #region Connection String Authentication
 
@@ -246,12 +216,25 @@ public partial class AzureBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentNullException.ThrowIfNull(chunkData);
-        ValidateChunkHash(chunkHash);
+        BlobNameValidator.ValidateChunkHash(chunkHash);
         Log($"UploadChunkAsync: Uploading chunk {chunkHash[..8]}... ({chunkData.Length} bytes) to {storageTier} tier");
 
         // Encrypt the chunk before upload
         var encryptedData = _encryptionService.Encrypt(chunkData);
-        
+
+        // Diagnostic: verify CRC immediately after encryption to detect write-time corruption
+        var crcValid = _encryptionService.ValidateCrc(encryptedData);
+        FileOperationDiagnostics.RecordChunkAmbient("Encrypt", chunkHash,
+            chunkData.Length, encryptedData.Length, crcValid: crcValid);
+
+        if (!crcValid)
+        {
+            var diag = _encryptionService.DiagnoseCrcMismatch(encryptedData);
+            FileOperationDiagnostics.RecordAmbient($"[CRC FAIL] UploadChunkAsync: {diag}");
+            Log($"CRITICAL: UploadChunkAsync: CRC INVALID immediately after Encrypt! " +
+                $"chunk={chunkHash[..8]}..., plainSize={chunkData.Length}, encSize={encryptedData.Length}, {diag}");
+        }
+
         // Use hash as blob name (content-addressable storage)
         var blobName = $"chunks/{chunkHash}";
         var blobClient = _containerClient!.GetBlobClient(blobName);
@@ -323,12 +306,25 @@ public partial class AzureBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentNullException.ThrowIfNull(chunkData);
-        ValidateChunkHash(chunkHash);
+        BlobNameValidator.ValidateChunkHash(chunkHash);
         Log($"UploadChunkDirectAsync: Direct upload chunk {chunkHash[..8]}... ({chunkData.Length} bytes) to {storageTier} tier");
 
         // Encrypt the chunk before upload
         var encryptedData = _encryptionService.Encrypt(chunkData);
-        
+
+        // Diagnostic: verify CRC immediately after encryption to detect write-time corruption
+        var crcValid = _encryptionService.ValidateCrc(encryptedData);
+        FileOperationDiagnostics.RecordChunkAmbient("Encrypt", chunkHash,
+            chunkData.Length, encryptedData.Length, crcValid: crcValid);
+
+        if (!crcValid)
+        {
+            var diag = _encryptionService.DiagnoseCrcMismatch(encryptedData);
+            FileOperationDiagnostics.RecordAmbient($"[CRC FAIL] UploadChunkDirectAsync: {diag}");
+            Log($"CRITICAL: UploadChunkDirectAsync: CRC INVALID immediately after Encrypt! " +
+                $"chunk={chunkHash[..8]}..., plainSize={chunkData.Length}, encSize={encryptedData.Length}, {diag}");
+        }
+
         // Use hash as blob name (content-addressable storage)
         var blobName = $"chunks/{chunkHash}";
         var blobClient = _containerClient!.GetBlobClient(blobName);
@@ -378,10 +374,11 @@ public partial class AzureBlobService : IBlobStorageService
         ));
         
         var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
-        
-        // Store under path hash (deterministic for updates)
-        var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(fileInfo.LocalPath)));
+
+        // Use HMAC-SHA256 keyed by the derived encryption key for deterministic blob naming.
+        // This prevents an attacker with storage access from confirming file paths
+        // via dictionary attack (plain SHA-256 of a path is guessable).
+        var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
         var blobName = $"metadata/{metadataHash}";
         
         var blobClient = _containerClient!.GetBlobClient(blobName);
@@ -411,6 +408,7 @@ public partial class AzureBlobService : IBlobStorageService
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
         var blobClient = _containerClient!.GetBlobClient(blobName);
+        var chunkHash = blobName["chunks/".Length..];
 
         try
         {
@@ -421,11 +419,16 @@ public partial class AzureBlobService : IBlobStorageService
             TotalOperations++;
 
             // Verify download integrity against stored Content-MD5 (if available)
+            var md5Valid = true;
             if (storedContentHash is { Length: > 0 })
             {
                 var downloadedHash = MD5.HashData(encryptedData);
                 if (!downloadedHash.AsSpan().SequenceEqual(storedContentHash))
                 {
+                    md5Valid = false;
+                    FileOperationDiagnostics.RecordChunkAmbient("MD5Fail", chunkHash,
+                        0, encryptedData.Length, md5Valid: false,
+                        extra: $"expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)}");
                     Log($"DownloadChunkAsync: MD5 MISMATCH for {blobName} - data corrupted during download " +
                         $"(expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)})");
                     throw new DataIntegrityException(
@@ -442,6 +445,21 @@ public partial class AzureBlobService : IBlobStorageService
             {
                 Log($"DownloadChunkAsync: Downloaded {blobName} ({encryptedData.Length} bytes encrypted), decrypting...");
             }
+
+            // Diagnostic: pre-check CRC before attempting decrypt to capture details on mismatch
+            var crcValid = _encryptionService.ValidateCrc(encryptedData);
+
+            FileOperationDiagnostics.RecordChunkAmbient("Decrypt", chunkHash,
+                0, encryptedData.Length, crcValid: crcValid, md5Valid: md5Valid);
+
+            if (!crcValid)
+            {
+                var diag = _encryptionService.DiagnoseCrcMismatch(encryptedData);
+                FileOperationDiagnostics.RecordAmbient($"[CRC FAIL] DownloadChunkAsync: {diag}");
+                Log($"DIAGNOSTIC: DownloadChunkAsync: CRC INVALID before decrypt! " +
+                    $"blob={blobName}, size={encryptedData.Length}, md5Verified={storedContentHash is { Length: > 0 }}, {diag}");
+            }
+
             try
             {
                 var decrypted = _encryptionService.Decrypt(encryptedData);
@@ -490,6 +508,7 @@ public partial class AzureBlobService : IBlobStorageService
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
         var blobClient = _containerClient!.GetBlobClient(blobName);
+        var chunkHash = blobName["chunks/".Length..];
 
         try
         {
@@ -497,26 +516,144 @@ public partial class AzureBlobService : IBlobStorageService
             var encryptedData = response.Value.Content.ToArray();
             TotalOperations++;
 
+            // Record CRC state even though best-effort skips it — this helps
+            // confirm whether the CRC was the only problem or if AES-GCM also failed.
+            var crcValid = _encryptionService.ValidateCrc(encryptedData);
+
             var decrypted = _encryptionService.DecryptBestEffort(encryptedData);
             if (decrypted != null)
             {
+                FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
+                    decrypted.Length, encryptedData.Length, crcValid: crcValid,
+                    extra: "aesGcm=OK");
                 Log($"DownloadChunkBestEffortAsync: Recovered {blobName} ({encryptedData.Length:N0} -> {decrypted.Length:N0} bytes)");
             }
             else
             {
+                FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
+                    0, encryptedData.Length, crcValid: crcValid,
+                    extra: "aesGcm=FAIL (unrecoverable)");
                 Log($"DownloadChunkBestEffortAsync: {blobName} is unrecoverable (AES-GCM tag mismatch)");
             }
             return decrypted;
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
+            FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
+                0, extra: "blob=404 (not found)");
             Log($"DownloadChunkBestEffortAsync: Chunk not found: {blobName}");
             return null;
         }
         catch (Exception ex)
         {
+            FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
+                0, extra: $"error={ex.GetType().Name}: {ex.Message}");
             Log($"DownloadChunkBestEffortAsync: Failed for {blobName}: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Downloads and decrypts a chunk using parallel range downloads for improved throughput.
+    /// Uses <see cref="StorageTransferOptions"/> for 8-way parallel block downloads within each chunk,
+    /// and <see cref="ArrayPool{T}"/> to rent the download buffer, avoiding LOH allocations.
+    /// The returned decrypted data is a regular array (not pooled) since it is passed to the channel consumer.
+    /// </summary>
+    public async Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var chunkHash = blobName["chunks/".Length..];
+
+        try
+        {
+            // Use DownloadToAsync with StorageTransferOptions for parallel range downloads.
+            // This enables 8-way concurrent block downloads within a single chunk,
+            // significantly improving throughput for chunks > 8 MB.
+            var properties = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
+            var contentLength = properties.Value.ContentLength;
+            var storedContentHash = properties.Value.ContentHash;
+            TotalOperations++;
+
+            // Rent buffer from pool — avoids LOH allocation for large chunks
+            var rentedBuffer = ArrayPool<byte>.Shared.Rent((int)contentLength);
+            try
+            {
+                // Download with parallel ranges into a MemoryStream backed by the rented buffer
+                using var memoryStream = new MemoryStream(rentedBuffer, 0, (int)contentLength, writable: true);
+                var downloadOptions = new BlobDownloadToOptions
+                {
+                    TransferOptions = DefaultTransferOptions
+                };
+                await blobClient.DownloadToAsync(memoryStream, downloadOptions, cancellationToken);
+                var bytesRead = (int)memoryStream.Position;
+
+                // Verify download integrity against stored Content-MD5 (if available)
+                var md5Valid = true;
+                if (storedContentHash is { Length: > 0 })
+                {
+                    var downloadedHash = MD5.HashData(rentedBuffer.AsSpan(0, bytesRead));
+                    if (!downloadedHash.AsSpan().SequenceEqual(storedContentHash))
+                    {
+                        md5Valid = false;
+                        FileOperationDiagnostics.RecordChunkAmbient("MD5Fail", chunkHash,
+                            0, bytesRead, md5Valid: false,
+                            extra: $"expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)}");
+                        Log($"DownloadChunkStreamingAsync: MD5 MISMATCH for {blobName}");
+                        throw new DataIntegrityException(
+                            $"Download integrity check failed for {blobName} - data corrupted during transfer", blobName);
+                    }
+                }
+
+                Log($"DownloadChunkStreamingAsync: Downloaded {blobName} ({bytesRead:N0} bytes encrypted), decrypting...");
+
+                // Diagnostic: pre-check CRC before attempting decrypt to capture details on mismatch
+                var crcValid = _encryptionService.ValidateCrc(rentedBuffer.AsSpan(0, bytesRead));
+
+                FileOperationDiagnostics.RecordChunkAmbient("Decrypt", chunkHash,
+                    0, bytesRead, crcValid: crcValid, md5Valid: md5Valid);
+
+                if (!crcValid)
+                {
+                    var diag = _encryptionService.DiagnoseCrcMismatch(rentedBuffer.AsSpan(0, bytesRead));
+                    FileOperationDiagnostics.RecordAmbient($"[CRC FAIL] DownloadChunkStreamingAsync: " +
+                        $"contentLength={contentLength}, bytesRead={bytesRead}, " +
+                        $"rentedBufferLength={rentedBuffer.Length}, {diag}");
+                    Log($"DIAGNOSTIC: DownloadChunkStreamingAsync: CRC INVALID before decrypt! " +
+                        $"blob={blobName}, contentLength={contentLength}, bytesRead={bytesRead}, " +
+                        $"rentedBufferLength={rentedBuffer.Length}, md5Verified={storedContentHash is { Length: > 0 }}, {diag}");
+                }
+
+                // Decrypt using the exact slice (not the full rented buffer)
+                var decrypted = _encryptionService.Decrypt(rentedBuffer.AsSpan(0, bytesRead));
+
+                Log($"DownloadChunkStreamingAsync: Decrypted {blobName}: {bytesRead:N0} -> {decrypted.Length:N0} bytes");
+                return decrypted;
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(rentedBuffer);
+            }
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            Log($"DownloadChunkStreamingAsync: Chunk not found (404): {blobName}");
+            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName, ex);
+        }
+        catch (RequestFailedException ex)
+        {
+            Log($"DownloadChunkStreamingAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            throw;
+        }
+        catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
+        {
+            Log($"DownloadChunkStreamingAsync: EXCEPTION for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
     }
 
@@ -720,16 +857,46 @@ public partial class AzureBlobService : IBlobStorageService
         EnsureConnected();
 
         List<string> chunks = new();
-        
+
         await foreach (var blob in _containerClient!.GetBlobsAsync(prefix: "chunks/", cancellationToken: cancellationToken))
         {
             // Extract the hash from the blob name (remove "chunks/" prefix)
             var hash = blob.Name.Replace("chunks/", "");
             chunks.Add(hash);
         }
-        
+
         TotalOperations++;
         return chunks;
+    }
+
+    /// <summary>
+    /// Lists all chunk blobs with their properties in a single listing call.
+    /// Azure's GetBlobsAsync returns ContentLength and AccessTier in the listing response,
+    /// eliminating the need for individual GetProperties calls.
+    /// </summary>
+    public async Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+
+        var result = new Dictionary<string, (long, StorageTier)>(StringComparer.Ordinal);
+
+        await foreach (var blob in _containerClient!.GetBlobsAsync(prefix: "chunks/", cancellationToken: cancellationToken))
+        {
+            var hash = blob.Name.Replace("chunks/", "");
+            var tier = blob.Properties.AccessTier?.ToString() switch
+            {
+                "Hot" => StorageTier.Hot,
+                "Cool" => StorageTier.Cool,
+                "Cold" => StorageTier.Cold,
+                _ => StorageTier.Hot
+            };
+            result[hash] = (blob.Properties.ContentLength ?? 0, tier);
+        }
+
+        TotalOperations++;
+        Log($"ListChunkBlobsWithPropertiesAsync: Listed {result.Count} chunks with properties");
+        return result;
     }
 
     /// <summary>

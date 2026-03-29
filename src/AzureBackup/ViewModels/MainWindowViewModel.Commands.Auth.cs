@@ -50,15 +50,6 @@ public partial class MainWindowViewModel
         IsEditingConnectionString = false;
     }
 
-    [RelayCommand]
-    private void ToggleDiagnosticLogging()
-    {
-        EnableDiagnosticLogging = !EnableDiagnosticLogging;
-        AddLog(EnableDiagnosticLogging 
-            ? "?? Diagnostic logging ENABLED - detailed service logs will be shown" 
-            : "Diagnostic logging disabled");
-    }
-
     #endregion
 
     #region Entra ID Authentication Commands

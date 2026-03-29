@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
@@ -74,15 +75,12 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         // Act
         var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
 
-        // Assert
-        Assert.Empty(result.SuccessfulFiles);
-        Assert.Single(result.CorruptedRecoveryFiles);
-
-        var (originalPath, recoveredPath, unrecoverableChunks) = result.CorruptedRecoveryFiles[0];
-        Assert.Equal(backedUp.LocalPath, originalPath);
-        Assert.Contains("__corrupted__", recoveredPath);
-        Assert.True(File.Exists(recoveredPath), $"Recovered file should exist at {recoveredPath}");
-        Assert.Equal(0, unrecoverableChunks);
+        // Assert — CRC-only corruption: all chunks recoverable, so the file is
+        // promoted from __corrupted__ to the original target path and counted as success
+        Assert.Single(result.SuccessfulFiles);
+        Assert.Empty(result.CorruptedRecoveryFiles);
+        Assert.Equal(targetPath, result.SuccessfulFiles[0]);
+        Assert.True(File.Exists(targetPath), $"Promoted file should exist at {targetPath}");
     }
 
     [Fact]
@@ -96,19 +94,16 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         await CreateAndBackupFile(blobService, "corrupted_batch.bin", 100 * 1024);
         blobService.CorruptDownloads = true;
 
-        // Act
-        var result = await restoreService.RestoreFilesAsync(
-            await restoreService.ListRestorableFilesAsync(),
-            _restoreDirectory,
-            preserveFolderStructure: false);
+        // Act — use RestoreFilesWithRemappingAsync (RestoreFilesAsync was removed)
+        var files = await restoreService.ListRestorableFilesAsync();
+        var filesWithPaths = files.Select(f => (f, Path.Combine(_restoreDirectory, Path.GetFileName(f.LocalPath)))).ToList();
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
 
-        // Assert
-        Assert.Empty(result.SuccessfulFiles);
-        Assert.Single(result.CorruptedRecoveryFiles);
-
-        var (_, recoveredPath, _) = result.CorruptedRecoveryFiles[0];
-        Assert.Contains("__corrupted__", recoveredPath);
-        Assert.True(File.Exists(recoveredPath));
+        // Assert — CRC-only corruption: all chunks recoverable, so the file is
+        // promoted from __corrupted__ to the original target path and counted as success
+        Assert.Single(result.SuccessfulFiles);
+        Assert.Empty(result.CorruptedRecoveryFiles);
+        Assert.True(File.Exists(result.SuccessfulFiles[0]));
     }
 
     [Fact]
@@ -128,13 +123,11 @@ public class CorruptedRecoveryTests : IAsyncLifetime
             _restoreDirectory,
             _sourceDirectory);
 
-        // Assert
-        Assert.Equal(0, result.FilesTransferred);
-        Assert.Equal(1, result.FilesCorruptedRecovered);
-        Assert.Single(result.CorruptedRecoveryPaths);
-        Assert.Contains("__corrupted__", result.CorruptedRecoveryPaths[0]);
-        Assert.True(File.Exists(result.CorruptedRecoveryPaths[0]),
-            "Recovered file should survive mirror sync Phase 2 cleanup");
+        // Assert — CRC-only corruption: all chunks recoverable, so the file is
+        // promoted from __corrupted__ to the original target path and counted as transferred
+        Assert.Equal(1, result.FilesTransferred);
+        Assert.Equal(0, result.FilesCorruptedRecovered);
+        Assert.Empty(result.CorruptedRecoveryPaths);
     }
 
     [Fact]
@@ -226,8 +219,8 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         await File.WriteAllBytesAsync(fullPath, content);
 
         FileInfo fileInfo = new(fullPath);
-        var chunks = await _chunkingService.ChunkFileAsync(fullPath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(fullPath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(fullPath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(fullPath);
 
         foreach (var chunk in chunks)
         {

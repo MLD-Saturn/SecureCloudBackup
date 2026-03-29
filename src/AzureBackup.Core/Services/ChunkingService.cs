@@ -1,5 +1,5 @@
-using System.IO.Hashing;
 using System.Security.Cryptography;
+using System.Threading.Channels;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -17,7 +17,7 @@ public class ChunkingService
 
     // Size constants for readability
     private const int KB = 1024;
-    private const int MB = 1024 * KB;
+    private const int MB = KB * KB;
 
     // Default chunking parameters
     private const int DefaultMinChunkSize = 64 * KB;       // 64 KB minimum chunk
@@ -45,8 +45,8 @@ public class ChunkingService
     private const uint HashPrime = 31;
     private const int WindowSize = 48;
 
-    // Precomputed: HashPrime^(WindowSize-1)
-    private static readonly uint HashPrimePower = ComputePower(HashPrime, WindowSize - 1);
+    // Precomputed: HashPrime^(WindowSize-1) = 31^47 mod 2^32
+    private const uint HashPrimePower = 969_581_023;
 
     /// <summary>
     /// Chunk size configuration by file category.
@@ -176,41 +176,90 @@ public class ChunkingService
     }
 
     /// <summary>
-    /// Splits a file into content-defined chunks.
-    /// Returns chunk information including hash and boundaries.
-    /// Chunk sizes are adaptive based on file type and size.
-    /// Files larger than 500 MB use 64 MB average chunks for efficiency.
+    /// Finalizes an IncrementalHash and returns the hex string.
     /// </summary>
-    public async Task<List<ChunkInfo>> ChunkFileAsync(string filePath, CancellationToken cancellationToken = default)
+    private static string FinalizeFileHash(IncrementalHash hasher)
     {
-        List<ChunkInfo> chunks = new();
-        
-        await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read, 
-            bufferSize: 1024 * 1024, useAsync: true);
-        
+        Span<byte> hash = stackalloc byte[32];
+        hasher.TryGetHashAndReset(hash, out _);
+        return Convert.ToHexString(hash);
+    }
+
+    /// <summary>
+    /// Computes the SHA-256 hash of a chunk for content-addressable storage.
+    /// SHA-256 provides collision resistance for deduplication safety.
+    /// </summary>
+    private static string ComputeChunkHash(ReadOnlySpan<byte> data)
+        => HashHelper.ComputeHash(data);
+
+    /// <summary>
+    /// Chunks a file and streams only the changed chunks to a bounded channel in a single file open.
+    /// Phase 1: Sequential CDC pass — produces chunk metadata + file hash (no data retained).
+    /// Phase 2: Filtered seek pass — re-reads only chunks not in existingHashes from the same stream.
+    /// The caller provides consumer tasks that read ChunkPayloads from the channel for upload.
+    /// Backpressure is handled by the bounded channel — the producer blocks when consumers are busy.
+    /// </summary>
+    /// <param name="filePath">Path to the file to chunk</param>
+    /// <param name="existingHashes">Hashes of chunks already stored in Azure (from previous backup)</param>
+    /// <param name="channel">Bounded channel to write changed chunk payloads to</param>
+    /// <param name="cdcProgress">Reports CDC phase progress as (bytesProcessed, totalBytes)</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>All chunk metadata and the file-level SHA-256 hash</returns>
+    public async Task<(List<ChunkInfo> Chunks, string FileHash)> ChunkAndStreamChangedAsync(
+        string filePath,
+        HashSet<string> existingHashes,
+        ChannelWriter<ChunkPayload> channel,
+        IProgress<(long bytesProcessed, long totalBytes, int chunksFound)>? cdcProgress,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        ArgumentNullException.ThrowIfNull(existingHashes);
+        ArgumentNullException.ThrowIfNull(channel);
+
+        List<ChunkInfo> chunks = [];
+        using var fileHasher = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+
+        var streamBufferSize = (int)Math.Clamp(new FileInfo(filePath).Length, 4096, 1024 * 1024);
+        await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
+            bufferSize: streamBufferSize, useAsync: true);
+
         var fileLength = stream.Length;
         var config = GetChunkConfig(filePath, fileLength);
-        
-        // For small files, treat as single chunk
+
+        // Phase 1 & 2 combined for small files: single chunk, read once, write to channel if changed
         if (fileLength <= config.MinChunkSize)
         {
             byte[] data = new byte[fileLength];
             await stream.ReadExactlyAsync(data, cancellationToken);
-            
-            chunks.Add(new ChunkInfo
+
+            fileHasher.AppendData(data);
+
+            var info = new ChunkInfo
             {
                 Index = 0,
                 Offset = 0,
                 Length = (int)fileLength,
                 Hash = ComputeChunkHash(data)
-            });
-            
-            return chunks;
+            };
+            chunks.Add(info);
+
+            cdcProgress?.Report((fileLength, fileLength, 1));
+
+            if (!existingHashes.Contains(info.Hash))
+            {
+                await channel.WriteAsync(new ChunkPayload(info, data), cancellationToken);
+            }
+            else
+            {
+                info.BlobName = $"chunks/{info.Hash}";
+            }
+
+            return (chunks, FinalizeFileHash(fileHasher));
         }
 
-        // Content-defined chunking for larger files
-        // Buffer size adapts to max chunk size for the file type
-        byte[] buffer = new byte[config.MaxChunkSize + WindowSize];
+        // Phase 1: CDC pass — sequential read, builds chunk list + file hash, no data retained
+        var cdcBufferSize = (int)Math.Min((long)config.MaxChunkSize + WindowSize, fileLength);
+        byte[] buffer = new byte[cdcBufferSize];
         var chunkStart = 0L;
         var position = 0L;
         var chunkIndex = 0;
@@ -222,21 +271,20 @@ public class ChunkingService
         while (position < fileLength)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            
+
             var bytesToRead = (int)Math.Min(buffer.Length, fileLength - chunkStart);
             stream.Position = chunkStart;
             var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, bytesToRead), cancellationToken);
-            
+
             if (bytesRead == 0) break;
 
             var chunkLength = 0;
-            
+
             for (var i = 0; i < bytesRead; i++)
             {
                 var b = buffer[i];
                 chunkLength++;
-                
-                // Update rolling hash
+
                 if (windowFilled)
                 {
                     var outByte = window[windowPos];
@@ -246,27 +294,27 @@ public class ChunkingService
                 {
                     rollingHash = rollingHash * HashPrime + b;
                 }
-                
+
                 window[windowPos] = b;
                 windowPos = (windowPos + 1) % WindowSize;
                 if (windowPos == 0) windowFilled = true;
 
-                // Check for chunk boundary using adaptive config
-                var isChunkBoundary = chunkLength >= config.MinChunkSize && 
+                var isChunkBoundary = chunkLength >= config.MinChunkSize &&
                                       ((rollingHash & config.ChunkMask) == 0 || chunkLength >= config.MaxChunkSize);
-                
+
                 var isEndOfFile = chunkStart + chunkLength >= fileLength;
-                
+
                 if (isChunkBoundary || isEndOfFile)
                 {
-                    var chunkData = buffer.AsSpan(0, chunkLength).ToArray();
-                    
+                    var chunkSpan = buffer.AsSpan(0, chunkLength);
+                    fileHasher.AppendData(chunkSpan);
+
                     chunks.Add(new ChunkInfo
                     {
                         Index = chunkIndex++,
                         Offset = chunkStart,
                         Length = chunkLength,
-                        Hash = ComputeChunkHash(chunkData)
+                        Hash = ComputeChunkHash(chunkSpan)
                     });
 
                     chunkStart += chunkLength;
@@ -276,53 +324,51 @@ public class ChunkingService
                     windowFilled = false;
                     windowPos = 0;
                     Array.Clear(window);
-                    
-                    break; // Move to next buffer read
+
+                    cdcProgress?.Report((chunkStart, fileLength, chunks.Count));
+
+                    break;
                 }
             }
-            
-            // Handle case where we read the entire remaining file without hitting a boundary
+
             if (chunkStart >= fileLength) break;
         }
 
-        return chunks;
-    }
+        // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream
+        foreach (var chunk in chunks)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
 
-    /// <summary>
-    /// Computes the SHA-256 hash of a chunk for content-addressable storage.
-    /// SHA-256 provides collision resistance for deduplication safety.
-    /// </summary>
-    private static string ComputeChunkHash(ReadOnlySpan<byte> data)
-    {
-        Span<byte> hash = stackalloc byte[32];
-        SHA256.HashData(data, hash);
-        return Convert.ToHexString(hash);
-    }
+            if (existingHashes.Contains(chunk.Hash))
+            {
+                chunk.BlobName = $"chunks/{chunk.Hash}";
+                continue;
+            }
 
-    /// <summary>
-    /// Computes SHA-256 hash of file for integrity verification.
-    /// </summary>
-    public async Task<string> ComputeFileHashAsync(string filePath, CancellationToken cancellationToken = default)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-        
-        await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 81920, useAsync: true);
-        
-        var hash = await SHA256.HashDataAsync(stream, cancellationToken);
-        return Convert.ToHexString(hash);
-    }
+            stream.Position = chunk.Offset;
+            byte[] data = new byte[chunk.Length];
+            await stream.ReadExactlyAsync(data, cancellationToken);
 
-    /// <summary>
-    /// Compares two sets of chunks and returns which chunks need to be uploaded.
-    /// </summary>
-    public List<ChunkInfo> GetChangedChunks(List<ChunkInfo> existingChunks, List<ChunkInfo> newChunks)
-    {
-        ArgumentNullException.ThrowIfNull(existingChunks);
-        ArgumentNullException.ThrowIfNull(newChunks);
-        
-        var existingHashes = existingChunks.Select(c => c.Hash).ToHashSet(StringComparer.Ordinal);
-        return newChunks.Where(c => !existingHashes.Contains(c.Hash)).ToList();
+            // Verify the re-read data matches the Phase 1 hash.
+            // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
+            // Without this check, we'd silently upload data that doesn't match the stored hash,
+            // causing every future restore to fail chunk hash verification.
+            var rereadHash = ComputeChunkHash(data);
+            if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
+            {
+                FileOperationDiagnostics.RecordAmbient(
+                    $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
+                    $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
+                    $"offset={chunk.Offset}, length={chunk.Length}");
+                throw new IOException(
+                    $"File was modified during backup (chunk {chunk.Index} hash changed between CDC and upload). " +
+                    $"The file will be retried on the next backup cycle.");
+            }
+
+            await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
+        }
+
+        return (chunks, FinalizeFileHash(fileHasher));
     }
 
     /// <summary>
@@ -343,16 +389,4 @@ public class ChunkingService
         return data;
     }
 
-    private static uint ComputePower(uint baseVal, int exp)
-    {
-        uint result = 1;
-        while (exp > 0)
-        {
-            if ((exp & 1) == 1)
-                result *= baseVal;
-            baseVal *= baseVal;
-            exp >>= 1;
-        }
-        return result;
     }
-}

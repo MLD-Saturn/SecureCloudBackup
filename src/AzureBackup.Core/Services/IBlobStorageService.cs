@@ -116,6 +116,13 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Downloads and decrypts a chunk using streaming download to reduce memory allocations.
+    /// Uses ArrayPool to rent the download buffer, avoiding LOH pressure.
+    /// Preferred over <see cref="DownloadChunkAsync"/> for large-scale restore operations.
+    /// </summary>
+    Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.
     /// Returns null for chunks that are completely unrecoverable (AES-GCM tag mismatch).
     /// Used for corrupted file recovery.
@@ -159,6 +166,15 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>List of chunk hashes (without the "chunks/" prefix)</returns>
     Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Lists all chunk blobs with their properties (size and tier) in a single listing call.
+    /// More efficient than calling GetBlobPropertiesAsync per chunk.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>Dictionary mapping chunk hash to (size, tier)</returns>
+    Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Checks if a blob exists without downloading it.

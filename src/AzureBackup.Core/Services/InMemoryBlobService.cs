@@ -1,7 +1,6 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Azure.Core;
 using AzureBackup.Core.Models;
 
@@ -13,7 +12,7 @@ namespace AzureBackup.Core.Services;
 /// and security validation matching AzureBlobService behavior.
 /// Supports both connection string and Entra ID authentication (simulated).
 /// </summary>
-public partial class InMemoryBlobService : IBlobStorageService
+public class InMemoryBlobService : IBlobStorageService
 {
     private readonly EncryptionService _encryptionService;
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
@@ -29,10 +28,6 @@ public partial class InMemoryBlobService : IBlobStorageService
     // Thread-safe random number generator lock
     private readonly object _randomLock = new();
     private readonly Random _random = new();
-    
-    // Regex for validating chunk hash (SHA-256 hex string) - same as AzureBlobService
-    [GeneratedRegex(@"^[A-Fa-f0-9]{64}$", RegexOptions.Compiled)]
-    private static partial Regex ValidHashPattern();
 
     public bool IsConnected => _isConnected;
     public long TotalBytesUploaded { get; private set; }
@@ -55,20 +50,6 @@ public partial class InMemoryBlobService : IBlobStorageService
         _simulatedLatencyMs = simulatedLatencyMs;
         _failureRate = Math.Clamp(failureRate, 0.0, 1.0);
     }
-    
-    /// <summary>
-    /// Validates a chunk hash to prevent path traversal attacks.
-    /// Matches AzureBlobService validation.
-    /// </summary>
-    private static void ValidateChunkHash(string hash)
-    {
-        if (string.IsNullOrWhiteSpace(hash))
-            throw new SecurityPolicyException("Chunk hash cannot be empty", SecurityPolicyType.InvalidBlobName);
-        
-        if (!ValidHashPattern().IsMatch(hash))
-            throw new SecurityPolicyException($"Invalid chunk hash format: {hash}", SecurityPolicyType.InvalidBlobName);
-    }
-
 
     #region Connection String Authentication
 
@@ -131,8 +112,8 @@ public partial class InMemoryBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentNullException.ThrowIfNull(chunkData);
-        ValidateChunkHash(chunkHash);
-        
+        BlobNameValidator.ValidateChunkHash(chunkHash);
+
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk");
 
@@ -186,8 +167,8 @@ public partial class InMemoryBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentNullException.ThrowIfNull(chunkData);
-        ValidateChunkHash(chunkHash);
-        
+        BlobNameValidator.ValidateChunkHash(chunkHash);
+
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk direct");
 
@@ -225,9 +206,8 @@ public partial class InMemoryBlobService : IBlobStorageService
         });
         
         var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
-        
-        var metadataHash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(fileInfo.LocalPath)));
+
+        var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
         var blobName = $"metadata/{metadataHash}";
         
         _blobs[blobName] = encryptedMetadata;
@@ -238,11 +218,11 @@ public partial class InMemoryBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
-        
+
         // Validate blob name format - must start with "chunks/" (same as AzureBlobService)
         if (!blobName.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
-        
+
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Download chunk");
 
@@ -253,6 +233,15 @@ public partial class InMemoryBlobService : IBlobStorageService
 
         TotalOperations++;
         return _encryptionService.Decrypt(encryptedData);
+    }
+
+    /// <summary>
+    /// Streaming download variant — in-memory implementation delegates to <see cref="DownloadChunkAsync"/>
+    /// since there is no actual I/O stream to optimize.
+    /// </summary>
+    public virtual Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        return DownloadChunkAsync(blobName, cancellationToken);
     }
 
     /// <summary>
@@ -418,9 +407,32 @@ public partial class InMemoryBlobService : IBlobStorageService
             .Where(k => k.StartsWith("chunks/"))
             .Select(k => k.Replace("chunks/", ""))
             .ToList();
-        
+
         TotalOperations++;
         return Task.FromResult(chunks);
+    }
+
+    /// <summary>
+    /// Lists all chunk blobs with their properties (size and tier).
+    /// </summary>
+    public Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+        CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+
+        var result = new Dictionary<string, (long, StorageTier)>(StringComparer.Ordinal);
+
+        foreach (var (key, data) in _blobs)
+        {
+            if (!key.StartsWith("chunks/")) continue;
+
+            var hash = key.Replace("chunks/", "");
+            var tier = _blobTiers.GetValueOrDefault(key, StorageTier.Hot);
+            result[hash] = (data.Length, tier);
+        }
+
+        TotalOperations++;
+        return Task.FromResult(result);
     }
 
     public Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default)

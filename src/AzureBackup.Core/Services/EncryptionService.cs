@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using Konscious.Security.Cryptography;
@@ -12,7 +13,7 @@ public class EncryptionService : IDisposable
 {
     private byte[]? _derivedKey;
     private bool _disposed;
-    private readonly object _keyLock = new();
+    private readonly Lock _keyLock = new();
 
     // Argon2id parameters - secure defaults for password hashing
     private const int Argon2DegreeOfParallelism = 8;
@@ -37,6 +38,7 @@ public class EncryptionService : IDisposable
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
     
+    [Conditional("DIAGNOSTICLOG")]
     private void Log(string message)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
@@ -107,6 +109,43 @@ public class EncryptionService : IDisposable
             _derivedKey = new byte[KeySize];
             Array.Copy(derivedKey, _derivedKey, KeySize);
         }
+    }
+
+    /// <summary>
+    /// Computes HMAC-SHA256 of the input using the derived encryption key.
+    /// Returns the result as an uppercase hex string.
+    /// Used for generating metadata blob names that cannot be guessed without the key,
+    /// preventing an attacker with storage access from confirming file paths via dictionary attack.
+    /// </summary>
+    public string ComputeHmacHex(ReadOnlySpan<byte> data)
+    {
+        Span<byte> keyCopy = stackalloc byte[KeySize];
+        lock (_keyLock)
+        {
+            EnsureInitialized();
+            _derivedKey.AsSpan().CopyTo(keyCopy);
+        }
+
+        try
+        {
+            Span<byte> hash = stackalloc byte[32];
+            HMACSHA256.HashData(keyCopy, data, hash);
+            return Convert.ToHexString(hash);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyCopy);
+        }
+    }
+
+    /// <summary>
+    /// Computes HMAC-SHA256 of a string using the derived encryption key.
+    /// Convenience overload for path-based blob name generation.
+    /// </summary>
+    public string ComputeHmacHex(string input)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(input);
+        return ComputeHmacHex(Encoding.UTF8.GetBytes(input));
     }
 
     /// <summary>
@@ -221,8 +260,9 @@ public class EncryptionService : IDisposable
         // Verify checksum first
         var dataWithoutChecksum = encryptedData[..^ChecksumSize];
         var storedChecksum = encryptedData[^ChecksumSize..];
-        var computedChecksum = ComputeChecksum(dataWithoutChecksum);
-        
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
         if (!storedChecksum.SequenceEqual(computedChecksum))
         {
             Log($"Decrypt: CRC32 checksum mismatch (data length={encryptedData.Length})");
@@ -356,26 +396,49 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
-    /// Encrypts a string and returns base64-encoded result.
-    /// Useful for encrypting file paths and metadata.
+    /// Validates the CRC32 envelope of encrypted data without decrypting.
+    /// Returns true if the CRC matches, false otherwise.
+    /// Used for diagnostic verification immediately after encryption.
     /// </summary>
-    public string EncryptString(string plaintext)
+    public bool ValidateCrc(ReadOnlySpan<byte> encryptedData)
     {
-        ArgumentNullException.ThrowIfNull(plaintext);
-        var bytes = Encoding.UTF8.GetBytes(plaintext);
-        var encrypted = Encrypt(bytes);
-        return Convert.ToBase64String(encrypted);
+        var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
+        if (encryptedData.Length < minLength)
+            return false;
+
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+        var storedChecksum = encryptedData[^ChecksumSize..];
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
+        return storedChecksum.SequenceEqual(computedChecksum);
     }
 
     /// <summary>
-    /// Decrypts a base64-encoded encrypted string.
+    /// Returns diagnostic info about a CRC mismatch for logging.
+    /// Includes stored vs computed CRC, data length, and first/last bytes.
     /// </summary>
-    public string DecryptString(string encryptedBase64)
+    public string DiagnoseCrcMismatch(ReadOnlySpan<byte> encryptedData)
     {
-        ArgumentNullException.ThrowIfNull(encryptedBase64);
-        var encrypted = Convert.FromBase64String(encryptedBase64);
-        var decrypted = Decrypt(encrypted);
-        return Encoding.UTF8.GetString(decrypted);
+        var minLength = MagicHeader.Length + 1 + NonceSize + TagSize + ChecksumSize;
+        if (encryptedData.Length < minLength)
+            return $"Data too short: {encryptedData.Length} bytes (min={minLength})";
+
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+        var storedChecksum = encryptedData[^ChecksumSize..];
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
+        var match = storedChecksum.SequenceEqual(computedChecksum);
+        var lastDataBytes = encryptedData.Length >= 8
+            ? Convert.ToHexString(encryptedData[^8..])
+            : Convert.ToHexString(encryptedData);
+
+        return $"CRC {(match ? "OK" : "MISMATCH")}: " +
+               $"stored={Convert.ToHexString(storedChecksum)}, " +
+               $"computed={Convert.ToHexString(computedChecksum)}, " +
+               $"dataLen={encryptedData.Length}, " +
+               $"last8bytes={lastDataBytes}";
     }
 
     /// <summary>
@@ -385,15 +448,6 @@ public class EncryptionService : IDisposable
     {
         var crc = System.IO.Hashing.Crc32.HashToUInt32(data);
         BitConverter.TryWriteBytes(destination, crc);
-    }
-
-    /// <summary>
-    /// Computes CRC32 checksum for corruption detection.
-    /// </summary>
-    private static byte[] ComputeChecksum(ReadOnlySpan<byte> data)
-    {
-        var crc = System.IO.Hashing.Crc32.HashToUInt32(data);
-        return BitConverter.GetBytes(crc);
     }
 
     private void EnsureInitialized()
