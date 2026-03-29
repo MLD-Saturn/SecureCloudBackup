@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
@@ -93,11 +94,10 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         await CreateAndBackupFile(blobService, "corrupted_batch.bin", 100 * 1024);
         blobService.CorruptDownloads = true;
 
-        // Act
-        var result = await restoreService.RestoreFilesAsync(
-            await restoreService.ListRestorableFilesAsync(),
-            _restoreDirectory,
-            preserveFolderStructure: false);
+        // Act — use RestoreFilesWithRemappingAsync (RestoreFilesAsync was removed)
+        var files = await restoreService.ListRestorableFilesAsync();
+        var filesWithPaths = files.Select(f => (f, Path.Combine(_restoreDirectory, Path.GetFileName(f.LocalPath)))).ToList();
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
 
         // Assert — CRC-only corruption: all chunks recoverable, so the file is
         // promoted from __corrupted__ to the original target path and counted as success
@@ -219,8 +219,8 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         await File.WriteAllBytesAsync(fullPath, content);
 
         FileInfo fileInfo = new(fullPath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(fullPath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(fullPath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(fullPath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(fullPath);
 
         foreach (var chunk in chunks)
         {

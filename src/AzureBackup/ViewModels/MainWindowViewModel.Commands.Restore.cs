@@ -16,74 +16,6 @@ public partial class MainWindowViewModel
     #region Restore Commands
 
     [RelayCommand]
-    private async Task RefreshRestorableFilesAsync()
-    {
-        if (!IsInitialized)
-        {
-            AddLog("Please unlock first - go to Settings and enter your password");
-            return;
-        }
-
-        // Check if blob service is connected
-        if (!_blobService.IsConnected)
-        {
-            if (UseEntraIdAuth)
-            {
-                AddLog("Not connected to Azure Storage. Please sign in with Microsoft Entra ID in Settings.");
-            }
-            else
-            {
-                AddLog("Not connected to Azure Storage. Please configure your connection string in Settings.");
-            }
-            return;
-        }
-
-        IsOperationInProgress = true;
-        AddLog("Loading files from Azure Storage...");
-        
-        try
-        {
-            Progress<(int completed, int total)> progress = new(p =>
-            {
-                Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-                {
-                    StatusMessage = $"Loading file metadata... {p.completed:N0}/{p.total:N0}";
-                });
-            });
-
-            var files = await _restoreService.ListRestorableFilesAsync(progress: progress);
-            
-            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                RestorableFiles.Clear();
-                foreach (var file in files.OrderByDescending(f => f.LastModified))
-                {
-                    RestorableFiles.Add(new BackedUpFileViewModel(file));
-                }
-                OnPropertyChanged(nameof(RestorableFilesEmpty));
-                OnPropertyChanged(nameof(RestorableFilesCount));
-                OnPropertyChanged(nameof(ShowAzureEmptyState));
-                
-                // Build tree view if enabled
-                if (UseTreeView)
-                {
-                    BuildFileTree();
-                }
-                
-                AddLog($"Loaded {files.Count} files from Azure Storage");
-            });
-        }
-        catch (Exception ex)
-        {
-            AddLog($"Failed to load files: {ex.Message}");
-        }
-        finally
-        {
-            IsOperationInProgress = false;
-        }
-    }
-
-    [RelayCommand]
     private async Task SearchFilesAsync()
     {
         if (!IsInitialized || string.IsNullOrWhiteSpace(SearchPattern))
@@ -310,40 +242,6 @@ public partial class MainWindowViewModel
             IsOperationInProgress = false;
             StopProgressTracking();
         }
-    }
-
-    [RelayCommand]
-    private void SelectAllRestorableFiles()
-    {
-        if (UseTreeView)
-        {
-            foreach (var root in FileTreeRoots)
-            {
-                root.IsSelected = true;
-            }
-        }
-        else
-        {
-            SelectAllFiles();
-        }
-        NotifySelectionChanged();
-    }
-
-    [RelayCommand]
-    private void DeselectAllRestorableFiles()
-    {
-        if (UseTreeView)
-        {
-            foreach (var root in FileTreeRoots)
-            {
-                root.IsSelected = false;
-            }
-        }
-        else
-        {
-            DeselectAllFiles();
-        }
-        NotifySelectionChanged();
     }
 
     [RelayCommand]

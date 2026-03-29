@@ -747,21 +747,6 @@ public partial class MainWindowViewModel
         }
     }
 
-    [RelayCommand]
-    private async Task RemoveWatchedFolderAsync()
-    {
-        if (SelectedWatchedFolder != null)
-        {
-            var folderPath = SelectedWatchedFolder.Path;
-            WatchedFolders.Remove(SelectedWatchedFolder);
-            SaveSettings();
-            AddLog($"Removed watched folder: {folderPath}");
-            
-            // Refresh the local files tree to remove the folder
-            await RefreshLocalFilesAsync();
-        }
-    }
-
     /// <summary>
     /// Gets whether a local folder can be removed (a root watched folder is selected or checked).
     /// </summary>

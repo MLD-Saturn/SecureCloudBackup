@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core;
 using AzureBackup.Core.Models;
@@ -70,14 +71,14 @@ public class DataIntegrityTests : IAsyncLifetime
         var sourceFile = Path.Combine(_sourceDirectory, "hash_test.bin");
         await File.WriteAllBytesAsync(sourceFile, content);
         
-        var originalHash = await _chunkingService.ComputeFileHashAsync(sourceFile);
+        var originalHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(sourceFile);
         var backedUp = await BackupFileAsync(blobService, sourceFile);
         
         // Act
         var restorePath = Path.Combine(_restoreDirectory, "hash_test.bin");
         await restoreService.RestoreFileAsync(backedUp, restorePath, true);
         
-        var restoredHash = await _chunkingService.ComputeFileHashAsync(restorePath);
+        var restoredHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(restorePath);
 
         // Assert
         Assert.Equal(originalHash, restoredHash);
@@ -97,8 +98,8 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(file2, content);
 
         // Act
-        var (chunks1, _) = await _chunkingService.ChunkFileAsync(file1);
-        var (chunks2, _) = await _chunkingService.ChunkFileAsync(file2);
+        var (chunks1, _) = await _chunkingService.ChunkFileForTestAsync(file1);
+        var (chunks2, _) = await _chunkingService.ChunkFileForTestAsync(file2);
 
         // Assert - Same content should produce same chunk hashes
         Assert.Equal(chunks1.Count, chunks2.Count);
@@ -121,7 +122,7 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(sourceFile, content);
 
         // Act
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(sourceFile);
 
         // Assert - Chunks should be contiguous
         var sortedChunks = chunks.OrderBy(c => c.Offset).ToList();
@@ -147,7 +148,7 @@ public class DataIntegrityTests : IAsyncLifetime
         await File.WriteAllBytesAsync(sourceFile, content);
 
         // Act
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(sourceFile);
 
         // Assert
         for (int i = 0; i < chunks.Count; i++)
@@ -164,7 +165,7 @@ public class DataIntegrityTests : IAsyncLifetime
         var sourceFile = Path.Combine(_sourceDirectory, "chunk_read_test.bin");
         await File.WriteAllBytesAsync(sourceFile, content);
 
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(sourceFile);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(sourceFile);
 
         // Act & Assert - Read each chunk and verify it matches the original data
         foreach (var chunk in chunks)
@@ -267,7 +268,7 @@ public class DataIntegrityTests : IAsyncLifetime
         
         // The restore service should have verified the hash internally
         // If it didn't match, it would have thrown DataIntegrityException
-        var restoredHash = await _chunkingService.ComputeFileHashAsync(restorePath);
+        var restoredHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(restorePath);
         Assert.Equal(backedUp.FileHash, restoredHash);
     }
 
@@ -365,8 +366,8 @@ public class DataIntegrityTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {

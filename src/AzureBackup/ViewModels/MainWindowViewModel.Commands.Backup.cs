@@ -129,20 +129,6 @@ public partial class MainWindowViewModel
     }
 
     [RelayCommand]
-    private void PauseBackup()
-    {
-        _orchestrator.Pause();
-        AddLog("Backup paused");
-    }
-
-    [RelayCommand]
-    private void ResumeBackup()
-    {
-        _orchestrator.Resume();
-        AddLog("Backup resumed");
-    }
-
-    [RelayCommand]
     private async Task PerformFullScanAsync()
     {
         if (!IsInitialized)
@@ -258,13 +244,6 @@ public partial class MainWindowViewModel
             IsOperationInProgress = false;
             StopProgressTracking();
         }
-    }
-
-    [RelayCommand]
-    private void BackupSingleFile()
-    {
-        // Request the View to open a file picker dialog
-        FilePickerRequested?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>

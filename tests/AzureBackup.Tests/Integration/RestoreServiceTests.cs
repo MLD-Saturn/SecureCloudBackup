@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
@@ -388,8 +389,8 @@ public class RestoreServiceTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
 
         // Upload each chunk
         foreach (var chunk in chunks)

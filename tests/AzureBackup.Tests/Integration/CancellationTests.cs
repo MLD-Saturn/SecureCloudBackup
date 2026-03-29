@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
@@ -303,8 +304,8 @@ public class CancellationTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {

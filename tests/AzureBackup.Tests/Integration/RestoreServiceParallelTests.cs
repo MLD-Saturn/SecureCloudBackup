@@ -1,3 +1,4 @@
+using AzureBackup.Tests.Infrastructure;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using AzureBackup.Core.Models;
@@ -277,8 +278,8 @@ public class RestoreServiceParallelTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {
@@ -559,8 +560,8 @@ public class BoundedParallelDownloadTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {
@@ -889,8 +890,8 @@ public class RestoreServiceThroughputTests : IAsyncLifetime
     private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
-        var (chunks, _) = await _chunkingService.ChunkFileAsync(filePath);
-        var fileHash = await _chunkingService.ComputeFileHashAsync(filePath);
+        var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
+        var fileHash = await ChunkingTestHelper.ComputeFileHashForTestAsync(filePath);
 
         foreach (var chunk in chunks)
         {

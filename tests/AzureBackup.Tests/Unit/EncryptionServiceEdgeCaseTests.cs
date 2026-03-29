@@ -47,26 +47,6 @@ public class EncryptionServiceEdgeCaseTests : IDisposable
     }
 
     [Theory]
-    [InlineData("")]                           // Empty string
-    [InlineData("Hello")]                      // ASCII
-    [InlineData("?????? ???")]                 // Cyrillic
-    [InlineData("????")]                    // Chinese
-    [InlineData("??????")]                      // Emojis
-    [InlineData("C:\\Users\\Test\\??\\file.txt")] // Mixed path
-    [InlineData("Line1\r\nLine2\r\n")]         // CRLF
-    [InlineData("Tab\there\tand\tthere")]      // Tabs
-    [InlineData("\0\0\0")]                     // Null characters
-    public void EncryptDecryptString_SpecialCharacters_RoundTripSucceeds(string input)
-    {
-        // Act
-        var encrypted = _encryptionService.EncryptString(input);
-        var decrypted = _encryptionService.DecryptString(encrypted);
-
-        // Assert
-        Assert.Equal(input, decrypted);
-    }
-
-    [Theory]
     [InlineData(15)]  // Too short
     [InlineData(16)]  // Half size
     [InlineData(31)]  // One byte short

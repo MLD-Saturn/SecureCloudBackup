@@ -72,43 +72,6 @@ public class InvalidPasswordException : Exception
 }
 
 /// <summary>
-/// Exception thrown when backup/restore operations fail.
-/// </summary>
-public class BackupOperationException : Exception
-{
-    public BackupOperationType OperationType { get; }
-    public string? FilePath { get; }
-
-    public BackupOperationException(string message, BackupOperationType operationType) : base(message)
-    {
-        OperationType = operationType;
-    }
-
-    public BackupOperationException(string message, BackupOperationType operationType, string filePath) 
-        : base(message)
-    {
-        OperationType = operationType;
-        FilePath = filePath;
-    }
-
-    public BackupOperationException(string message, BackupOperationType operationType, Exception innerException) 
-        : base(message, innerException)
-    {
-        OperationType = operationType;
-    }
-}
-
-public enum BackupOperationType
-{
-    Chunking,
-    Encryption,
-    Upload,
-    Download,
-    Restore,
-    MetadataSync
-}
-
-/// <summary>
 /// Exception thrown when a hash collision is detected during deduplication verification.
 /// This is an extremely rare event (SHA-256 collision probability is 2^-128) and likely
 /// indicates data corruption, a bug, or an intentional attack rather than a true collision.

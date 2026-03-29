@@ -402,46 +402,6 @@ public partial class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
-    /// Initializes the database at the specified path without encryption.
-    /// Only used for migration from unencrypted to encrypted database.
-    /// </summary>
-    [Obsolete("Use Initialize(string, string) with password for encrypted database. This method is only for migration.")]
-    public void InitializeUnencrypted(string databasePath)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        Log($"InitializeUnencrypted: Opening unencrypted database at {databasePath} (for migration)");
-        
-        _databasePath = databasePath;
-        
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-            Log($"InitializeUnencrypted: Created directory {directory}");
-        }
-
-        _database = new LiteDatabase(databasePath);
-        
-        _configCollection = _database.GetCollection<BackupConfiguration>("config");
-        _filesCollection = _database.GetCollection<BackedUpFile>("files");
-        _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
-        _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
-        _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
-
-        // Create indexes for faster queries
-        _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
-        _filesCollection.EnsureIndex(x => x.Status);
-        _filesCollection.EnsureIndex(x => x.FileHash);
-        
-        // Chunk index indexes
-        _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
-        _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
-        _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
-        
-        Log("InitializeUnencrypted: Database initialized successfully");
-    }
-
-    /// <summary>
     /// Closes the current database connection.
     /// Used when migrating to allow reopening with different settings.
     /// </summary>
@@ -504,20 +464,6 @@ public partial class LocalDatabaseService : IDisposable
                 throw;
             }
         }
-    }
-
-    /// <summary>
-    /// Checks if the application has been configured with Azure credentials.
-    /// </summary>
-    public bool IsConfigured()
-    {
-        var config = GetConfiguration();
-        // Check for either authentication method
-        bool hasAzureConfig = config.AuthMethod == AzureAuthMethod.EntraId
-            ? (!string.IsNullOrEmpty(config.StorageAccountName) && config.IsEntraIdAuthenticated)
-            : (config.EncryptedConnectionString != null);
-        
-        return hasAzureConfig && config.PasswordSalt != null;
     }
 
     #endregion
@@ -584,69 +530,6 @@ public partial class LocalDatabaseService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Gets files with a specific backup status.
-    /// </summary>
-    public List<BackedUpFile> GetFilesByStatus(BackupStatus status)
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _filesCollection!.Find(x => x.Status == status).ToList();
-        }
-    }
-
-    /// <summary>
-    /// Gets the count of files by status.
-    /// </summary>
-    public Dictionary<BackupStatus, int> GetFileStatusCounts()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            Dictionary<BackupStatus, int> counts = new();
-            foreach (var status in Enum.GetValues<BackupStatus>())
-            {
-                var count = _filesCollection!.Count(x => x.Status == status);
-                if (count > 0)
-                    counts[status] = count;
-            }
-            return counts;
-        }
-    }
-
-    /// <summary>
-    /// Deletes a backed up file record.
-    /// </summary>
-    public void DeleteBackedUpFile(string localPath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
-        
-        lock (_dbLock)
-        {
-            _filesCollection!.DeleteMany(x => x.LocalPath == localPath);
-        }
-    }
-
-    /// <summary>
-    /// Gets total size of all backed up files.
-    /// </summary>
-    public long GetTotalBackedUpSize()
-    {
-        EnsureInitialized();
-
-        lock (_dbLock)
-        {
-            return _filesCollection!.Query()
-                .Select(x => x.FileSize)
-                .ToEnumerable()
-                .Sum();
-        }
-    }
-
     #endregion
 
     #region Pending Changes Queue
@@ -710,33 +593,6 @@ public partial class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
-    /// Gets count of pending changes.
-    /// </summary>
-    public int GetPendingChangesCount()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _pendingChangesCollection!.Count();
-        }
-    }
-
-    /// <summary>
-    /// Checks if a file change is already pending in the queue.
-    /// </summary>
-    public bool IsFileChangePending(string filePath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        lock (_dbLock)
-        {
-            return _pendingChangesCollection!.Exists(x => x.FilePath == filePath);
-        }
-    }
-
-    /// <summary>
     /// Gets all pending change file paths as a set for fast lookups.
     /// Use this instead of per-file IsFileChangePending calls when checking many files.
     /// </summary>
@@ -751,19 +607,6 @@ public partial class LocalDatabaseService : IDisposable
                 .Select(x => x.FilePath)
                 .ToEnumerable()
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        }
-    }
-
-    /// <summary>
-    /// Clears all pending changes.
-    /// </summary>
-    public void ClearPendingChanges()
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            _pendingChangesCollection!.DeleteAll();
         }
     }
 

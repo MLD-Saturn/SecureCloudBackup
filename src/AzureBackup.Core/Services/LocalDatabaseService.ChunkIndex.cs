@@ -143,19 +143,6 @@ public partial class LocalDatabaseService
     }
 
     /// <summary>
-    /// Gets chunks by storage tier.
-    /// </summary>
-    public List<ChunkIndexEntry> GetChunksByTier(StorageTier tier)
-    {
-        EnsureInitialized();
-        
-        lock (_dbLock)
-        {
-            return _chunkIndexCollection!.Find(x => x.CurrentTier == tier).ToList();
-        }
-    }
-
-    /// <summary>
     /// Clears all chunk index entries.
     /// </summary>
     public void ClearChunkIndex()

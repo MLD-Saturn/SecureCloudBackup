@@ -259,40 +259,6 @@ public class EncryptionServiceTests : IDisposable
 
     #endregion
 
-    #region String Encryption Tests
-
-    [Fact]
-    public void EncryptDecryptString_RoundTrip_ReturnsOriginalString()
-    {
-        // Arrange
-        InitializeWithTestKey();
-        var original = "C:\\Users\\Test\\Documents\\Important File.docx";
-
-        // Act
-        var encrypted = _encryptionService.EncryptString(original);
-        var decrypted = _encryptionService.DecryptString(encrypted);
-
-        // Assert
-        Assert.Equal(original, decrypted);
-    }
-
-    [Fact]
-    public void EncryptString_ReturnsBase64()
-    {
-        // Arrange
-        InitializeWithTestKey();
-        var original = "Test";
-
-        // Act
-        var encrypted = _encryptionService.EncryptString(original);
-
-        // Assert - Should be valid Base64
-        var decoded = Convert.FromBase64String(encrypted);
-        Assert.NotEmpty(decoded);
-    }
-
-    #endregion
-
     #region Password Verification Tests
 
     [Fact]

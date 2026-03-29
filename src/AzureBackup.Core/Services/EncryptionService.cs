@@ -396,29 +396,6 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
-    /// Encrypts a string and returns base64-encoded result.
-    /// Useful for encrypting file paths and metadata.
-    /// </summary>
-    public string EncryptString(string plaintext)
-    {
-        ArgumentNullException.ThrowIfNull(plaintext);
-        var bytes = Encoding.UTF8.GetBytes(plaintext);
-        var encrypted = Encrypt(bytes);
-        return Convert.ToBase64String(encrypted);
-    }
-
-    /// <summary>
-    /// Decrypts a base64-encoded encrypted string.
-    /// </summary>
-    public string DecryptString(string encryptedBase64)
-    {
-        ArgumentNullException.ThrowIfNull(encryptedBase64);
-        var encrypted = Convert.FromBase64String(encryptedBase64);
-        var decrypted = Decrypt(encrypted);
-        return Encoding.UTF8.GetString(decrypted);
-    }
-
-    /// <summary>
     /// Validates the CRC32 envelope of encrypted data without decrypting.
     /// Returns true if the CRC matches, false otherwise.
     /// Used for diagnostic verification immediately after encryption.
