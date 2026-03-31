@@ -1,3 +1,6 @@
+using System.ComponentModel;
+using System.Runtime.CompilerServices;
+
 namespace AzureBackup.Core.Models;
 
 /// <summary>
@@ -22,43 +25,62 @@ public enum OperationType
 /// <summary>
 /// Represents a single file action in an operation preview.
 /// </summary>
-public class PreviewFileAction
+public class PreviewFileAction : INotifyPropertyChanged
 {
+    private bool _isIncluded = true;
+
+    /// <inheritdoc />
+    public event PropertyChangedEventHandler? PropertyChanged;
+
     /// <summary>The file path (source or target depending on operation).</summary>
     public string FilePath { get; set; } = string.Empty;
-    
+
     /// <summary>Display name for the file.</summary>
     public string FileName => Path.GetFileName(FilePath);
-    
+
     /// <summary>Directory containing the file.</summary>
     public string Directory => Path.GetDirectoryName(FilePath) ?? string.Empty;
-    
+
     /// <summary>The action that will be taken.</summary>
     public FileActionType Action { get; set; }
-    
+
     /// <summary>File size in bytes.</summary>
     public long FileSize { get; set; }
-    
+
     /// <summary>Human-readable file size.</summary>
     public string FileSizeText => FormatHelper.FormatBytes(FileSize);
-    
+
     /// <summary>Last modified date/time.</summary>
     public DateTime LastModified { get; set; }
-    
+
     /// <summary>Last modified formatted for display.</summary>
     public string LastModifiedText => LastModified == default ? "" : LastModified.ToString("g");
-    
+
     /// <summary>Target path for restore/sync operations.</summary>
     public string? TargetPath { get; set; }
-    
+
     /// <summary>Reason for this action (e.g., "File is newer", "Not in backup").</summary>
     public string Reason { get; set; } = string.Empty;
 
     /// <summary>Whether this file is included in the operation. Uncheck in preview to exclude.</summary>
-    public bool IsIncluded { get; set; } = true;
+    public bool IsIncluded
+    {
+        get => _isIncluded;
+        set
+        {
+            if (_isIncluded != value)
+            {
+                _isIncluded = value;
+                OnPropertyChanged();
+            }
+        }
+    }
 
     /// <summary>Storage tier for this file (for backup operations).</summary>
     public StorageTier? StorageTier { get; set; }
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+        => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 }
 
 /// <summary>
