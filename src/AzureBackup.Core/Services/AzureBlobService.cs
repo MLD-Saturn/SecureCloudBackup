@@ -285,7 +285,9 @@ public class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, encryptedData, options,
-            $"UploadChunkAsync({chunkHash[..8]}...)", cancellationToken);
+            $"UploadChunkAsync({chunkHash[..8]}...)",
+            reEncrypt: () => _encryptionService.Encrypt(chunkData),
+            cancellationToken);
 
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
@@ -341,7 +343,9 @@ public class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, encryptedData, options,
-            $"UploadChunkDirectAsync({chunkHash[..8]}...)", cancellationToken);
+            $"UploadChunkDirectAsync({chunkHash[..8]}...)",
+            reEncrypt: () => _encryptionService.Encrypt(chunkData),
+            cancellationToken);
 
         TotalBytesUploaded += encryptedData.Length;
         TotalOperations++;
@@ -389,7 +393,9 @@ public class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, encryptedMetadata, options,
-            $"UploadFileMetadataAsync({Path.GetFileName(fileInfo.LocalPath)})", cancellationToken);
+            $"UploadFileMetadataAsync({Path.GetFileName(fileInfo.LocalPath)})",
+            reEncrypt: null,
+            cancellationToken);
 
         TotalOperations++;
     }
@@ -785,7 +791,9 @@ public class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, data, options,
-            $"UploadBlobAsync({blobName})", cancellationToken);
+            $"UploadBlobAsync({blobName})",
+            reEncrypt: null,
+            cancellationToken);
 
         TotalOperations++;
         Log($"UploadBlobAsync: Uploaded {blobName} ({data.Length} bytes, MD5 verified)");
@@ -995,19 +1003,29 @@ public class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Uploads data to a blob with MD5 integrity verification and automatic retry.
     /// On MD5 mismatch (transit corruption), retries with exponential backoff.
-    /// For encrypted data, the caller should pass the plaintext and this method
-    /// re-encrypts on each retry (producing a fresh nonce/ciphertext to avoid
-    /// re-sending the same bytes that were corrupted).
+    /// When <paramref name="reEncrypt"/> is provided, retries re-encrypt from the
+    /// original plaintext, producing a fresh nonce/ciphertext/CRC to avoid
+    /// re-sending the same bytes that may have been corrupted in memory.
     /// </summary>
+    /// <param name="reEncrypt">Optional callback that re-encrypts the original plaintext.
+    /// Invoked on retry attempts (attempt >= 2) to produce fresh ciphertext.
+    /// Pass null for non-encrypted data or data that doesn't need re-encryption.</param>
     private async Task UploadWithIntegrityRetryAsync(
         BlobClient blobClient,
         byte[] data,
         BlobUploadOptions options,
         string logContext,
+        Func<byte[]>? reEncrypt,
         CancellationToken cancellationToken)
     {
         for (var attempt = 1; attempt <= MaxUploadRetries; attempt++)
         {
+            if (attempt > 1 && reEncrypt != null)
+            {
+                data = reEncrypt();
+                Log($"{logContext}: Re-encrypted from plaintext for retry attempt {attempt}");
+            }
+
             try
             {
                 // Compute MD5 for Azure server-side verification
