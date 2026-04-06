@@ -194,12 +194,11 @@ public class EncryptionService : IDisposable
     /// </summary>
     public byte[] Encrypt(ReadOnlySpan<byte> plaintext)
     {
-        byte[] keyCopy;
+        Span<byte> keyCopy = stackalloc byte[KeySize];
         lock (_keyLock)
         {
             EnsureInitialized();
-            keyCopy = new byte[KeySize];
-            Array.Copy(_derivedKey!, keyCopy, KeySize);
+            _derivedKey.AsSpan().CopyTo(keyCopy);
         }
 
         try
@@ -285,12 +284,11 @@ public class EncryptionService : IDisposable
             throw new DataIntegrityException($"Unsupported encryption format version {version}. Please update the application.");
         }
 
-        byte[] keyCopy;
+        Span<byte> keyCopy = stackalloc byte[KeySize];
         lock (_keyLock)
         {
             EnsureInitialized();
-            keyCopy = new byte[KeySize];
-            Array.Copy(_derivedKey!, keyCopy, KeySize);
+            _derivedKey.AsSpan().CopyTo(keyCopy);
         }
 
         try

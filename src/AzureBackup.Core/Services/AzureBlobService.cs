@@ -1047,6 +1047,10 @@ public class AzureBlobService : IBlobStorageService
                 await Task.Delay(delayMs, cancellationToken);
             }
         }
+
+        // All retries exhausted — this is reachable only if MaxUploadRetries is 0
+        throw new InvalidOperationException(
+            $"{logContext}: Upload failed after {MaxUploadRetries} attempts due to repeated MD5 mismatches.");
     }
 
     private void EnsureConnected()

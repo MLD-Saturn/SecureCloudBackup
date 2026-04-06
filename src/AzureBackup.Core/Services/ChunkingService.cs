@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Collections.Frozen;
 using System.Security.Cryptography;
 using System.Threading.Channels;
 using AzureBackup.Core.Models;
@@ -62,7 +64,7 @@ public class ChunkingService
     /// File extensions mapped to chunking configurations.
     /// Mask bits determine average chunk size: 2^bits bytes average.
     /// </summary>
-    private static readonly Dictionary<string, ChunkSizeConfig> ChunkConfigByExtension = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly FrozenDictionary<string, ChunkSizeConfig> ChunkConfigByExtension = new Dictionary<string, ChunkSizeConfig>(StringComparer.OrdinalIgnoreCase)
     {
         // Documents - smaller chunks for better delta efficiency (frequently edited)
         [".docx"] = new(32 * KB, 256 * KB, MaskFromBits(MediumChunkMaskBits)),      // 32KB-256KB, ~128KB avg
@@ -146,11 +148,11 @@ public class ChunkingService
         [".sqlite"] = new(128 * KB, 1 * MB, MaskFromBits(DefaultMaskBits)),
         [".mdf"] = new(256 * KB, 2 * MB, MaskFromBits(DefaultMaskBits)),
         [".ldf"] = new(256 * KB, 2 * MB, MaskFromBits(DefaultMaskBits)),
-    };
+    }.ToFrozenDictionary(StringComparer.OrdinalIgnoreCase);
 
     // Large file threshold - files larger than this use optimized large chunks
     private const long LargeFileThreshold = 500L * MB; // 500 MB
-    
+
     // Large file chunking config: 16 MB min, 128 MB max, ~64 MB average
     private static readonly ChunkSizeConfig LargeFileConfig = new(
         16 * MB,                                     // 16 MB minimum
@@ -169,9 +171,9 @@ public class ChunkingService
         {
             return LargeFileConfig;
         }
-        
+
         var ext = Path.GetExtension(filePath);
-        return ChunkConfigByExtension.GetValueOrDefault(ext, 
+        return ChunkConfigByExtension.GetValueOrDefault(ext,
             new ChunkSizeConfig(DefaultMinChunkSize, DefaultMaxChunkSize, DefaultChunkMask));
     }
 
@@ -259,116 +261,125 @@ public class ChunkingService
 
         // Phase 1: CDC pass — sequential read, builds chunk list + file hash, no data retained
         var cdcBufferSize = (int)Math.Min((long)config.MaxChunkSize + WindowSize, fileLength);
-        byte[] buffer = new byte[cdcBufferSize];
-        var chunkStart = 0L;
-        var position = 0L;
-        var chunkIndex = 0;
-        var rollingHash = 0u;
-        byte[] window = new byte[WindowSize];
-        var windowPos = 0;
-        var windowFilled = false;
-
-        while (position < fileLength)
+        var buffer = ArrayPool<byte>.Shared.Rent(cdcBufferSize);
+        try
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            var chunkStart = 0L;
+            var position = 0L;
+            var chunkIndex = 0;
+            var rollingHash = 0u;
+            byte[] window = new byte[WindowSize];
+            var windowPos = 0;
+            var windowFilled = false;
 
-            var bytesToRead = (int)Math.Min(buffer.Length, fileLength - chunkStart);
-            stream.Position = chunkStart;
-            var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, bytesToRead), cancellationToken);
-
-            if (bytesRead == 0) break;
-
-            var chunkLength = 0;
-
-            for (var i = 0; i < bytesRead; i++)
+            while (position < fileLength)
             {
-                var b = buffer[i];
-                chunkLength++;
+                cancellationToken.ThrowIfCancellationRequested();
 
-                if (windowFilled)
+                var bytesToRead = (int)Math.Min(buffer.Length, fileLength - chunkStart);
+                stream.Position = chunkStart;
+                var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, bytesToRead), cancellationToken);
+
+                if (bytesRead == 0) break;
+
+                var chunkLength = 0;
+
+                for (var i = 0; i < bytesRead; i++)
                 {
-                    var outByte = window[windowPos];
-                    rollingHash = (rollingHash - outByte * HashPrimePower) * HashPrime + b;
-                }
-                else
-                {
-                    rollingHash = rollingHash * HashPrime + b;
-                }
+                    var b = buffer[i];
+                    chunkLength++;
 
-                window[windowPos] = b;
-                windowPos = (windowPos + 1) % WindowSize;
-                if (windowPos == 0) windowFilled = true;
-
-                var isChunkBoundary = chunkLength >= config.MinChunkSize &&
-                                      ((rollingHash & config.ChunkMask) == 0 || chunkLength >= config.MaxChunkSize);
-
-                var isEndOfFile = chunkStart + chunkLength >= fileLength;
-
-                if (isChunkBoundary || isEndOfFile)
-                {
-                    var chunkSpan = buffer.AsSpan(0, chunkLength);
-                    fileHasher.AppendData(chunkSpan);
-
-                    chunks.Add(new ChunkInfo
+                    if (windowFilled)
                     {
-                        Index = chunkIndex++,
-                        Offset = chunkStart,
-                        Length = chunkLength,
-                        Hash = ComputeChunkHash(chunkSpan)
-                    });
+                        var outByte = window[windowPos];
+                        rollingHash = (rollingHash - outByte * HashPrimePower) * HashPrime + b;
+                    }
+                    else
+                    {
+                        rollingHash = rollingHash * HashPrime + b;
+                    }
 
-                    chunkStart += chunkLength;
-                    position = chunkStart;
-                    chunkLength = 0;
-                    rollingHash = 0;
-                    windowFilled = false;
-                    windowPos = 0;
-                    Array.Clear(window);
+                    window[windowPos] = b;
+                    windowPos = (windowPos + 1) % WindowSize;
+                    if (windowPos == 0) windowFilled = true;
 
-                    cdcProgress?.Report((chunkStart, fileLength, chunks.Count));
+                    var isChunkBoundary = chunkLength >= config.MinChunkSize &&
+                                          ((rollingHash & config.ChunkMask) == 0 || chunkLength >= config.MaxChunkSize);
 
-                    break;
+                    var isEndOfFile = chunkStart + chunkLength >= fileLength;
+
+                    if (isChunkBoundary || isEndOfFile)
+                    {
+                        var chunkSpan = buffer.AsSpan(0, chunkLength);
+                        fileHasher.AppendData(chunkSpan);
+
+                        chunks.Add(new ChunkInfo
+                        {
+                            Index = chunkIndex++,
+                            Offset = chunkStart,
+                            Length = chunkLength,
+                            Hash = ComputeChunkHash(chunkSpan)
+                        });
+
+                        chunkStart += chunkLength;
+                        position = chunkStart;
+                        chunkLength = 0;
+                        rollingHash = 0;
+                        windowFilled = false;
+                        windowPos = 0;
+                        Array.Clear(window);
+
+                        cdcProgress?.Report((chunkStart, fileLength, chunks.Count));
+
+                        break;
+                    }
                 }
+
+                if (chunkStart >= fileLength) break;
             }
 
-            if (chunkStart >= fileLength) break;
-        }
+            // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream.
+            // Chunk data uses exact-sized arrays because the upload API (byte[]) requires it.
+            // The CDC buffer above is the main pooling win — it's 128 MB for large files and reused.
+            foreach (var chunk in chunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
 
-        // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream
-        foreach (var chunk in chunks)
+                if (existingHashes.Contains(chunk.Hash))
+                {
+                    chunk.BlobName = $"chunks/{chunk.Hash}";
+                    continue;
+                }
+
+                stream.Position = chunk.Offset;
+                byte[] data = new byte[chunk.Length];
+                await stream.ReadExactlyAsync(data, cancellationToken);
+
+                // Verify the re-read data matches the Phase 1 hash.
+                // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
+                // Without this check, we'd silently upload data that doesn't match the stored hash,
+                // causing every future restore to fail chunk hash verification.
+                var rereadHash = ComputeChunkHash(data);
+                if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
+                {
+                    FileOperationDiagnostics.RecordAmbient(
+                        $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
+                        $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
+                        $"offset={chunk.Offset}, length={chunk.Length}");
+                    throw new IOException(
+                        $"File was modified during backup (chunk {chunk.Index} hash changed between CDC and upload). " +
+                        $"The file will be retried on the next backup cycle.");
+                }
+
+                await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
+            }
+
+            return (chunks, FinalizeFileHash(fileHasher));
+        }
+        finally
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            if (existingHashes.Contains(chunk.Hash))
-            {
-                chunk.BlobName = $"chunks/{chunk.Hash}";
-                continue;
-            }
-
-            stream.Position = chunk.Offset;
-            byte[] data = new byte[chunk.Length];
-            await stream.ReadExactlyAsync(data, cancellationToken);
-
-            // Verify the re-read data matches the Phase 1 hash.
-            // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
-            // Without this check, we'd silently upload data that doesn't match the stored hash,
-            // causing every future restore to fail chunk hash verification.
-            var rereadHash = ComputeChunkHash(data);
-            if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
-            {
-                FileOperationDiagnostics.RecordAmbient(
-                    $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
-                    $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
-                    $"offset={chunk.Offset}, length={chunk.Length}");
-                throw new IOException(
-                    $"File was modified during backup (chunk {chunk.Index} hash changed between CDC and upload). " +
-                    $"The file will be retried on the next backup cycle.");
-            }
-
-            await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
+            ArrayPool<byte>.Shared.Return(buffer);
         }
-
-        return (chunks, FinalizeFileHash(fileHasher));
     }
 
     /// <summary>
@@ -378,15 +389,15 @@ public class ChunkingService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         ArgumentNullException.ThrowIfNull(chunk);
-        
+
         await using FileStream stream = new(filePath, FileMode.Open, FileAccess.Read, FileShare.Read,
             bufferSize: 81920, useAsync: true);
-        
+
         stream.Position = chunk.Offset;
         byte[] data = new byte[chunk.Length];
         await stream.ReadExactlyAsync(data, cancellationToken);
-        
+
         return data;
     }
 
-    }
+}

@@ -193,13 +193,13 @@ public class OperationPreview
         get
         {
             if (FilesToDelete.Count > 0 && OperationType == OperationType.DeleteFromAzure)
-                return $"?? WARNING: {FilesToDelete.Count} file(s) will be PERMANENTLY deleted from Azure storage. This cannot be undone!";
+                return $"⚠️ WARNING: {FilesToDelete.Count} file(s) will be PERMANENTLY deleted from Azure storage. This cannot be undone!";
             if (FilesToDelete.Count > 0 && OperationType == OperationType.MirrorSync)
-                return $"?? WARNING: {FilesToDelete.Count} local file(s) will be deleted to match the backup.";
+                return $"⚠️ WARNING: {FilesToDelete.Count} local file(s) will be deleted to match the backup.";
             if (FilesToOverwrite.Count > 0)
-                return $"?? {FilesToOverwrite.Count} existing file(s) will be overwritten.";
+                return $"⚠️ {FilesToOverwrite.Count} existing file(s) will be overwritten.";
             if (OperationType == OperationType.Backup && (FilesToCreate.Count > 0 || FilesToOverwrite.Count > 0))
-                return $"?? {FilesToCreate.Count + FilesToOverwrite.Count} file(s) will be uploaded to Azure storage.";
+                return $"ℹ️ {FilesToCreate.Count + FilesToOverwrite.Count} file(s) will be uploaded to Azure storage.";
             return null;
         }
     }

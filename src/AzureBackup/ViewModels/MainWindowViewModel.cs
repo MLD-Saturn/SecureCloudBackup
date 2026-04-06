@@ -19,7 +19,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private readonly LocalDatabaseService _databaseService;
     private readonly EncryptionService _encryptionService;
     private readonly ChunkingService _chunkingService;
-    private readonly AzureBlobService _blobService;
+    private readonly IBlobStorageService _blobService;
     private readonly FileWatcherService _fileWatcherService;
     private readonly BackupOrchestrator _orchestrator;
     private readonly RestoreService _restoreService;
@@ -112,8 +112,8 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// Text for the unified unlock and connect button.
     /// </summary>
     public string UnlockAndConnectButtonText => HasExistingConfig 
-        ? "?? Unlock" 
-        : "?? Initialize & Connect";
+        ? "🔓 Unlock" 
+        : "🔓 Initialize & Connect";
 
     /// <summary>
     /// Human-readable backup status text.
@@ -624,7 +624,8 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _databaseService = new LocalDatabaseService();
         _encryptionService = new EncryptionService();
         _chunkingService = new ChunkingService();
-        _blobService = new AzureBlobService(_encryptionService);
+        var blobService = new AzureBlobService(_encryptionService);
+        _blobService = blobService;
         _fileWatcherService = new FileWatcherService(_databaseService);
         _orchestrator = new BackupOrchestrator(
             _databaseService, _encryptionService, _chunkingService, 
@@ -674,7 +675,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         // Wire up diagnostic logging events (detailed service logs)
         _orchestrator.DiagnosticLog += OnDiagnosticLog;
-        _blobService.DiagnosticLog += OnDiagnosticLog;
+        blobService.DiagnosticLog += OnDiagnosticLog;
         _databaseService.DiagnosticLog += OnDiagnosticLog;
         _encryptionService.DiagnosticLog += OnDiagnosticLog;
         _restoreService.DiagnosticLog += OnDiagnosticLog;
@@ -684,7 +685,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         if (Program.Logger != null)
         {
             _orchestrator.DiagnosticLog += Program.Logger.OnDiagnosticLog;
-            _blobService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
+            blobService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
             _databaseService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
             _encryptionService.DiagnosticLog += Program.Logger.OnDiagnosticLog;
             _restoreService.DiagnosticLog += Program.Logger.OnDiagnosticLog;

@@ -30,8 +30,12 @@ public class InMemoryBlobService : IBlobStorageService
     private readonly Random _random = new();
 
     public bool IsConnected => _isConnected;
-    public long TotalBytesUploaded { get; private set; }
-    public int TotalOperations { get; private set; }
+
+    private long _totalBytesUploaded;
+    private int _totalOperations;
+
+    public long TotalBytesUploaded => Interlocked.Read(ref _totalBytesUploaded);
+    public int TotalOperations => Volatile.Read(ref _totalOperations);
     
     /// <summary>
     /// Gets all stored blob names (for test verification).
@@ -150,8 +154,8 @@ public class InMemoryBlobService : IBlobStorageService
         _blobs[blobName] = encryptedData;
         _blobTiers[blobName] = storageTier;
         
-        TotalBytesUploaded += encryptedData.Length;
-        TotalOperations++;
+        Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
+        Interlocked.Increment(ref _totalOperations);
         progress?.Report(encryptedData.Length);
 
         return blobName;
@@ -179,8 +183,8 @@ public class InMemoryBlobService : IBlobStorageService
         _blobs[blobName] = encryptedData;
         _blobTiers[blobName] = storageTier;
         
-        TotalBytesUploaded += encryptedData.Length;
-        TotalOperations++;
+        Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
+        Interlocked.Increment(ref _totalOperations);
         progress?.Report(encryptedData.Length);
 
         return blobName;
@@ -211,7 +215,7 @@ public class InMemoryBlobService : IBlobStorageService
         var blobName = $"metadata/{metadataHash}";
         
         _blobs[blobName] = encryptedMetadata;
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
     }
 
     public virtual async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
@@ -231,7 +235,7 @@ public class InMemoryBlobService : IBlobStorageService
             throw new DataIntegrityException($"Chunk not found: {blobName}", blobName);
         }
 
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return _encryptionService.Decrypt(encryptedData);
     }
 
@@ -261,7 +265,7 @@ public class InMemoryBlobService : IBlobStorageService
         if (!_blobs.TryGetValue(blobName, out var encryptedData))
             return null;
 
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return _encryptionService.DecryptBestEffort(encryptedData);
     }
 
@@ -273,7 +277,7 @@ public class InMemoryBlobService : IBlobStorageService
             .Where(k => k.StartsWith("metadata/"))
             .ToList();
         
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(metadataBlobs);
     }
 
@@ -297,7 +301,7 @@ public class InMemoryBlobService : IBlobStorageService
             var metadata = JsonSerializer.Deserialize<MetadataDto>(json);
             if (metadata == null) return null;
 
-            TotalOperations++;
+            Interlocked.Increment(ref _totalOperations);
             
             return new BackedUpFile
             {
@@ -332,7 +336,7 @@ public class InMemoryBlobService : IBlobStorageService
         
         _blobs.TryRemove(blobName, out _);
         _blobTiers.TryRemove(blobName, out _);
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         
         return Task.CompletedTask;
     }
@@ -347,7 +351,7 @@ public class InMemoryBlobService : IBlobStorageService
         // Store raw data (not encrypted) for generic blobs
         _blobs[blobName] = data;
         _blobTiers[blobName] = storageTier;
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         
         return Task.CompletedTask;
     }
@@ -362,7 +366,7 @@ public class InMemoryBlobService : IBlobStorageService
             throw new InvalidOperationException($"Blob not found: {blobName}");
         }
         
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(data);
     }
 
@@ -380,7 +384,7 @@ public class InMemoryBlobService : IBlobStorageService
         // Get tier from our tracking dictionary, default to Cool
         var tier = _blobTiers.GetValueOrDefault(blobName, StorageTier.Hot);
         
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(((long)data.Length, tier));
     }
 
@@ -395,7 +399,7 @@ public class InMemoryBlobService : IBlobStorageService
         }
 
         _blobTiers[blobName] = tier;
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.CompletedTask;
     }
 
@@ -408,7 +412,7 @@ public class InMemoryBlobService : IBlobStorageService
             .Select(k => k.Replace("chunks/", ""))
             .ToList();
 
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(chunks);
     }
 
@@ -431,7 +435,7 @@ public class InMemoryBlobService : IBlobStorageService
             result[hash] = (data.Length, tier);
         }
 
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(result);
     }
 
@@ -440,7 +444,7 @@ public class InMemoryBlobService : IBlobStorageService
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
 
-        TotalOperations++;
+        Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(_blobs.ContainsKey(blobName));
     }
 
@@ -480,7 +484,7 @@ public class InMemoryBlobService : IBlobStorageService
                     "Content differs despite matching hash and size. This may indicate data corruption or tampering.");
             }
 
-            TotalOperations++;
+            Interlocked.Increment(ref _totalOperations);
             return Task.FromResult(true);
         }
         catch (HashCollisionException)
@@ -528,8 +532,8 @@ public class InMemoryBlobService : IBlobStorageService
     {
         _blobs.Clear();
         _blobTiers.Clear();
-        TotalBytesUploaded = 0;
-        TotalOperations = 0;
+        _totalBytesUploaded = 0;
+        _totalOperations = 0;
     }
     
     /// <summary>
