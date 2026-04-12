@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
 
@@ -119,11 +120,12 @@ public class BlobServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task UploadChunkAsync_NullData_Throws()
+    public async Task UploadChunkAsync_EmptyData_Succeeds()
     {
-        // Act & Assert
-        await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            _blobService.UploadChunkAsync(null!, "somehash"));
+        // Empty data is valid — represents a 0-byte file chunk
+        var hash = HashHelper.ComputeHash(ReadOnlySpan<byte>.Empty);
+        var blobName = await _blobService.UploadChunkAsync(ReadOnlyMemory<byte>.Empty, hash);
+        Assert.StartsWith("chunks/", blobName);
     }
 
     [Fact]
@@ -240,11 +242,12 @@ public class BlobServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task UploadChunkDirectAsync_NullData_Throws()
+    public async Task UploadChunkDirectAsync_EmptyData_Succeeds()
     {
-        // Act & Assert
-        await Assert.ThrowsAsync<ArgumentNullException>(() =>
-            _blobService.UploadChunkDirectAsync(null!, "somehash"));
+        // Empty data is valid — represents a 0-byte file chunk
+        var hash = HashHelper.ComputeHash(ReadOnlySpan<byte>.Empty);
+        var blobName = await _blobService.UploadChunkDirectAsync(ReadOnlyMemory<byte>.Empty, hash);
+        Assert.StartsWith("chunks/", blobName);
     }
 
     [Fact]

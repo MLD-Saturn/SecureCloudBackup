@@ -231,17 +231,19 @@ public class ChunkingService
         // Phase 1 & 2 combined for small files: single chunk, read once, write to channel if changed
         if (fileLength <= config.MinChunkSize)
         {
-            byte[] data = new byte[fileLength];
-            await stream.ReadExactlyAsync(data, cancellationToken);
+            var dataLength = (int)fileLength;
+            // ArrayPool.Rent(0) throws; rent minimum of 1 for empty files
+            var data = ArrayPool<byte>.Shared.Rent(Math.Max(dataLength, 1));
+            await stream.ReadExactlyAsync(data.AsMemory(0, dataLength), cancellationToken);
 
-            fileHasher.AppendData(data);
+            fileHasher.AppendData(data.AsSpan(0, dataLength));
 
             var info = new ChunkInfo
             {
                 Index = 0,
                 Offset = 0,
-                Length = (int)fileLength,
-                Hash = ComputeChunkHash(data)
+                Length = dataLength,
+                Hash = ComputeChunkHash(data.AsSpan(0, dataLength))
             };
             chunks.Add(info);
 
@@ -249,10 +251,11 @@ public class ChunkingService
 
             if (!existingHashes.Contains(info.Hash))
             {
-                await channel.WriteAsync(new ChunkPayload(info, data), cancellationToken);
+                await channel.WriteAsync(new ChunkPayload(info, data, dataLength), cancellationToken);
             }
             else
             {
+                ArrayPool<byte>.Shared.Return(data);
                 info.BlobName = $"chunks/{info.Hash}";
             }
 
@@ -339,8 +342,8 @@ public class ChunkingService
             }
 
             // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream.
-            // Chunk data uses exact-sized arrays because the upload API (byte[]) requires it.
-            // The CDC buffer above is the main pooling win — it's 128 MB for large files and reused.
+            // Chunk data uses rented ArrayPool buffers to avoid LOH allocations.
+            // The upload consumer returns these buffers after encrypting and uploading.
             foreach (var chunk in chunks)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -352,16 +355,17 @@ public class ChunkingService
                 }
 
                 stream.Position = chunk.Offset;
-                byte[] data = new byte[chunk.Length];
-                await stream.ReadExactlyAsync(data, cancellationToken);
+                var data = ArrayPool<byte>.Shared.Rent(chunk.Length);
+                await stream.ReadExactlyAsync(data.AsMemory(0, chunk.Length), cancellationToken);
 
                 // Verify the re-read data matches the Phase 1 hash.
                 // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
                 // Without this check, we'd silently upload data that doesn't match the stored hash,
                 // causing every future restore to fail chunk hash verification.
-                var rereadHash = ComputeChunkHash(data);
+                var rereadHash = ComputeChunkHash(data.AsSpan(0, chunk.Length));
                 if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
                 {
+                    ArrayPool<byte>.Shared.Return(data);
                     FileOperationDiagnostics.RecordAmbient(
                         $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
                         $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
@@ -371,7 +375,7 @@ public class ChunkingService
                         $"The file will be retried on the next backup cycle.");
                 }
 
-                await channel.WriteAsync(new ChunkPayload(chunk, data), cancellationToken);
+                await channel.WriteAsync(new ChunkPayload(chunk, data, chunk.Length), cancellationToken);
             }
 
             return (chunks, FinalizeFileHash(fileHasher));

@@ -619,7 +619,18 @@ public partial class BackupOrchestrator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filePaths);
-        Log($"BackupFilesAsync: Starting parallel backup of {filePaths.Count} files (max {MaxParallelFileBackups} concurrent)");
+
+        // Create a shared memory budget from the user's config.
+        // All concurrent file backups share this single budget so the total
+        // in-flight chunk memory stays within the user's limit.
+        // Reserve 128 MB for the CDC buffer (ArrayPool rental in ChunkingService).
+        const long CdcBufferOverhead = 128L * 1024 * 1024;
+        var config = _databaseService.GetConfiguration();
+        using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
+
+        Log($"BackupFilesAsync: Starting parallel backup of {filePaths.Count} files " +
+            $"(max {MaxParallelFileBackups} concurrent, " +
+            $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
 
         var totalFiles = filePaths.Count;
         long totalBytes = 0;
@@ -679,7 +690,7 @@ public partial class BackupOrchestrator
                             p.current, currentFileSize));
                     });
 
-                    var success = await BackupFileAsync(filePath, fileProgress, ct);
+                    var success = await BackupFileAsync(filePath, fileProgress, memoryBudget, ct);
 
                     if (success)
                     {

@@ -499,4 +499,161 @@ public class EncryptionServiceTests : IDisposable
     }
 
     #endregion
+
+    #region EncryptInto / DecryptInto Tests
+
+    [Fact]
+    public async Task EncryptIntoDecryptIntoRoundTrip()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[1024];
+        Random.Shared.NextBytes(plaintext);
+
+        var destSize = plaintext.Length + EncryptionService.EncryptionOverhead;
+        var encBuffer = new byte[destSize];
+        var written = _encryptionService.EncryptInto(plaintext, encBuffer);
+
+        Assert.Equal(destSize, written);
+        Assert.True(_encryptionService.ValidateCrc(encBuffer.AsSpan(0, written)));
+
+        var decBuffer = new byte[plaintext.Length];
+        var decWritten = _encryptionService.DecryptInto(encBuffer.AsSpan(0, written), decBuffer);
+
+        Assert.Equal(plaintext.Length, decWritten);
+        Assert.Equal(plaintext, decBuffer);
+    }
+
+    [Fact]
+    public async Task EncryptIntoMatchesEncryptOutput()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[256];
+        Random.Shared.NextBytes(plaintext);
+
+        // Both methods should produce valid ciphertext that decrypts to the same plaintext
+        var standard = _encryptionService.Encrypt(plaintext);
+        var destSize = plaintext.Length + EncryptionService.EncryptionOverhead;
+        var buffer = new byte[destSize];
+        var written = _encryptionService.EncryptInto(plaintext, buffer);
+
+        Assert.Equal(standard.Length, written);
+
+        // Both should decrypt to the same plaintext (nonces differ, so ciphertext differs)
+        var dec1 = _encryptionService.Decrypt(standard);
+        var dec2 = _encryptionService.Decrypt(buffer.AsSpan(0, written));
+        Assert.Equal(dec1, dec2);
+        Assert.Equal(plaintext, dec1);
+    }
+
+    [Fact]
+    public async Task DecryptIntoMatchesDecryptOutput()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[512];
+        Random.Shared.NextBytes(plaintext);
+
+        var encrypted = _encryptionService.Encrypt(plaintext);
+
+        // Standard Decrypt
+        var standard = _encryptionService.Decrypt(encrypted);
+
+        // DecryptInto
+        var buffer = new byte[encrypted.Length - EncryptionService.EncryptionOverhead];
+        var written = _encryptionService.DecryptInto(encrypted, buffer);
+
+        Assert.Equal(standard.Length, written);
+        Assert.Equal(standard, buffer);
+    }
+
+    [Fact]
+    public async Task EncryptIntoThrowsWhenDestinationTooSmall()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[100];
+        var tooSmall = new byte[100]; // needs 100 + 37 = 137
+
+        Assert.Throws<ArgumentException>(() =>
+            _encryptionService.EncryptInto(plaintext, tooSmall));
+    }
+
+    [Fact]
+    public async Task DecryptIntoThrowsWhenDestinationTooSmall()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[100];
+        var encrypted = _encryptionService.Encrypt(plaintext);
+
+        var tooSmall = new byte[50]; // needs 100
+
+        Assert.Throws<ArgumentException>(() =>
+            _encryptionService.DecryptInto(encrypted, tooSmall));
+    }
+
+    [Fact]
+    public async Task DecryptIntoThrowsOnCorruptedCrc()
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[64];
+        Random.Shared.NextBytes(plaintext);
+        var encrypted = _encryptionService.Encrypt(plaintext);
+
+        // Corrupt the last byte (CRC32)
+        encrypted[^1] ^= 0xFF;
+
+        var buffer = new byte[plaintext.Length];
+        Assert.Throws<DataIntegrityException>(() =>
+            _encryptionService.DecryptInto(encrypted, buffer));
+    }
+
+    [Fact]
+    public void EncryptionOverheadConstantIsCorrect()
+    {
+        // Overhead = magic(4) + version(1) + nonce(12) + tag(16) + CRC32(4) = 37
+        Assert.Equal(37, EncryptionService.EncryptionOverhead);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(100)]
+    [InlineData(1024)]
+    [InlineData(65536)]
+    public async Task EncryptIntoDecryptIntoRoundTripVariousSizes(int size)
+    {
+        var salt = EncryptionService.GenerateSalt();
+        var key = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+        _encryptionService.Initialize(key);
+
+        var plaintext = new byte[size];
+        Random.Shared.NextBytes(plaintext);
+
+        var encBuffer = new byte[size + EncryptionService.EncryptionOverhead];
+        var encWritten = _encryptionService.EncryptInto(plaintext, encBuffer);
+
+        var decBuffer = new byte[size];
+        var decWritten = _encryptionService.DecryptInto(encBuffer.AsSpan(0, encWritten), decBuffer);
+
+        Assert.Equal(size, decWritten);
+        Assert.Equal(plaintext, decBuffer[..decWritten]);
+    }
+
+    #endregion
 }

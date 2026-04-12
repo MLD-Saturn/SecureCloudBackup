@@ -66,7 +66,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <param name="storageTier">The Azure storage tier to use for this upload</param>
     /// <param name="progress">Optional progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+    Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default);
 
@@ -80,7 +80,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <param name="storageTier">The Azure storage tier to use for this upload</param>
     /// <param name="progress">Optional progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+    Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default);
 
@@ -116,11 +116,13 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Downloads and decrypts a chunk using streaming download to reduce memory allocations.
-    /// Uses ArrayPool to rent the download buffer, avoiding LOH pressure.
+    /// Downloads and decrypts a chunk using streaming download with pooled buffers.
+    /// Uses ArrayPool for both the download and plaintext buffers, avoiding LOH pressure.
+    /// The returned buffer may be oversized (rented from ArrayPool) — use Length for actual data.
+    /// The caller SHOULD return the buffer via <c>ArrayPool&lt;byte&gt;.Shared.Return</c> after use.
     /// Preferred over <see cref="DownloadChunkAsync"/> for large-scale restore operations.
     /// </summary>
-    Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.
@@ -193,7 +195,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if the stored chunk matches the expected data exactly</returns>
     /// <exception cref="HashCollisionException">Thrown if hash matches but data differs (extremely rare)</exception>
-    Task<bool> VerifyChunkIntegrityAsync(string chunkHash, byte[] expectedData, CancellationToken cancellationToken = default);
+    Task<bool> VerifyChunkIntegrityAsync(string chunkHash, ReadOnlyMemory<byte> expectedData, CancellationToken cancellationToken = default);
 
     #endregion
 }

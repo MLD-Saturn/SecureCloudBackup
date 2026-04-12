@@ -183,7 +183,7 @@ public class CancellationTests : IAsyncLifetime
         CancellationTokenSource cts = new();
         
         // Act - Start restore and cancel during download
-        var restoreTask = restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cts.Token);
+        var restoreTask = restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cancellationToken: cts.Token);
         
         // Cancel shortly after starting
         await Task.Delay(200);
@@ -276,7 +276,7 @@ public class CancellationTests : IAsyncLifetime
         CancellationTokenSource cts = new();
         
         // Act
-        var restoreTask = restoreService.RestoreFileAsync(backedUp, restorePath, true, progress, cts.Token);
+        var restoreTask = restoreService.RestoreFileAsync(backedUp, restorePath, true, progress, cancellationToken: cts.Token);
         
         // Wait for some progress, then cancel
         await Task.Delay(400); // Should have made some progress

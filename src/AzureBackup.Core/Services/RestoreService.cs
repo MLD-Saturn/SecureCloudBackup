@@ -21,7 +21,7 @@ public partial class RestoreService
     
     // Parallel download settings - increased for better bandwidth utilization
     // Default concurrency for moderate chunk sizes; adaptive method below adjusts for extremes.
-    // Memory bounded by: effectiveConcurrency * maxChunkSize * ~3 copies
+    // Memory bounded by: effectiveConcurrency * maxChunkSize * ~2 copies
     private const int DefaultParallelChunkDownloads = 12;
 
     // File-level parallelism for multi-file restore operations
@@ -89,8 +89,12 @@ public partial class RestoreService
     /// </summary>
     private static int ComputeAdaptiveChunkConcurrency(int maxChunkBytes)
     {
-        // Target ~256 MB of in-flight chunk data (each chunk needs ~3x: encrypted + decrypted + channel buffer)
-        const long TargetInFlightBytes = 256L * 1024 * 1024;
+        // Target ~384 MB of in-flight chunk data. Each download peaks at ~2× chunk size
+        // (encrypted + plaintext overlap briefly during DecryptInto), giving ~768 MB peak
+        // memory at full concurrency — equivalent to the original ×3 calibration.
+        // The MemoryBudget provides the real memory safety net; this heuristic is a
+        // secondary defense that caps HTTP connections for non-budget-limited scenarios.
+        const long TargetInFlightBytes = 384L * 1024 * 1024;
         var computed = (int)(TargetInFlightBytes / Math.Max(maxChunkBytes, 1));
         return Math.Clamp(computed, 4, 24);
     }
@@ -187,11 +191,15 @@ public partial class RestoreService
     /// Verifies integrity after restore by comparing file hash.
     /// Uses parallel chunk downloads for files with multiple chunks.
     /// </summary>
+    /// <param name="memoryBudget">Optional shared memory budget for throttling parallel chunk downloads.
+    /// When null, a per-file budget is created from config. Pass a shared instance for
+    /// multi-file operations so total in-flight memory stays within the user's limit.</param>
     public async Task<bool> RestoreFileAsync(
         BackedUpFile file,
         string? restorePath = null,
         bool overwriteExisting = false,
         IProgress<(long current, long total)>? progress = null,
+        MemoryBudget? memoryBudget = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(file);
@@ -260,13 +268,32 @@ public partial class RestoreService
 
             if (sortedChunks.Count > 1)
             {
-                Log($"RestoreFileAsync: Using bounded parallel downloads (adaptive concurrency)");
+                // Use the caller's shared budget when provided (multi-file restores),
+                // otherwise create a per-file budget from config (single-file restore from UI).
+                var ownsMemoryBudget = memoryBudget == null;
+                if (ownsMemoryBudget)
+                {
+                    var restoreConfig = _databaseService.GetConfiguration();
+                    memoryBudget = MemoryBudget.FromConfig(restoreConfig);
+                }
+
+                Log($"RestoreFileAsync: Using bounded parallel downloads (adaptive concurrency, " +
+                    $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{memoryBudget.TotalBytes / (1024 * 1024)} MB" : "unlimited")}, " +
+                    $"shared={!ownsMemoryBudget})");
+                try
+                {
                 // Use bounded producer-consumer pattern with channels
                 // Hash is computed incrementally as chunks are written in order — no file re-read needed
-                restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
-                    sortedChunks, file, tempPath, progress, 
-                    p => currentBytes = p, diag, cancellationToken);
-            }
+                        restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
+                            sortedChunks, file, tempPath, memoryBudget, progress, 
+                            p => currentBytes = p, diag, cancellationToken);
+                    }
+                    finally
+                    {
+                        if (ownsMemoryBudget)
+                            memoryBudget.Dispose();
+                    }
+                }
             else
             {
                 Log("RestoreFileAsync: Single chunk, downloading directly");
@@ -418,8 +445,9 @@ public partial class RestoreService
     
     /// <summary>
     /// Verifies downloaded chunk data matches expected hash and size.
+    /// Accepts ReadOnlySpan to support both exact-sized arrays and sliced pooled buffers.
     /// </summary>
-    private void VerifyChunkIntegrity(byte[] chunkData, ChunkInfo chunk, string filePath)
+    private void VerifyChunkIntegrity(ReadOnlySpan<byte> chunkData, ChunkInfo chunk, string filePath)
     {
         // Verify chunk size matches metadata
         if (chunkData.Length != chunk.Length)
@@ -477,6 +505,7 @@ public partial class RestoreService
         List<ChunkInfo> sortedChunks,
         BackedUpFile file,
         string tempPath,
+        MemoryBudget memoryBudget,
         IProgress<(long current, long total)>? progress,
         Action<long> updateCurrentBytes,
         FileOperationDiagnostics diag,
@@ -495,24 +524,29 @@ public partial class RestoreService
             $"totalChunkBytes={totalChunkBytes:N0}, GC.TotalMemory={gcMemBefore:N0} bytes");
 
         // Log if memory pressure could be dangerous:
-        // Each parallel chunk needs ~3x memory (stream buffer + encrypted array + decrypted array)
-        var estimatedPeakMemory = (long)maxChunkBytes * 3 * effectiveConcurrency;
+        // Each parallel chunk needs ~2x memory during download (encrypted + plaintext buffers
+        // overlap briefly during DecryptInto; encrypted buffer is returned before channel write)
+        var estimatedPeakMemory = (long)maxChunkBytes * 2 * effectiveConcurrency;
         if (estimatedPeakMemory > 1_000_000_000) // >1 GB estimated peak
         {
             Log($"BoundedParallelDownload: WARNING '{fileName}' - Estimated peak memory={estimatedPeakMemory:N0} bytes " +
-                $"({effectiveConcurrency} parallel x {maxChunkBytes:N0} bytes x 3 copies). " +
+                $"({effectiveConcurrency} parallel x {maxChunkBytes:N0} bytes x 2 copies). " +
                 $"Risk of OutOfMemoryException for large chunks.");
         }
 
-        // Channel capacity is 2x download parallelism so disk writes don't stall network downloads.
-        var channelCapacity = effectiveConcurrency * 2;
+        // Channel capacity is 4× download parallelism to decouple network from disk I/O.
+        // When the disk writer pauses briefly (NTFS journal flush, antivirus scan), the
+        // producers can continue downloading into the channel buffer instead of stalling.
+        // The MemoryBudget prevents OOM regardless of channel size — chunks in the channel
+        // hold their budget allocation until the consumer writes and releases them.
+        var channelCapacity = effectiveConcurrency * 4;
         var channelOptions = new BoundedChannelOptions(channelCapacity)
         {
             FullMode = BoundedChannelFullMode.Wait,
             SingleReader = true,
             SingleWriter = false
         };
-        var channel = Channel.CreateBounded<(int index, byte[] data)>(channelOptions);
+        var channel = Channel.CreateBounded<(int index, byte[] data, int length)>(channelOptions);
         
         using CancellationTokenSource linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Exception? downloadException = null;
@@ -537,18 +571,25 @@ public partial class RestoreService
 
                     var downloadTask = Task.Run(async () =>
                     {
+                        // Two-phase memory budget for accurate memory modeling:
+                        // Phase A: Acquire 2× chunk size before download (encrypted + plaintext overlap during DecryptInto)
+                        // Phase B: Release 1× after download returns (encrypted buffer freed inside blob service)
+                        // Phase C: Consumer releases remaining 1× after writing plaintext to disk
+                        var chunkMemoryCost = (long)chunk.Length * 2;
+                        await memoryBudget.AcquireAsync(chunkMemoryCost, linkedCts.Token);
                         try
                         {
                             linkedCts.Token.ThrowIfCancellationRequested();
 
                             // Download with retry for transient Azure failures (503, timeouts).
                             // At 192 concurrent downloads, transient errors are expected.
-                            byte[]? chunkData = null;
+                            byte[]? chunkBuffer = null;
+                            int chunkLength = 0;
                             for (var attempt = 0; attempt <= MaxChunkRetries; attempt++)
                             {
                                 try
                                 {
-                                    chunkData = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, linkedCts.Token);
+                                    (chunkBuffer, chunkLength) = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, linkedCts.Token);
                                     break; // success
                                 }
                                 catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))
@@ -564,26 +605,33 @@ public partial class RestoreService
                             }
 
                             diag.RecordChunk("Downloaded", chunk.Index, chunk.Hash,
-                                chunkData!.Length, extra: $"blob={chunk.BlobName}, expectedLen={chunk.Length}");
-                            VerifyChunkIntegrity(chunkData!, chunk, file.LocalPath);
+                                chunkLength, extra: $"blob={chunk.BlobName}, expectedLen={chunk.Length}");
+                            VerifyChunkIntegrity(chunkBuffer.AsSpan(0, chunkLength), chunk, file.LocalPath);
                             diag.RecordChunk("Verified", chunk.Index, chunk.Hash,
-                                chunkData.Length, extra: "hash+size OK");
+                                chunkLength, extra: "hash+size OK");
 
-                            await channel.Writer.WriteAsync((chunk.Index, chunkData), linkedCts.Token);
+                            // Phase B: Encrypted buffer was returned inside DownloadChunkStreamingAsync.
+                            // Release that portion now — only the plaintext buffer remains in the channel.
+                            memoryBudget.Release(chunk.Length);
+
+                            await channel.Writer.WriteAsync((chunk.Index, chunkBuffer!, chunkLength), linkedCts.Token);
 
                             var count = Interlocked.Increment(ref chunksDownloaded);
                             if (count % 50 == 0 || count == sortedChunks.Count)
                             {
                                 Log($"BoundedParallelDownload.Producer: '{fileName}' downloaded {count}/{sortedChunks.Count} chunks, " +
-                                    $"lastChunkSize={chunkData.Length:N0}, GC.TotalMemory={GC.GetTotalMemory(false):N0}");
+                                    $"lastChunkSize={chunkLength:N0}, GC.TotalMemory={GC.GetTotalMemory(false):N0}");
                             }
                         }
                         catch (OperationCanceledException)
                         {
+                            // Download failed before Phase B release — release the full 2× cost
+                            memoryBudget.Release(chunkMemoryCost);
                             throw;
                         }
                         catch (Exception ex)
                         {
+                            memoryBudget.Release(chunkMemoryCost);
                             var wasFirst = downloadException == null;
                             diag.RecordChunk("DownloadFailed", chunk.Index, chunk.Hash, chunk.Length,
                                 extra: $"error={ex.GetType().Name}: {ex.Message}, firstError={wasFirst}");
@@ -640,7 +688,7 @@ public partial class RestoreService
         string? computedFileHash = null;
         var writerTask = Task.Run(async () =>
         {
-            var pendingChunks = new Dictionary<int, byte[]>();
+            var pendingChunks = new Dictionary<int, (byte[] data, int length)>();
             int nextChunkToWrite = 0;
             using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
@@ -663,24 +711,30 @@ public partial class RestoreService
 
             try
             {
-                await foreach (var (index, data) in channel.Reader.ReadAllAsync(linkedCts.Token))
+                await foreach (var (index, data, length) in channel.Reader.ReadAllAsync(linkedCts.Token))
                 {
                     if (index == nextChunkToWrite)
                     {
-                        await outputStream.WriteAsync(data, linkedCts.Token);
-                        incrementalHash.AppendData(data);
-                        currentBytes += data.Length;
+                        await outputStream.WriteAsync(data.AsMemory(0, length), linkedCts.Token);
+                        incrementalHash.AppendData(data.AsSpan(0, length));
+                        currentBytes += length;
                         chunksWritten++;
                         nextChunkToWrite++;
+                        ArrayPool<byte>.Shared.Return(data, clearArray: true);
+                        // Phase C: Release remaining 1× for plaintext buffer
+                        // (producer already released the encrypted buffer portion in Phase B)
+                        memoryBudget.Release(length);
 
-                        while (pendingChunks.TryGetValue(nextChunkToWrite, out var pendingData))
+                        while (pendingChunks.TryGetValue(nextChunkToWrite, out var pending))
                         {
                             pendingChunks.Remove(nextChunkToWrite);
-                            await outputStream.WriteAsync(pendingData, linkedCts.Token);
-                            incrementalHash.AppendData(pendingData);
-                            currentBytes += pendingData.Length;
+                            await outputStream.WriteAsync(pending.data.AsMemory(0, pending.length), linkedCts.Token);
+                            incrementalHash.AppendData(pending.data.AsSpan(0, pending.length));
+                            currentBytes += pending.length;
                             chunksWritten++;
                             nextChunkToWrite++;
+                            ArrayPool<byte>.Shared.Return(pending.data, clearArray: true);
+                            memoryBudget.Release(pending.length);
                         }
 
                         // Throttled progress reporting to reduce UI thread pressure
@@ -700,10 +754,10 @@ public partial class RestoreService
                     }
                     else
                     {
-                        pendingChunks[index] = data;
+                        pendingChunks[index] = (data, length);
                         if (pendingChunks.Count % 10 == 0 || pendingChunks.Count > effectiveConcurrency)
                         {
-                            var bufferedBytes = pendingChunks.Values.Sum(d => (long)d.Length);
+                            var bufferedBytes = pendingChunks.Values.Sum(d => (long)d.length);
                             Log($"BoundedParallelDownload.Consumer: '{fileName}' buffering chunk {index} (waiting for {nextChunkToWrite}), " +
                                 $"{pendingChunks.Count} chunks buffered ({bufferedBytes:N0} bytes), " +
                                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
@@ -744,6 +798,26 @@ public partial class RestoreService
                         $"tempPath={tempPath}");
                 }
                 throw;
+            }
+            finally
+            {
+                // Drain any chunks stuck in the reorder buffer on error/cancellation.
+                // Without this, their ArrayPool buffers leak and their budget allocations
+                // are never released — reducing available budget for subsequent files
+                // in a shared multi-file restore.
+                // These chunks already had Phase B release (encrypted portion) by the producer,
+                // so only release the remaining 1× plaintext portion here.
+                if (pendingChunks.Count > 0)
+                {
+                    Log($"BoundedParallelDownload.Consumer: Draining {pendingChunks.Count} pending chunks " +
+                        $"(returning buffers and releasing budget)");
+                    foreach (var (_, pending) in pendingChunks)
+                    {
+                        ArrayPool<byte>.Shared.Return(pending.data, clearArray: true);
+                        memoryBudget.Release(pending.length);
+                    }
+                    pendingChunks.Clear();
+                }
             }
         }, linkedCts.Token);
         

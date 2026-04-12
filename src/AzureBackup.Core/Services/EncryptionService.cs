@@ -31,6 +31,14 @@ public class EncryptionService : IDisposable
     // Format version for backward compatibility
     private const byte CurrentFormatVersion = 1;
 
+    /// <summary>
+    /// Total byte overhead added by encryption: magic(4) + version(1) + nonce(12) + tag(16) + CRC32(4) = 37.
+    /// Use this to compute required buffer sizes for <see cref="EncryptInto"/> and <see cref="DecryptInto"/>:
+    /// encrypted size = plaintext size + EncryptionOverhead,
+    /// plaintext size = encrypted size - EncryptionOverhead.
+    /// </summary>
+    public const int EncryptionOverhead = 4 + 1 + NonceSize + TagSize + ChecksumSize; // 37
+
     public bool IsInitialized => _derivedKey != null;
     
     /// <summary>
@@ -141,10 +149,20 @@ public class EncryptionService : IDisposable
     /// <summary>
     /// Computes HMAC-SHA256 of a string using the derived encryption key.
     /// Convenience overload for path-based blob name generation.
+    /// Uses stackalloc for typical file paths to avoid a heap allocation per call.
     /// </summary>
     public string ComputeHmacHex(string input)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(input);
+
+        var maxByteCount = Encoding.UTF8.GetMaxByteCount(input.Length);
+        if (maxByteCount <= 1024)
+        {
+            Span<byte> buffer = stackalloc byte[maxByteCount];
+            var bytesWritten = Encoding.UTF8.GetBytes(input, buffer);
+            return ComputeHmacHex(buffer[..bytesWritten]);
+        }
+
         return ComputeHmacHex(Encoding.UTF8.GetBytes(input));
     }
 
@@ -242,6 +260,58 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
+    /// Encrypts data into a caller-provided buffer, avoiding a heap allocation.
+    /// The destination must be at least <c>plaintext.Length + <see cref="EncryptionOverhead"/></c> bytes.
+    /// Use this with <see cref="System.Buffers.ArrayPool{T}"/> to eliminate LOH allocations
+    /// on the upload hot path.
+    /// </summary>
+    /// <returns>The number of bytes written to <paramref name="destination"/>.</returns>
+    public int EncryptInto(ReadOnlySpan<byte> plaintext, Span<byte> destination)
+    {
+        var totalSize = plaintext.Length + EncryptionOverhead;
+        if (destination.Length < totalSize)
+            throw new ArgumentException(
+                $"Destination too small: need {totalSize} bytes, got {destination.Length}",
+                nameof(destination));
+
+        Span<byte> keyCopy = stackalloc byte[KeySize];
+        lock (_keyLock)
+        {
+            EnsureInitialized();
+            _derivedKey.AsSpan().CopyTo(keyCopy);
+        }
+
+        try
+        {
+            var offset = 0;
+            MagicHeader.CopyTo(destination[offset..]);
+            offset += MagicHeader.Length;
+
+            destination[offset] = CurrentFormatVersion;
+            offset += 1;
+
+            var nonceSpan = destination.Slice(offset, NonceSize);
+            RandomNumberGenerator.Fill(nonceSpan);
+            offset += NonceSize;
+
+            var ciphertextSpan = destination.Slice(offset, plaintext.Length);
+            var tagSpan = destination.Slice(offset + plaintext.Length, TagSize);
+
+            using AesGcm aes = new(keyCopy, TagSize);
+            aes.Encrypt(nonceSpan, plaintext, ciphertextSpan, tagSpan);
+
+            var dataForChecksum = destination[..(totalSize - ChecksumSize)];
+            WriteChecksum(dataForChecksum, destination.Slice(totalSize - ChecksumSize, ChecksumSize));
+
+            return totalSize;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyCopy);
+        }
+    }
+
+    /// <summary>
     /// Decrypts data that was encrypted with AES-256-GCM.
     /// Verifies integrity before decryption.
     /// Expected format: [4-byte magic][1-byte version][12-byte nonce][ciphertext][16-byte tag][4-byte CRC32]
@@ -322,7 +392,89 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
-    /// Attempts best-effort decryption, skipping the CRC32 integrity check.
+    /// Decrypts data into a caller-provided buffer, avoiding a heap allocation.
+    /// The destination must be at least <c>encryptedData.Length - <see cref="EncryptionOverhead"/></c> bytes.
+    /// Use this with <see cref="System.Buffers.ArrayPool{T}"/> to eliminate LOH allocations
+    /// on the download hot path.
+    /// </summary>
+    /// <returns>The number of plaintext bytes written to <paramref name="destination"/>.</returns>
+    public int DecryptInto(ReadOnlySpan<byte> encryptedData, Span<byte> destination)
+    {
+        if (encryptedData.Length < EncryptionOverhead)
+        {
+            Log($"DecryptInto: Data too short ({encryptedData.Length} bytes, min={EncryptionOverhead})");
+            throw new CryptographicException("Encrypted data is too short or corrupted");
+        }
+
+        var ciphertextLength = encryptedData.Length - EncryptionOverhead;
+        if (destination.Length < ciphertextLength)
+            throw new ArgumentException(
+                $"Destination too small: need {ciphertextLength} bytes, got {destination.Length}",
+                nameof(destination));
+
+        // Verify checksum
+        var dataWithoutChecksum = encryptedData[..^ChecksumSize];
+        var storedChecksum = encryptedData[^ChecksumSize..];
+        Span<byte> computedChecksum = stackalloc byte[ChecksumSize];
+        WriteChecksum(dataWithoutChecksum, computedChecksum);
+
+        if (!storedChecksum.SequenceEqual(computedChecksum))
+        {
+            Log($"DecryptInto: CRC32 checksum mismatch (data length={encryptedData.Length})");
+            throw new DataIntegrityException("Data integrity check failed - file may be corrupted");
+        }
+
+        // Verify magic header
+        var magic = dataWithoutChecksum[..MagicHeader.Length];
+        if (!magic.SequenceEqual(MagicHeader))
+        {
+            Log($"DecryptInto: Invalid magic header");
+            throw new DataIntegrityException("Invalid data format - not encrypted by this application");
+        }
+
+        var version = dataWithoutChecksum[MagicHeader.Length];
+        if (version > CurrentFormatVersion)
+        {
+            Log($"DecryptInto: Unsupported format version {version}");
+            throw new DataIntegrityException($"Unsupported encryption format version {version}. Please update the application.");
+        }
+
+        Span<byte> keyCopy = stackalloc byte[KeySize];
+        lock (_keyLock)
+        {
+            EnsureInitialized();
+            _derivedKey.AsSpan().CopyTo(keyCopy);
+        }
+
+        try
+        {
+            var offset = MagicHeader.Length + 1;
+            var nonce = dataWithoutChecksum.Slice(offset, NonceSize);
+            offset += NonceSize;
+
+            var ciphertext = dataWithoutChecksum.Slice(offset, ciphertextLength);
+            offset += ciphertextLength;
+
+            var tag = dataWithoutChecksum.Slice(offset, TagSize);
+
+            using AesGcm aes = new(keyCopy, TagSize);
+            aes.Decrypt(nonce, ciphertext, tag, destination[..ciphertextLength]);
+
+            return ciphertextLength;
+        }
+        catch (CryptographicException ex)
+        {
+            Log($"DecryptInto: AES-GCM decryption failed: {ex.Message}");
+            throw new DataIntegrityException("Decryption failed - wrong password or corrupted data");
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyCopy);
+        }
+    }
+
+    /// <summary>
+    /// Attempts best-effort decryption
     /// Use this for corrupted file recovery — if the CRC trailer bytes were corrupted
     /// but the ciphertext and AES-GCM tag are intact, decryption will succeed.
     /// Returns null if decryption is completely impossible (AES-GCM tag mismatch).
@@ -354,12 +506,11 @@ public class EncryptionService : IDisposable
             return null;
         }
 
-        byte[] keyCopy;
+        Span<byte> keyCopy = stackalloc byte[KeySize];
         lock (_keyLock)
         {
             EnsureInitialized();
-            keyCopy = new byte[KeySize];
-            Array.Copy(_derivedKey!, keyCopy, KeySize);
+            _derivedKey.AsSpan().CopyTo(keyCopy);
         }
 
         try

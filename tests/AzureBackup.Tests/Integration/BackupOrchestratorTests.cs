@@ -680,6 +680,89 @@ public class BackupOrchestratorTests : IAsyncLifetime
 
     #endregion
 
+    #region Memory Budget Tests
+
+    [Fact]
+    public async Task WhenMemoryBudgetEnabledThenBackupSucceedsWithLimitedConcurrency()
+    {
+        // Arrange
+        await _orchestrator.InitializeAsync(TestPassword);
+
+        var config = _databaseService.GetConfiguration();
+        config.MemoryLimitEnabled = true;
+        config.MemoryLimitMB = 512;
+        _databaseService.SaveConfiguration(config);
+
+        // Create multiple files that will produce several chunks
+        var files = new List<string>();
+        for (var i = 0; i < 5; i++)
+        {
+            var filePath = Path.Combine(_sourceDirectory, $"budget_test_{i}.bin");
+            await File.WriteAllBytesAsync(filePath, CreateRandomContent(256 * 1024));
+            files.Add(filePath);
+        }
+
+        // Act: backup with budget-aware path
+        await _orchestrator.BackupFilesAsync(files);
+
+        // Assert: all files backed up successfully
+        foreach (var filePath in files)
+        {
+            var backedUp = _databaseService.GetBackedUpFile(filePath);
+            Assert.NotNull(backedUp);
+            Assert.Equal(BackupStatus.Completed, backedUp.Status);
+        }
+    }
+
+    [Fact]
+    public async Task WhenMemoryBudgetDisabledThenBackupUsesUnlimitedBudget()
+    {
+        // Arrange
+        await _orchestrator.InitializeAsync(TestPassword);
+
+        var config = _databaseService.GetConfiguration();
+        config.MemoryLimitEnabled = false;
+        _databaseService.SaveConfiguration(config);
+
+        var filePath = Path.Combine(_sourceDirectory, "no_budget.bin");
+        await File.WriteAllBytesAsync(filePath, CreateRandomContent(128 * 1024));
+
+        // Act
+        await _orchestrator.BackupFilesAsync([filePath]);
+
+        // Assert
+        var backedUp = _databaseService.GetBackedUpFile(filePath);
+        Assert.NotNull(backedUp);
+        Assert.Equal(BackupStatus.Completed, backedUp.Status);
+    }
+
+    [Fact]
+    public async Task WhenExplicitBudgetProvidedThenConsumerRespectsIt()
+    {
+        // Arrange
+        await _orchestrator.InitializeAsync(TestPassword);
+
+        var filePath = Path.Combine(_sourceDirectory, "explicit_budget.bin");
+        await File.WriteAllBytesAsync(filePath, CreateRandomContent(256 * 1024));
+
+        // Very small budget — forces sequential chunk uploads
+        using var budget = new MemoryBudget(512 * 1024);
+
+        // Act
+        var success = await _orchestrator.BackupFileAsync(filePath, progress: null, budget);
+
+        // Assert
+        Assert.True(success);
+        var backedUp = _databaseService.GetBackedUpFile(filePath);
+        Assert.NotNull(backedUp);
+        Assert.Equal(BackupStatus.Completed, backedUp.Status);
+
+        // Budget should be fully released after backup completes
+        Assert.Equal(0, budget.UsedBytes);
+    }
+
+    #endregion
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)
@@ -706,7 +789,7 @@ internal class TrackingBlobService : InMemoryBlobService
     {
     }
 
-    public override async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+    public override async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Cool,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
@@ -714,7 +797,7 @@ internal class TrackingBlobService : InMemoryBlobService
         return await base.UploadChunkAsync(chunkData, chunkHash, storageTier, progress, cancellationToken);
     }
 
-    public override async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+    public override async Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Cool,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
@@ -745,7 +828,7 @@ internal class StorageTierTrackingBlobService : InMemoryBlobService
     {
     }
 
-    public override async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+    public override async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Cool,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
@@ -753,7 +836,7 @@ internal class StorageTierTrackingBlobService : InMemoryBlobService
         return await base.UploadChunkAsync(chunkData, chunkHash, storageTier, progress, cancellationToken);
     }
 
-    public override async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+    public override async Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Cool,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {

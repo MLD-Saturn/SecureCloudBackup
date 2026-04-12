@@ -546,7 +546,7 @@ public class BoundedParallelDownloadTests : IAsyncLifetime
 
             // Act & Assert - Should fail but not hang
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var result = await restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cts.Token);
+            var result = await restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cancellationToken: cts.Token);
 
             Assert.False(result);
 
@@ -834,7 +834,7 @@ public class RestoreServiceThroughputTests : IAsyncLifetime
 
             // Act
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var result = await restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cts.Token);
+            var result = await restoreService.RestoreFileAsync(backedUp, restorePath, true, null, cancellationToken: cts.Token);
 
             // Assert — should fail without retries
             Assert.False(result, "Non-transient errors should not be retried");

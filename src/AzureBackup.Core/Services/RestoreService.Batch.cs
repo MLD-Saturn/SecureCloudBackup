@@ -206,6 +206,12 @@ public partial class RestoreService
 
         Log($"MirrorSyncToLocalAsync: Starting parallel restore phase ({totalOperations} files, max {MaxParallelFileRestores} concurrent)");
 
+        // Shared memory budget for the entire mirror sync operation.
+        // Reserve overhead for concurrent FileStream buffers (4 MB each).
+        const long FileStreamOverhead = (long)MaxParallelFileRestores * LargeFileStreamBufferSize;
+        var mirrorConfig = _databaseService.GetConfiguration();
+        using var memoryBudget = MemoryBudget.FromConfig(mirrorConfig, FileStreamOverhead);
+
         await Parallel.ForEachAsync(
             fileList.Select((file, index) => (file, index)),
             new ParallelOptions
@@ -262,7 +268,7 @@ public partial class RestoreService
 
                     var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
                     var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
-                        backupFile, targetPath, overwriteExisting: true, individualFileProgress, logPrefix, ct);
+                        backupFile, targetPath, overwriteExisting: true, individualFileProgress, logPrefix, memoryBudget, ct);
 
                     lock (resultLock)
                     {
@@ -388,12 +394,13 @@ public partial class RestoreService
         bool overwriteExisting,
         IProgress<(long current, long total)>? fileProgress,
         string logPrefix,
+        MemoryBudget? memoryBudget,
         CancellationToken cancellationToken)
     {
         try
         {
             var success = await RestoreFileAsync(file, targetPath, overwriteExisting,
-                fileProgress, cancellationToken);
+                fileProgress, memoryBudget, cancellationToken);
 
             if (success)
             {
@@ -690,6 +697,16 @@ public partial class RestoreService
         Log($"RestoreFilesWithRemappingAsync: {smallFiles.Count} small files (≤100 MB, max {MaxParallelSmallFiles} concurrent), " +
             $"{largeFiles.Count} large files (max {MaxParallelFileRestores} concurrent)");
 
+        // Create a shared memory budget from the user's config.
+        // All concurrent file restores share this single budget so the total
+        // in-flight chunk memory stays within the user's limit.
+        // Reserve overhead for concurrent FileStream buffers (4 MB each).
+        const long FileStreamOverhead = (long)MaxParallelFileRestores * LargeFileStreamBufferSize;
+        var config = _databaseService.GetConfiguration();
+        using var memoryBudget = MemoryBudget.FromConfig(config, FileStreamOverhead);
+
+        Log($"RestoreFilesWithRemappingAsync: memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")}");
+
         // Run small and large file restores concurrently — they use different resources:
         // small files are latency-bound (HTTP round-trips), large files are bandwidth-bound (chunk streaming).
         // Running them together avoids wasting network bandwidth while small files do metadata I/O.
@@ -710,7 +727,7 @@ public partial class RestoreService
                     await RestoreOneFileWithRemappingAsync(
                         item.file, item.targetPath, item.originalIndex, totalFiles,
                         overwriteExisting, progress, fileByteProgress, result, resultLock,
-                        completedFiles, ct);
+                        completedFiles, memoryBudget, ct);
                 }));
         }
 
@@ -729,7 +746,7 @@ public partial class RestoreService
                     await RestoreOneFileWithRemappingAsync(
                         item.file, item.targetPath, item.originalIndex, totalFiles,
                         overwriteExisting, progress, fileByteProgress, result, resultLock,
-                        completedFiles, ct);
+                        completedFiles, memoryBudget, ct);
                 }));
         }
 
@@ -744,7 +761,7 @@ public partial class RestoreService
 
     /// <summary>
     /// Restores a single file within a parallel batch, with path validation and thread-safe result aggregation.
-    /// Shared by both <see cref="RestoreFilesAsync"/> and <see cref="RestoreFilesWithRemappingAsync"/>.
+    /// Shared by <see cref="RestoreFilesWithRemappingAsync"/> and <see cref="MirrorSyncToLocalAsync"/>.
     /// </summary>
     private async Task RestoreOneFileWithRemappingAsync(
         BackedUpFile file,
@@ -757,6 +774,7 @@ public partial class RestoreService
         RestoreResult result,
         object resultLock,
         int[] completedFiles,
+        MemoryBudget? memoryBudget,
         CancellationToken cancellationToken)
     {
         var done = Interlocked.Increment(ref completedFiles[0]);
@@ -793,7 +811,7 @@ public partial class RestoreService
 
         var logPrefix = $"RestoreFilesWithRemappingAsync: [{done}/{totalFiles}]";
         var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-            file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, cancellationToken);
+            file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, memoryBudget, cancellationToken);
 
         lock (resultLock)
         {

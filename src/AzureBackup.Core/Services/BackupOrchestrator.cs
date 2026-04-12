@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
@@ -118,17 +119,6 @@ public partial class BackupOrchestrator : IAsyncDisposable
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [Orchestrator] {message}");
     }
     
-    /// <summary>
-    /// Formats a byte count as a human-readable string (e.g., "1.5 GB").
-    /// </summary>
-    private static string FormatBytes(long bytes) => bytes switch
-    {
-        >= 1L << 30 => $"{bytes / (double)(1L << 30):F1} GB",
-        >= 1L << 20 => $"{bytes / (double)(1L << 20):F1} MB",
-        >= 1L << 10 => $"{bytes / (double)(1L << 10):F1} KB",
-        _ => $"{bytes} B"
-    };
-
     /// <summary>
     /// Gets the WatchedFolder that contains the specified file path.
     /// Returns null if the file is not in any watched folder.
@@ -608,30 +598,11 @@ public partial class BackupOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
-    /// Pauses the backup service.
-    /// </summary>
-    public void Pause()
-    {
-        _isPaused = true;
-        StatusChanged?.Invoke(this, "Backup service paused");
-    }
-
-    /// <summary>
-    /// Resumes the backup service.
-    /// </summary>
-    public void Resume()
-    {
-        _isPaused = false;
-        StatusChanged?.Invoke(this, "Backup service resumed");
-    }
-
-
-    /// <summary>
     /// Backs up a single file.
     /// </summary>
     public Task<bool> BackupFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        return BackupFileAsync(filePath, progress: null, cancellationToken);
+        return BackupFileAsync(filePath, progress: null, memoryBudget: null, cancellationToken);
     }
 
     /// <summary>
@@ -639,10 +610,13 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     /// <param name="filePath">Path to the file to backup</param>
     /// <param name="progress">Reports byte-level progress (bytes completed, total bytes)</param>
+    /// <param name="memoryBudget">Optional memory budget for throttling parallel chunk uploads.
+    /// When null, upload parallelism is unbounded (existing behavior).</param>
     /// <param name="cancellationToken">Cancellation token</param>
     public async Task<bool> BackupFileAsync(
         string filePath, 
         IProgress<(long current, long total)>? progress,
+        MemoryBudget? memoryBudget = null,
         CancellationToken cancellationToken = default)
     {
         var diag = new FileOperationDiagnostics(filePath, "Backup", DiagnosticsDirectory);
@@ -690,7 +664,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             }
 
             var fileName = Path.GetFileName(filePath);
-            StatusChanged?.Invoke(this, $"Analyzing: {fileName} ({FormatBytes(fileInfo.Length)})");
+            StatusChanged?.Invoke(this, $"Analyzing: {fileName} ({FormatHelper.FormatBytes(fileInfo.Length)})");
 
             diag.Record($"File: size={fileInfo.Length:N0}, lastWrite={fileInfo.LastWriteTimeUtc:O}, isNew={existingFile == null}");
             if (existingFile != null)
@@ -722,7 +696,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             // CDC progress: report chunking phase to the user so large files don't appear hung
             Progress<(long bytesProcessed, long totalBytes, int chunksFound)> cdcProgress = new(p =>
             {
-                StatusChanged?.Invoke(this, $"Chunking: {fileName} — {FormatBytes(p.bytesProcessed)}/{FormatBytes(p.totalBytes)} ({p.chunksFound} chunks)");
+                StatusChanged?.Invoke(this, $"Chunking: {fileName} — {FormatHelper.FormatBytes(p.bytesProcessed)}/{FormatHelper.FormatBytes(p.totalBytes)} ({p.chunksFound} chunks)");
             });
 
             // Producer: CDC pass + filtered seek pass, writes changed chunks to channel
@@ -748,27 +722,36 @@ public partial class BackupOrchestrator : IAsyncDisposable
             {
                 await foreach (var payload in channel.Reader.ReadAllAsync(cancellationToken))
                 {
+                    // Memory budget: acquire the cost of plaintext + encrypted copy.
+                    // EncryptInto writes into a rented buffer inside the blob service,
+                    // so the actual in-flight memory per chunk is ~2× plaintext size.
+                    var chunkMemoryCost = (long)payload.Length * 2;
+                    if (memoryBudget != null)
+                        await memoryBudget.AcquireAsync(chunkMemoryCost, cancellationToken);
                     try
                     {
+                        // Slice the rented buffer to actual data extent for upload
+                        var chunkData = payload.Data.AsMemory(0, payload.Length);
+
                         // Snapshot first+last bytes of plaintext BEFORE upload to detect
                         // race conditions where ZeroMemory in another consumer corrupts
                         // the buffer before Encrypt finishes reading it.
-                        var preFirstByte = payload.Data.Length > 0 ? payload.Data[0] : (byte)0;
-                        var preLastByte = payload.Data.Length > 1 ? payload.Data[^1] : (byte)0;
+                        var preFirstByte = payload.Length > 0 ? payload.Data[0] : (byte)0;
+                        var preLastByte = payload.Length > 1 ? payload.Data[payload.Length - 1] : (byte)0;
 
                         diag.RecordChunk("PreUpload", payload.Info.Index, payload.Info.Hash,
-                            payload.Data.Length,
+                            payload.Length,
                             extra: $"isNew={isNewFile}, tier={storageTier}, first=0x{preFirstByte:X2}, last=0x{preLastByte:X2}");
 
                         payload.Info.BlobName = isNewFile
-                            ? await _blobService.UploadChunkDirectAsync(payload.Data, payload.Info.Hash, storageTier,
+                            ? await _blobService.UploadChunkDirectAsync(chunkData, payload.Info.Hash, storageTier,
                                 new Progress<long>(b =>
                                 {
                                     var uploaded = Interlocked.Add(ref bytesUploaded, b);
                                     progress?.Report((uploaded, totalFileSize));
                                 }),
                                 cancellationToken)
-                            : await _blobService.UploadChunkAsync(payload.Data, payload.Info.Hash, storageTier,
+                            : await _blobService.UploadChunkAsync(chunkData, payload.Info.Hash, storageTier,
                                 new Progress<long>(b =>
                                 {
                                     var uploaded = Interlocked.Add(ref bytesUploaded, b);
@@ -779,12 +762,12 @@ public partial class BackupOrchestrator : IAsyncDisposable
                         // Check if plaintext was zeroed during upload (race condition indicator).
                         // Encrypt copies into its own buffer so this SHOULD still be non-zero
                         // unless another consumer's ZeroMemory hit this buffer.
-                        var postFirstByte = payload.Data.Length > 0 ? payload.Data[0] : (byte)0;
-                        var postLastByte = payload.Data.Length > 1 ? payload.Data[^1] : (byte)0;
+                        var postFirstByte = payload.Length > 0 ? payload.Data[0] : (byte)0;
+                        var postLastByte = payload.Length > 1 ? payload.Data[payload.Length - 1] : (byte)0;
                         var bufferIntact = preFirstByte == postFirstByte && preLastByte == postLastByte;
 
                         diag.RecordChunk("Uploaded", payload.Info.Index, payload.Info.Hash,
-                            payload.Data.Length,
+                            payload.Length,
                             extra: $"blob={payload.Info.BlobName}, bufferIntact={bufferIntact}, " +
                                    $"post_first=0x{postFirstByte:X2}, post_last=0x{postLastByte:X2}");
 
@@ -796,14 +779,16 @@ public partial class BackupOrchestrator : IAsyncDisposable
                         }
 
                         var completed = Interlocked.Increment(ref chunksUploadedCount);
-                        StatusChanged?.Invoke(this, $"Uploading: {fileName} — chunk {completed} ({FormatBytes(Interlocked.Read(ref bytesUploaded))}/{FormatBytes(totalFileSize)})");
+                        StatusChanged?.Invoke(this, $"Uploading: {fileName} — chunk {completed} ({FormatHelper.FormatBytes(Interlocked.Read(ref bytesUploaded))}/{FormatHelper.FormatBytes(totalFileSize)})");
                     }
                     finally
                     {
                         diag.RecordChunk("ZeroMemory", payload.Info.Index, payload.Info.Hash,
-                            payload.Data.Length,
-                            extra: $"firstByte=0x{(payload.Data.Length > 0 ? payload.Data[0] : 0):X2}");
-                        CryptographicOperations.ZeroMemory(payload.Data);
+                            payload.Length,
+                            extra: $"firstByte=0x{(payload.Length > 0 ? payload.Data[0] : 0):X2}");
+                        CryptographicOperations.ZeroMemory(payload.Data.AsSpan(0, payload.Length));
+                        ArrayPool<byte>.Shared.Return(payload.Data);
+                        memoryBudget?.Release(chunkMemoryCost);
                     }
                 }
             }).ToArray();
@@ -906,7 +891,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 TotalChunks = chunks.Count
             });
 
-            StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatBytes(bytesUploaded)})");
+            StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatHelper.FormatBytes(bytesUploaded)})");
 
             return true;
         }
@@ -983,7 +968,16 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 // Process backup files in parallel
                 if (backups.Count > 0)
                 {
-                    Log($"RunBackupLoopAsync: Processing {backups.Count} files in parallel (max {MaxParallelFileBackups})");
+                    // Create a shared memory budget for this batch.
+                    // Re-read config each iteration so slider changes take effect immediately.
+                    // Reserve 128 MB for the CDC buffer (ArrayPool rental in ChunkingService).
+                    const long CdcBufferOverhead = 128L * 1024 * 1024;
+                    var batchConfig = _databaseService.GetConfiguration();
+                    using var batchBudget = MemoryBudget.FromConfig(batchConfig, CdcBufferOverhead);
+
+                    Log($"RunBackupLoopAsync: Processing {backups.Count} files in parallel " +
+                        $"(max {MaxParallelFileBackups}, " +
+                        $"memoryBudget={(!batchBudget.IsUnlimited ? $"{batchConfig.MemoryLimitMB} MB" : "unlimited")})");
 
                     await Parallel.ForEachAsync(
                         backups,
@@ -994,7 +988,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                         },
                         async (change, ct) =>
                         {
-                            await BackupFileAsync(change.FilePath, ct);
+                            await BackupFileAsync(change.FilePath, progress: null, batchBudget, ct);
                             _databaseService.RemovePendingChange(change.FilePath);
                         });
                 }

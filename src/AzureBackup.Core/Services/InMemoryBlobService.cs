@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
@@ -110,19 +111,18 @@ public class InMemoryBlobService : IBlobStorageService
 
     #region Blob Operations
 
-    public virtual async Task<string> UploadChunkAsync(byte[] chunkData, string chunkHash, 
+    public virtual async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentNullException.ThrowIfNull(chunkData);
         BlobNameValidator.ValidateChunkHash(chunkHash);
 
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk");
 
         var blobName = $"chunks/{chunkHash}";
-        
+
         // Check for deduplication
         if (_blobs.ContainsKey(blobName))
         {
@@ -150,7 +150,7 @@ public class InMemoryBlobService : IBlobStorageService
         }
 
         // Encrypt and store
-        var encryptedData = _encryptionService.Encrypt(chunkData);
+        var encryptedData = _encryptionService.Encrypt(chunkData.Span);
         _blobs[blobName] = encryptedData;
         _blobTiers[blobName] = storageTier;
         
@@ -165,21 +165,20 @@ public class InMemoryBlobService : IBlobStorageService
     /// Uploads an encrypted chunk directly without checking if it exists.
     /// For InMemoryBlobService, this behaves the same as UploadChunkAsync but skips the dedup check.
     /// </summary>
-    public virtual async Task<string> UploadChunkDirectAsync(byte[] chunkData, string chunkHash, 
+    public virtual async Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentNullException.ThrowIfNull(chunkData);
         BlobNameValidator.ValidateChunkHash(chunkHash);
 
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk direct");
 
         var blobName = $"chunks/{chunkHash}";
-        
+
         // Direct upload - no deduplication check (for new files)
-        var encryptedData = _encryptionService.Encrypt(chunkData);
+        var encryptedData = _encryptionService.Encrypt(chunkData.Span);
         _blobs[blobName] = encryptedData;
         _blobTiers[blobName] = storageTier;
         
@@ -242,10 +241,14 @@ public class InMemoryBlobService : IBlobStorageService
     /// <summary>
     /// Streaming download variant — in-memory implementation delegates to <see cref="DownloadChunkAsync"/>
     /// since there is no actual I/O stream to optimize.
+    /// Copies into a rented buffer so the consumer can safely call ArrayPool.Return.
     /// </summary>
-    public virtual Task<byte[]> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
+    public virtual async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
     {
-        return DownloadChunkAsync(blobName, cancellationToken);
+        var data = await DownloadChunkAsync(blobName, cancellationToken);
+        var rented = ArrayPool<byte>.Shared.Rent(data.Length);
+        data.CopyTo(rented, 0);
+        return (rented, data.Length);
     }
 
     /// <summary>
@@ -452,12 +455,11 @@ public class InMemoryBlobService : IBlobStorageService
     /// Verifies that a chunk's content matches the expected data by downloading and comparing.
     /// Used for defense-in-depth verification when deduplication detects a hash match.
     /// </summary>
-    public Task<bool> VerifyChunkIntegrityAsync(string chunkHash, byte[] expectedData,
+    public Task<bool> VerifyChunkIntegrityAsync(string chunkHash, ReadOnlyMemory<byte> expectedData,
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-        ArgumentNullException.ThrowIfNull(expectedData);
 
         var blobName = $"chunks/{chunkHash}";
 
@@ -478,7 +480,7 @@ public class InMemoryBlobService : IBlobStorageService
             }
 
             // Compare data byte-by-byte using constant-time comparison
-            if (!CryptographicOperations.FixedTimeEquals(storedData, expectedData))
+            if (!CryptographicOperations.FixedTimeEquals(storedData, expectedData.Span))
             {
                 throw new HashCollisionException(chunkHash,
                     "Content differs despite matching hash and size. This may indicate data corruption or tampering.");

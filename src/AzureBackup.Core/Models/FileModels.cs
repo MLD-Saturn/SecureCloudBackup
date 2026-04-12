@@ -52,9 +52,10 @@ public class ChunkInfo
 
 /// <summary>
 /// Carries chunk metadata and raw data through the CDC-to-upload pipeline.
-/// The data is zeroed by the consumer after upload.
+/// Data may be a rented ArrayPool buffer (oversized) — use Length for actual data extent.
+/// The consumer returns the buffer to the pool after upload.
 /// </summary>
-public record ChunkPayload(ChunkInfo Info, byte[] Data);
+public record ChunkPayload(ChunkInfo Info, byte[] Data, int Length);
 
 public enum BackupStatus
 {

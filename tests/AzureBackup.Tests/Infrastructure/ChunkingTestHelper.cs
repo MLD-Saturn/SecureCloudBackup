@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Threading.Channels;
 using AzureBackup.Core;
 using AzureBackup.Core.Models;
@@ -28,8 +29,11 @@ internal static class ChunkingTestHelper
 
         channel.Writer.Complete();
 
-        // Drain the channel (we don't need the payloads, just the metadata)
-        await foreach (var _ in channel.Reader.ReadAllAsync(cancellationToken)) { }
+        // Drain the channel — return rented buffers to the pool
+        await foreach (var payload in channel.Reader.ReadAllAsync(cancellationToken))
+        {
+            ArrayPool<byte>.Shared.Return(payload.Data);
+        }
 
         return result;
     }
