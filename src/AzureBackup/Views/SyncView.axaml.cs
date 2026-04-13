@@ -204,7 +204,14 @@ public partial class SyncView : UserControl
         
         // Global handler to reset drag state when pointer is released anywhere
         this.AddHandler(PointerReleasedEvent, OnGlobalPointerReleased, RoutingStrategies.Tunnel);
-        
+
+        // Track pointer position during drag to move the file-count badge
+        this.AddHandler(PointerMovedEvent, OnDragPointerMoved, RoutingStrategies.Tunnel);
+
+        // Resolve drag badge controls
+        _dragBadge = this.FindControl<Border>("DragBadge");
+        _dragBadgeText = this.FindControl<TextBlock>("DragBadgeText");
+
         // Make the view focusable to receive keyboard events
         Focusable = true;
         Focus();
@@ -214,19 +221,53 @@ public partial class SyncView : UserControl
     private bool _isDragging;
     private Point? _dragStartPoint;
     private const double DragThreshold = 5.0; // Minimum pixels to move before starting drag
+
+    // Drag badge controls — resolved once in OnLoaded
+    private Border? _dragBadge;
+    private TextBlock? _dragBadgeText;
     
     private void OnGlobalPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
         // Always reset drag state when mouse is released
         _dragStartPoint = null;
         _isDragging = false;
-        
+        HideDragBadge();
+
         if (DataContext is MainWindowViewModel vm)
         {
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
             vm.DragFileCount = 0;
         }
+    }
+
+    private void OnDragPointerMoved(object? sender, PointerEventArgs e)
+    {
+        if (!_isDragging || _dragBadge == null || !_dragBadge.IsVisible)
+            return;
+
+        var position = e.GetPosition(this);
+        Canvas.SetLeft(_dragBadge, position.X + 16);
+        Canvas.SetTop(_dragBadge, position.Y + 16);
+    }
+
+    private void ShowDragBadge(int fileCount, PointerEventArgs e)
+    {
+        if (_dragBadge == null || _dragBadgeText == null)
+            return;
+
+        _dragBadgeText.Text = $"{fileCount} file{(fileCount != 1 ? "s" : "")}";
+
+        var position = e.GetPosition(this);
+        Canvas.SetLeft(_dragBadge, position.X + 16);
+        Canvas.SetTop(_dragBadge, position.Y + 16);
+        _dragBadge.IsVisible = true;
+    }
+
+    private void HideDragBadge()
+    {
+        if (_dragBadge != null)
+            _dragBadge.IsVisible = false;
     }
     
     private void OnTreePointerReleased(object? sender, PointerReleasedEventArgs e)
@@ -373,9 +414,10 @@ public partial class SyncView : UserControl
 
         vm.DragFileCount = selectedFiles.Count;
         vm.DragDropPreviewText = $"Drag {selectedFiles.Count} file(s) to Azure panel to backup";
-        
+
         _isDragging = true;
-        
+        ShowDragBadge(selectedFiles.Count, e);
+
         try
         {
             // Perform the drag (using legacy DoDragDrop as DoDragDropAsync requires IDataTransfer)
@@ -388,12 +430,13 @@ public partial class SyncView : UserControl
             // Always clear drag state after drag completes (success, cancel, or error)
             _isDragging = false;
             _dragStartPoint = null;
+            HideDragBadge();
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
             vm.DragFileCount = 0;
         }
     }
-    
+
     private async void StartAzureFileDrag(PointerEventArgs e)
     {
         if (DataContext is not MainWindowViewModel vm) return;
@@ -440,9 +483,10 @@ public partial class SyncView : UserControl
         
         vm.DragFileCount = selectedFiles.Count;
         vm.DragDropPreviewText = $"Drag {selectedFiles.Count} file(s) to Local panel to restore";
-        
+
         _isDragging = true;
-        
+        ShowDragBadge(selectedFiles.Count, e);
+
         try
         {
             // Perform the drag (using legacy DoDragDrop as DoDragDropAsync requires IDataTransfer)
@@ -455,6 +499,7 @@ public partial class SyncView : UserControl
             // Always clear drag state after drag completes (success, cancel, or error)
             _isDragging = false;
             _dragStartPoint = null;
+            HideDragBadge();
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
             vm.DragFileCount = 0;

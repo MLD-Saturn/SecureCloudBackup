@@ -8,6 +8,7 @@
              x:Class="AzureBackup.Views.SyncView"
              x:DataType="vm:MainWindowViewModel">
 
+    <Panel>
     <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
         
         <!-- Phase 1: Status Toolbar -->
@@ -482,4 +483,18 @@
             </Grid>
         </Border>
     </Grid>
+
+    <!-- Drag file count badge — positioned near the cursor during drag operations -->
+    <Canvas IsHitTestVisible="False">
+        <Border x:Name="DragBadge" IsVisible="False"
+                Background="#E02196F3" CornerRadius="10" Padding="8,4"
+                BoxShadow="2 2 6 0 #40000000">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <TextBlock Text="📄" FontSize="12"/>
+                <TextBlock x:Name="DragBadgeText" Text="" FontSize="12"
+                           FontWeight="Bold" Foreground="White"/>
+            </StackPanel>
+        </Border>
+    </Canvas>
+    </Panel>
 </UserControl>
