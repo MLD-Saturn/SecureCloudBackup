@@ -674,18 +674,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private bool _isDragOverLocalPanel;
 
     /// <summary>
-    /// Text describing what will happen when files are dropped.
-    /// Set by drag-drop code-behind; not currently bound in AXAML.
-    /// </summary>
-    public string DragDropPreviewText { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Number of files being dragged.
-    /// Set by drag-drop code-behind; not currently bound in AXAML.
-    /// </summary>
-    public int DragFileCount { get; set; }
-
-    /// <summary>
     /// True when a drag operation is in progress.
     /// </summary>
     public bool IsDragging => IsDragOverAzurePanel || IsDragOverLocalPanel;

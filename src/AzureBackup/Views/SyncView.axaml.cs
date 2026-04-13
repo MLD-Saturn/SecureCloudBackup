@@ -237,7 +237,6 @@ public partial class SyncView : UserControl
         {
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
-            vm.DragFileCount = 0;
         }
     }
 
@@ -412,9 +411,6 @@ public partial class SyncView : UserControl
         }
 #pragma warning restore CS0618
 
-        vm.DragFileCount = selectedFiles.Count;
-        vm.DragDropPreviewText = $"Drag {selectedFiles.Count} file(s) to Azure panel to backup";
-
         _isDragging = true;
         ShowDragBadge(selectedFiles.Count, e);
 
@@ -433,7 +429,6 @@ public partial class SyncView : UserControl
             HideDragBadge();
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
-            vm.DragFileCount = 0;
         }
     }
 
@@ -480,9 +475,6 @@ public partial class SyncView : UserControl
         DataObject dataObject = new();
         dataObject.Set(AzureFileDragFormat, selectedFiles);
 #pragma warning restore CS0618
-        
-        vm.DragFileCount = selectedFiles.Count;
-        vm.DragDropPreviewText = $"Drag {selectedFiles.Count} file(s) to Local panel to restore";
 
         _isDragging = true;
         ShowDragBadge(selectedFiles.Count, e);
@@ -502,10 +494,9 @@ public partial class SyncView : UserControl
             HideDragBadge();
             vm.IsDragOverAzurePanel = false;
             vm.IsDragOverLocalPanel = false;
-            vm.DragFileCount = 0;
         }
     }
-    
+
     /// <summary>
     /// Finds the LocalFileTreeNodeViewModel from the visual tree source.
     /// </summary>
@@ -548,7 +539,6 @@ public partial class SyncView : UserControl
         {
             e.DragEffects = DragDropEffects.Copy;
             vm.IsDragOverLocalPanel = true;
-            vm.DragDropPreviewText = $"Drop to restore {vm.DragFileCount} file(s) from Azure";
         }
         // Check for external files
         else if (e.Data.GetFiles()?.Any() == true)
@@ -580,17 +570,12 @@ public partial class SyncView : UserControl
         {
             e.DragEffects = DragDropEffects.Copy;
             vm.IsDragOverAzurePanel = true;
-            vm.DragDropPreviewText = $"Drop to backup {vm.DragFileCount} file(s) to Azure";
         }
         // Check for external files (backup from explorer)
         else if (e.Data.GetFiles()?.Any() == true)
         {
-            var files = e.Data.GetFiles()!;
-            var count = files.Count();
             e.DragEffects = DragDropEffects.Copy;
             vm.IsDragOverAzurePanel = true;
-            vm.DragFileCount = count;
-            vm.DragDropPreviewText = $"Drop to backup {count} file(s) to Azure";
         }
         else
         {
