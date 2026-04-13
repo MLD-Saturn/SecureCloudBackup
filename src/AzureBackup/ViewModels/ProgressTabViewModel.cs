@@ -1,7 +1,5 @@
 using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Diagnostics;
 using System.Linq;
 using AzureBackup.Core;
 using AzureBackup.Core.Models;
@@ -18,14 +16,7 @@ namespace AzureBackup.ViewModels;
 /// </summary>
 public partial class ProgressTabViewModel : ViewModelBase
 {
-    private readonly Stopwatch _elapsed = new();
-    private DateTime _lastSpeedUpdate;
-
-    // Windowed speed tracking — keeps samples from the last 10 seconds.
-    // Speed is computed from (newest - oldest) bytes over the window span,
-    // which adapts smoothly to phase transitions (e.g., small → large files).
-    private readonly Queue<(long elapsedMs, long bytes)> _speedSamples = new();
-    private const int SpeedWindowMs = 10_000;
+    private readonly SpeedTracker _speedTracker = new();
 
     // ── Overall progress ──
 
@@ -222,9 +213,7 @@ public partial class ProgressTabViewModel : ViewModelBase
             OnPropertyChanged(nameof(ShowSmallFileGroup));
         });
 
-        _elapsed.Restart();
-        _lastSpeedUpdate = DateTime.Now;
-        _speedSamples.Clear();
+        _speedTracker.Start();
     }
 
     /// <summary>
@@ -241,7 +230,7 @@ public partial class ProgressTabViewModel : ViewModelBase
     /// </summary>
     public void CompleteOperation(int succeeded, int failed, int corruptedRecovery, long totalBytesTransferred)
     {
-        _elapsed.Stop();
+        _speedTracker.Stop();
 
         Dispatcher.UIThread.Post(() =>
         {
@@ -252,7 +241,7 @@ public partial class ProgressTabViewModel : ViewModelBase
             CompletionFailed = failed;
             CompletionCorruptedRecovery = corruptedRecovery;
             HasFailures = failed > 0 || corruptedRecovery > 0;
-            CompletionElapsed = FormatHelper.FormatDuration(_elapsed.Elapsed.TotalSeconds);
+            CompletionElapsed = _speedTracker.ElapsedText;
             CompletionBytes = FormatHelper.FormatBytes(totalBytesTransferred);
 
             var parts = new System.Collections.Generic.List<string> { $"{succeeded:N0} succeeded" };
@@ -279,7 +268,7 @@ public partial class ProgressTabViewModel : ViewModelBase
     /// </summary>
     public void MarkCancelled()
     {
-        _elapsed.Stop();
+        _speedTracker.Stop();
 
         Dispatcher.UIThread.Post(() =>
         {
@@ -290,7 +279,7 @@ public partial class ProgressTabViewModel : ViewModelBase
             CompletionFailed = 0;
             CompletionCorruptedRecovery = 0;
             HasFailures = false;
-            CompletionElapsed = FormatHelper.FormatDuration(_elapsed.Elapsed.TotalSeconds);
+            CompletionElapsed = _speedTracker.ElapsedText;
             CompletionBytes = FormatHelper.FormatBytes(TotalBytesProcessed);
             CompletionSummary = $"{OperationType} cancelled after {CompletedFilesCount:N0} file(s)";
 
@@ -381,57 +370,15 @@ public partial class ProgressTabViewModel : ViewModelBase
 
     private void UpdateSpeedAndEta()
     {
-        var now = DateTime.Now;
-        if ((now - _lastSpeedUpdate).TotalMilliseconds < 500)
+        if (!_speedTracker.Update(TotalBytesProcessed, TotalBytes))
             return;
 
-        _lastSpeedUpdate = now;
-        var elapsedMs = _elapsed.ElapsedMilliseconds;
-
-        if (elapsedMs < 1000 || TotalBytesProcessed <= 0)
-            return;
-
-        // Add current sample and evict samples outside the window
-        _speedSamples.Enqueue((elapsedMs, TotalBytesProcessed));
-        var windowStart = elapsedMs - SpeedWindowMs;
-        while (_speedSamples.Count > 2 && _speedSamples.Peek().elapsedMs < windowStart)
-            _speedSamples.Dequeue();
-
-        // Compute speed from window edges (oldest retained sample → newest)
-        var oldest = _speedSamples.Peek();
-        var spanMs = elapsedMs - oldest.elapsedMs;
-        var spanBytes = TotalBytesProcessed - oldest.bytes;
-
-        // Fall back to overall average if window is too short (first few seconds)
-        double bytesPerSecond;
-        if (spanMs >= 2000 && spanBytes > 0)
-        {
-            bytesPerSecond = (double)spanBytes / spanMs * 1000;
-        }
-        else
-        {
-            bytesPerSecond = (double)TotalBytesProcessed / elapsedMs * 1000;
-        }
-
-        OperationSpeed = $"{FormatHelper.FormatBytes((long)bytesPerSecond)}/s";
-
-        if (bytesPerSecond > 0 && TotalBytes > TotalBytesProcessed)
-        {
-            var remainingBytes = TotalBytes - TotalBytesProcessed;
-            var remainingSeconds = remainingBytes / bytesPerSecond;
-            EstimatedTimeRemaining = $"{FormatHelper.FormatDuration(remainingSeconds)} remaining";
-        }
-        else
-        {
-            EstimatedTimeRemaining = string.Empty;
-        }
+        OperationSpeed = _speedTracker.Speed;
+        EstimatedTimeRemaining = _speedTracker.EstimatedTimeRemaining;
     }
 
     private void UpdateElapsedTime()
     {
-        if (_elapsed.IsRunning)
-        {
-            ElapsedTimeText = FormatHelper.FormatDuration(_elapsed.Elapsed.TotalSeconds);
-        }
+        ElapsedTimeText = _speedTracker.ElapsedText;
     }
 }

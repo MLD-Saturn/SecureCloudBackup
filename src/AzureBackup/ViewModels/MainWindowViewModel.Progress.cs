@@ -1,4 +1,5 @@
 using System;
+using AzureBackup.Core;
 
 namespace AzureBackup.ViewModels;
 
@@ -7,18 +8,16 @@ namespace AzureBackup.ViewModels;
 /// </summary>
 public partial class MainWindowViewModel
 {
-    private DateTime _operationStartTime;
+    private readonly SpeedTracker _legacySpeedTracker = new();
     private long _lastBytesProcessed;
-    private DateTime _lastSpeedUpdate;
 
     /// <summary>
     /// Starts a new operation with progress tracking.
     /// </summary>
     private void StartProgressTracking(string operationType, int totalFiles, long totalBytes)
     {
-        _operationStartTime = DateTime.Now;
+        _legacySpeedTracker.Start();
         _lastBytesProcessed = 0;
-        _lastSpeedUpdate = DateTime.Now;
 
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
@@ -128,33 +127,15 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
-    /// Updates speed calculation and estimated time remaining.
-    /// Speed = Total bytes transferred / Total elapsed time
-    /// ETA = Remaining bytes / Speed
+    /// Updates speed calculation and estimated time remaining using the shared <see cref="SpeedTracker"/>.
     /// </summary>
     private void UpdateSpeedAndEta()
     {
-        var now = DateTime.Now;
-        var elapsed = now - _operationStartTime;
-        
-        // Only update speed every 500ms to avoid flickering
-        if ((now - _lastSpeedUpdate).TotalMilliseconds < 500)
+        if (!_legacySpeedTracker.Update(TotalBytesProcessed, TotalBytesToProcess))
             return;
-        
-        _lastSpeedUpdate = now;
 
-        if (elapsed.TotalSeconds > 1 && TotalBytesProcessed > 0)
-        {
-            var bytesPerSecond = TotalBytesProcessed / elapsed.TotalSeconds;
-            OperationSpeed = $"{AzureBackup.Core.FormatHelper.FormatBytes((long)bytesPerSecond)}/s";
-
-            if (bytesPerSecond > 0 && TotalBytesToProcess > TotalBytesProcessed)
-            {
-                var remainingBytes = TotalBytesToProcess - TotalBytesProcessed;
-                var remainingSeconds = remainingBytes / bytesPerSecond;
-                EstimatedTimeRemaining = $"{AzureBackup.Core.FormatHelper.FormatDuration(remainingSeconds)} remaining";
-            }
-        }
+        OperationSpeed = _legacySpeedTracker.Speed;
+        EstimatedTimeRemaining = _legacySpeedTracker.EstimatedTimeRemaining;
     }
 
     /// <summary>
