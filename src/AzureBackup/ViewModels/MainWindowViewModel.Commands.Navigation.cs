@@ -219,7 +219,6 @@ public partial class MainWindowViewModel
                 HasExistingConfig = false;
                 IsEntraIdAuthenticated = false;
                 EntraIdStatus = "Not signed in";
-                EntraIdUserName = string.Empty;
                 StorageAccountName = string.Empty;
                 ConnectionString = string.Empty;
                 ContainerName = "backup";
@@ -229,7 +228,6 @@ public partial class MainWindowViewModel
                 TotalFiles = 0;
                 TotalSize = "0 B";
                 PendingChanges = 0;
-                LastBackupTime = "Never";
 
                 // Clear tree views
                 FileTreeRoots.Clear();

@@ -1,20 +1,6 @@
 namespace AzureBackup.Core.Models;
 
 /// <summary>
-/// Progress event arguments for restore operations.
-/// </summary>
-public class RestoreProgressEventArgs : EventArgs
-{
-    public string FilePath { get; set; } = string.Empty;
-    public long BytesRestored { get; set; }
-    public long TotalBytes { get; set; }
-    public int ChunksRestored { get; set; }
-    public int TotalChunks { get; set; }
-    
-    public double PercentComplete => TotalBytes > 0 ? (double)BytesRestored / TotalBytes * 100 : 0;
-}
-
-/// <summary>
 /// Result of a batch restore operation.
 /// </summary>
 public class RestoreResult

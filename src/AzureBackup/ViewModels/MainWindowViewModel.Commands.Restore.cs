@@ -188,7 +188,6 @@ public partial class MainWindowViewModel
                     CompletedFilesCount = p.filesCompleted;
                     ProgressValue = p.totalFiles > 0 ? (double)p.filesCompleted / p.totalFiles * 100 : 0;
                     ProgressText = $"Deleting: {p.currentFileName}";
-                    CurrentFileName = p.currentFileName;
                     OnPropertyChanged(nameof(FilesProgressText));
                 });
             });

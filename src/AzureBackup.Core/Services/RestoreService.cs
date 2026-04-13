@@ -63,7 +63,6 @@ public partial class RestoreService
         }.Where(d => !string.IsNullOrEmpty(d)).ToArray();
     }
 
-    public event EventHandler<RestoreProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? StatusChanged;
     public event EventHandler<string>? ErrorOccurred;
 
@@ -348,15 +347,6 @@ public partial class RestoreService
 
                     currentBytes += chunk.Length;
                     progress?.Report((currentBytes, file.FileSize));
-
-                    ProgressChanged?.Invoke(this, new RestoreProgressEventArgs
-                    {
-                        FilePath = targetPath,
-                        BytesRestored = currentBytes,
-                        TotalBytes = file.FileSize,
-                        ChunksRestored = sortedChunks.IndexOf(chunk) + 1,
-                        TotalChunks = sortedChunks.Count
-                    });
                 }
 
                 await outputStream.FlushAsync(cancellationToken);

@@ -231,10 +231,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     // Entra ID authentication state
     [ObservableProperty]
     private bool _isEntraIdAuthenticated;
-    
-    [ObservableProperty]
-    private string _entraIdUserName = string.Empty;
-    
+
     [ObservableProperty]
     private string _entraIdStatus = "Not signed in";
 
@@ -324,9 +321,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private int _pendingChanges;
 
     [ObservableProperty]
-    private string _lastBackupTime = "Never";
-
-    [ObservableProperty]
     private double _progressValue;
 
     [ObservableProperty]
@@ -335,15 +329,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     // Detailed progress tracking
     [ObservableProperty]
     private string _currentOperationType = string.Empty;
-
-    [ObservableProperty]
-    private string _currentFileName = string.Empty;
-
-    [ObservableProperty]
-    private double _currentFileProgress;
-
-    [ObservableProperty]
-    private string _currentFileProgressText = string.Empty;
 
     [ObservableProperty]
     private int _completedFilesCount;
@@ -469,8 +454,8 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// The last clicked file for shift-click range selection.
+    /// Not displayed in UI — used only for internal range selection logic.
     /// </summary>
-    [ObservableProperty]
     private BackedUpFileViewModel? _lastClickedFile;
 
     [ObservableProperty]
@@ -690,15 +675,15 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// Text describing what will happen when files are dropped.
+    /// Set by drag-drop code-behind; not currently bound in AXAML.
     /// </summary>
-    [ObservableProperty]
-    private string _dragDropPreviewText = string.Empty;
+    public string DragDropPreviewText { get; set; } = string.Empty;
 
     /// <summary>
     /// Number of files being dragged.
+    /// Set by drag-drop code-behind; not currently bound in AXAML.
     /// </summary>
-    [ObservableProperty]
-    private int _dragFileCount;
+    public int DragFileCount { get; set; }
 
     /// <summary>
     /// True when a drag operation is in progress.
@@ -887,7 +872,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         // Load Entra ID settings
         StorageAccountName = config.StorageAccountName ?? string.Empty;
         IsEntraIdAuthenticated = config.IsEntraIdAuthenticated;
-        EntraIdUserName = config.EntraIdUserName ?? string.Empty;
         EntraIdStatus = config.IsEntraIdAuthenticated 
             ? $"Signed in as {config.EntraIdUserName}" 
             : "Not signed in";
@@ -944,7 +928,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         TotalFiles = stats.TotalFiles;
         TotalSize = stats.TotalSizeFormatted;
         PendingChanges = stats.PendingChanges;
-        LastBackupTime = stats.LastBackupTime?.ToString("g") ?? "Never";
     }
 
     private void AddLog(string message)
@@ -1076,10 +1059,10 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <param name="isShiftPressed">Whether Shift key is pressed (range selection).</param>
     public void HandleFileSelection(BackedUpFileViewModel file, bool isCtrlPressed, bool isShiftPressed)
     {
-        if (isShiftPressed && LastClickedFile != null)
+        if (isShiftPressed && _lastClickedFile != null)
         {
             // Range selection: select all files between last clicked and current
-            var startIndex = RestorableFiles.IndexOf(LastClickedFile);
+            var startIndex = RestorableFiles.IndexOf(_lastClickedFile);
             var endIndex = RestorableFiles.IndexOf(file);
             
             if (startIndex >= 0 && endIndex >= 0)
@@ -1114,7 +1097,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             file.IsSelected = true;
         }
         
-        LastClickedFile = file;
+        _lastClickedFile = file;
         SelectedRestoreFile = file;
         NotifySelectionChanged();
     }
@@ -1145,7 +1128,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public void ToggleFileSelection(BackedUpFileViewModel file)
     {
         file.IsSelected = !file.IsSelected;
-        LastClickedFile = file;
+        _lastClickedFile = file;
         NotifySelectionChanged();
     }
 

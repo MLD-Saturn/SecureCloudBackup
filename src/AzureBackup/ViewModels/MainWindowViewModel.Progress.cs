@@ -9,7 +9,6 @@ namespace AzureBackup.ViewModels;
 public partial class MainWindowViewModel
 {
     private readonly SpeedTracker _legacySpeedTracker = new();
-    private long _lastBytesProcessed;
 
     /// <summary>
     /// Starts a new operation with progress tracking.
@@ -17,7 +16,6 @@ public partial class MainWindowViewModel
     private void StartProgressTracking(string operationType, int totalFiles, long totalBytes)
     {
         _legacySpeedTracker.Start();
-        _lastBytesProcessed = 0;
 
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
@@ -28,68 +26,10 @@ public partial class MainWindowViewModel
             CompletedFilesCount = 0;
             TotalBytesProcessed = 0;
             ProgressValue = 0;
-            CurrentFileName = string.Empty;
-            CurrentFileProgress = 0;
-            CurrentFileProgressText = string.Empty;
             OperationSpeed = string.Empty;
             EstimatedTimeRemaining = string.Empty;
             _currentFileIndex = 0;
             
-            OnPropertyChanged(nameof(BytesProgressText));
-            OnPropertyChanged(nameof(FilesProgressText));
-        });
-    }
-
-    /// <summary>
-    /// Updates progress for the current file being processed.
-    /// </summary>
-    private void UpdateFileProgress(string fileName, long bytesProcessed, long fileSize, int fileIndex)
-    {
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            CurrentFileName = fileName;
-            CurrentFileProgress = fileSize > 0 ? (double)bytesProcessed / fileSize * 100 : 0;
-            CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(bytesProcessed)} / {AzureBackup.Core.FormatHelper.FormatBytes(fileSize)}";
-            
-            // Update overall progress based on total bytes transferred
-            TotalBytesProcessed = _lastBytesProcessed + bytesProcessed;
-            ProgressValue = TotalBytesToProcess > 0 
-                ? (double)TotalBytesProcessed / TotalBytesToProcess * 100 
-                : 0;
-            
-            // Update files progress to show current file being processed (1-indexed)
-            // CompletedFilesCount shows files fully completed, but we also want to show
-            // that we're working on file fileIndex+1
-            _currentFileIndex = fileIndex;
-            
-            ProgressText = $"{CurrentOperationType}: {fileName} ({fileIndex + 1}/{TotalFilesInOperation})";
-            
-            OnPropertyChanged(nameof(BytesProgressText));
-            OnPropertyChanged(nameof(FilesProgressText));
-            
-            // Update speed and ETA periodically
-            UpdateSpeedAndEta();
-        });
-    }
-
-    /// <summary>
-    /// Marks a file as completed in the progress tracking.
-    /// Used by sequential operations (restore) where files complete one at a time.
-    /// </summary>
-    private void CompleteFileProgress(long fileSize)
-    {
-        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-        {
-            CompletedFilesCount++;
-            _lastBytesProcessed += fileSize;
-            TotalBytesProcessed = _lastBytesProcessed;
-            CurrentFileProgress = 100;
-
-            // Update progress value based on bytes
-            ProgressValue = TotalBytesToProcess > 0 
-                ? (double)TotalBytesProcessed / TotalBytesToProcess * 100 
-                : 0;
-
             OnPropertyChanged(nameof(BytesProgressText));
             OnPropertyChanged(nameof(FilesProgressText));
         });
@@ -114,19 +54,6 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
-    /// Updates the current file display (name, per-file progress bar) without modifying
-    /// overall byte totals. Used alongside UpdateOverallProgress for parallel operations.
-    /// </summary>
-    private void UpdateCurrentFileDisplay(string fileName, long bytesProcessed, long fileSize, int fileIndex)
-    {
-        CurrentFileName = fileName;
-        CurrentFileProgress = fileSize > 0 ? (double)bytesProcessed / fileSize * 100 : 0;
-        CurrentFileProgressText = $"{AzureBackup.Core.FormatHelper.FormatBytes(bytesProcessed)} / {AzureBackup.Core.FormatHelper.FormatBytes(fileSize)}";
-        _currentFileIndex = fileIndex;
-        ProgressText = $"{CurrentOperationType}: {fileName} ({fileIndex + 1}/{TotalFilesInOperation})";
-    }
-
-    /// <summary>
     /// Updates speed calculation and estimated time remaining using the shared <see cref="SpeedTracker"/>.
     /// </summary>
     private void UpdateSpeedAndEta()
@@ -148,9 +75,6 @@ public partial class MainWindowViewModel
             ProgressValue = 0;
             ProgressText = string.Empty;
             CurrentOperationType = string.Empty;
-            CurrentFileName = string.Empty;
-            CurrentFileProgress = 0;
-            CurrentFileProgressText = string.Empty;
             CompletedFilesCount = 0;
             TotalFilesInOperation = 0;
             TotalBytesProcessed = 0;
