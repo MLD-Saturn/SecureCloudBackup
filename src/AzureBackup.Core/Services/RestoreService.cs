@@ -73,6 +73,12 @@ public partial class RestoreService
     public string? DiagnosticsDirectory { get; set; }
 
     /// <summary>
+    /// Optional throughput metrics logger. When set, per-file and operation-level
+    /// metrics are recorded to JSONL files for post-hoc performance analysis.
+    /// </summary>
+    public ThroughputMetrics? Metrics { get; set; }
+
+    /// <summary>
     /// Event for detailed debug/diagnostic logging.
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
@@ -207,6 +213,7 @@ public partial class RestoreService
         ArgumentNullException.ThrowIfNull(file);
         var diag = new FileOperationDiagnostics(file.LocalPath, "Restore", DiagnosticsDirectory);
         using var _ = diag.SetAmbient();
+        var restoreFileStopwatch = Stopwatch.StartNew();
         Log($"RestoreFileAsync: Starting restore of '{Path.GetFileName(file.LocalPath)}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
         diag.Record($"File: size={file.FileSize:N0}, chunks={file.Chunks.Count}, hash={file.FileHash?[..8]}..., status={file.Status}");
         
@@ -386,6 +393,27 @@ public partial class RestoreService
             Log($"RestoreFileAsync: Successfully restored '{Path.GetFileName(targetPath)}' ({file.FileSize} bytes), " +
                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
             StatusChanged?.Invoke(this, $"Restored and verified: {Path.GetFileName(targetPath)}");
+
+            // Record per-file metrics for single-chunk files (multi-chunk metrics are recorded
+            // inside RestoreWithBoundedParallelDownloadsAsync)
+            if (sortedChunks.Count == 1)
+            {
+                restoreFileStopwatch.Stop();
+                var singleElapsed = restoreFileStopwatch.Elapsed.TotalSeconds;
+                Metrics?.RecordFile(new FileMetrics
+                {
+                    Operation = "restore",
+                    Path = file.LocalPath,
+                    Bytes = file.FileSize,
+                    Chunks = 1,
+                    ChunkMin = sortedChunks[0].Length,
+                    ChunkMax = sortedChunks[0].Length,
+                    ElapsedSeconds = singleElapsed,
+                    ThroughputMbps = singleElapsed > 0 ? file.FileSize / singleElapsed / (1024 * 1024) : 0,
+                    EffectiveConcurrency = 1
+                });
+            }
+
             return true;
         }
         catch (DataIntegrityException ex)
@@ -546,6 +574,13 @@ public partial class RestoreService
         long currentBytes = 0;
         int chunksWritten = 0;
         int chunksDownloaded = 0;
+
+        // Pipeline metrics counters (updated by Interlocked from producer/consumer tasks)
+        int metricRetries = 0;
+        int metricReorderMax = 0;
+        var fileStopwatch = Stopwatch.StartNew();
+        // Snapshot the budget stall count at the start so we can compute per-file stalls
+        var stallCountBaseline = memoryBudget.StallCount;
         
         // Producer task: Download chunks in parallel and write to channel
         var producerTask = Task.Run(async () =>
@@ -587,6 +622,7 @@ public partial class RestoreService
                                 }
                                 catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))
                                 {
+                                    Interlocked.Increment(ref metricRetries);
                                     var delay = ChunkRetryBaseDelayMs * (1 << attempt); // exponential backoff
                                     diag.RecordChunk("TransientRetry", chunk.Index, chunk.Hash, chunk.Length,
                                         extra: $"attempt={attempt + 1}/{MaxChunkRetries + 1}, error={ex.GetType().Name}");
@@ -750,6 +786,13 @@ public partial class RestoreService
                     else
                     {
                         pendingChunks[index] = (data, length);
+                        // Track peak reorder buffer depth for metrics
+                        int currentPending = pendingChunks.Count;
+                        int prevMax;
+                        while (currentPending > (prevMax = Volatile.Read(ref metricReorderMax)))
+                        {
+                            Interlocked.CompareExchange(ref metricReorderMax, currentPending, prevMax);
+                        }
                         if (pendingChunks.Count % 10 == 0 || pendingChunks.Count > effectiveConcurrency)
                         {
                             var bufferedBytes = pendingChunks.Values.Sum(d => (long)d.length);
@@ -871,6 +914,25 @@ public partial class RestoreService
         
         Log($"BoundedParallelDownload: '{fileName}' completed, wrote {chunksWritten} chunks, {currentBytes} bytes, " +
             $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
+
+        // Record per-file restore pipeline metrics
+        fileStopwatch.Stop();
+        var fileElapsed = fileStopwatch.Elapsed.TotalSeconds;
+        Metrics?.RecordFile(new FileMetrics
+        {
+            Operation = "restore",
+            Path = file.LocalPath,
+            Bytes = file.FileSize,
+            Chunks = sortedChunks.Count,
+            ChunkMin = sortedChunks.Min(c => c.Length),
+            ChunkMax = maxChunkBytes,
+            ElapsedSeconds = fileElapsed,
+            ThroughputMbps = fileElapsed > 0 ? file.FileSize / fileElapsed / (1024 * 1024) : 0,
+            EffectiveConcurrency = effectiveConcurrency,
+            BudgetStalls = (int)(memoryBudget.StallCount - stallCountBaseline),
+            Retries = Volatile.Read(ref metricRetries),
+            ReorderMax = Volatile.Read(ref metricReorderMax)
+        });
 
         return computedFileHash!;
     }

@@ -24,6 +24,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private readonly FileWatcherService _fileWatcherService;
     private readonly BackupOrchestrator _orchestrator;
     private readonly RestoreService _restoreService;
+    private readonly ThroughputMetrics _throughputMetrics;
     private ChunkIndexService? _chunkIndexService;
 
     private CancellationTokenSource? _operationCts;
@@ -699,6 +700,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _orchestrator.DiagnosticsDirectory = diagDir;
         _restoreService.DiagnosticsDirectory = diagDir;
 
+        // Initialize throughput metrics logger for performance analysis
+        var metricsDir = Path.Combine(AppMode.DataDirectory, "metrics");
+        var throughputMetrics = new ThroughputMetrics(metricsDir);
+        _throughputMetrics = throughputMetrics;
+        _orchestrator.Metrics = throughputMetrics;
+        _restoreService.Metrics = throughputMetrics;
+        throughputMetrics.CleanupOldFiles();
+
         // Initialize progress tab for backup/restore/mirror operations
         ProgressTab = new ProgressTabViewModel();
         ProgressTab.CompletionAcknowledged += (_, _) =>
@@ -1138,5 +1147,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _encryptionService.Dispose();
         _databaseService.Dispose();
         _fileWatcherService.Dispose();
+        _throughputMetrics.Dispose();
     }
 }

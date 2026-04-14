@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -205,9 +206,10 @@ public partial class BackupOrchestrator
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(localFolder);
-        
+
         Log($"MirrorSyncToAzureAsync: Starting mirror sync from '{localFolder.Path}' to Azure");
         MirrorSyncResult result = new();
+        var mirrorAzureStopwatch = Stopwatch.StartNew();
 
         StatusChanged?.Invoke(this, $"Mirror sync: scanning {localFolder.Path}");
 
@@ -222,71 +224,77 @@ public partial class BackupOrchestrator
             .Where(f => f.LocalPath.StartsWith(localFolder.Path, StringComparison.OrdinalIgnoreCase))
             .ToDictionary(f => f.LocalPath, StringComparer.OrdinalIgnoreCase);
 
-        var totalOperations = localFiles.Count + existingBackups.Count;
-        var currentOp = 0;
-
-        // Phase 3: Backup new and modified files
+        // Phase 3: Classify files as unchanged or needing backup
+        var filesToBackup = new List<string>();
         foreach (var localFilePath in localFiles)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            currentOp++;
-
             var fileName = Path.GetFileName(localFilePath);
 
-            try
+            if (existingBackups.TryGetValue(localFilePath, out var existingBackup))
             {
-                if (existingBackups.TryGetValue(localFilePath, out var existingBackup))
+                FileInfo fileInfo = new(localFilePath);
+                if (fileInfo.Length == existingBackup.FileSize &&
+                    Math.Abs((fileInfo.LastWriteTimeUtc - existingBackup.LastModified).TotalSeconds) < 2)
                 {
-                    // File exists in backup - check if modified
-                    FileInfo fileInfo = new(localFilePath);
-                    
-                    if (fileInfo.Length == existingBackup.FileSize &&
-                        Math.Abs((fileInfo.LastWriteTimeUtc - existingBackup.LastModified).TotalSeconds) < 2)
-                    {
-                        // Quick check suggests file is unchanged
-                        result.FilesUnchanged++;
-                        progress?.Report((currentOp, totalOperations, fileName, "Unchanged"));
-                        continue;
-                    }
-                }
-
-                // File is new or modified - backup it
-                progress?.Report((currentOp, totalOperations, fileName, "Backing up"));
-                var success = await BackupFileAsync(localFilePath, cancellationToken);
-
-                if (success)
-                {
-                    result.FilesTransferred++;
-                    FileInfo fileInfo = new(localFilePath);
-                    result.BytesTransferred += fileInfo.Length;
-                }
-                else
-                {
-                    result.FilesErrored++;
-                    result.Errors.Add($"Failed to backup: {localFilePath}");
+                    result.FilesUnchanged++;
+                    progress?.Report((result.FilesUnchanged, localFiles.Count + existingBackups.Count, fileName, "Unchanged"));
+                    continue;
                 }
             }
-            catch (Exception ex)
-            {
-                result.FilesErrored++;
-                result.Errors.Add($"Error backing up {localFilePath}: {ex.Message}");
-                Log($"MirrorSyncToAzureAsync: Error backing up {localFilePath}: {ex.Message}");
-            }
+
+            filesToBackup.Add(localFilePath);
         }
 
-        // Phase 4: Mark deleted files (files in backup but not locally)
+        var totalOperations = localFiles.Count + existingBackups.Count;
+
+        // Phase 4: Backup new and modified files using the shared parallel core.
+        // This gives MirrorSyncToAzureAsync the same parallelism, memory budget,
+        // and per-file metrics recording as BackupFilesAsync.
+        if (filesToBackup.Count > 0)
+        {
+            var config = _databaseService.GetConfiguration();
+            using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
+
+            Log($"MirrorSyncToAzureAsync: Backing up {filesToBackup.Count} new/modified files " +
+                $"(max {MaxParallelFileBackups} concurrent, " +
+                $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
+
+            Metrics?.RecordContext("mirror-to-azure", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
+
+            // Adapt BackupFilesCoreAsync progress to the mirror progress format
+            var backupBaseOp = result.FilesUnchanged;
+            var adaptedProgress = progress != null
+                ? new Progress<(int fileIndex, int totalFiles, string fileName,
+                    long bytesProcessed, long totalBytes,
+                    long currentFileBytes, long currentFileSize)>(p =>
+                {
+                    progress.Report((backupBaseOp + p.fileIndex + 1, totalOperations, p.fileName, "Backing up"));
+                })
+                : null;
+
+            var (completed, failed, bytes) = await BackupFilesCoreAsync(
+                filesToBackup, memoryBudget, adaptedProgress, cancellationToken);
+
+            result.FilesTransferred = completed;
+            result.FilesErrored = failed;
+            result.BytesTransferred = bytes;
+        }
+
+        // Phase 5: Mark deleted files (files in backup but not locally)
+        var deleteBaseOp = result.FilesUnchanged + filesToBackup.Count;
+        var deleteIndex = 0;
         foreach (var (backupPath, backupFile) in existingBackups)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            currentOp++;
+            deleteIndex++;
 
             if (!localFilePaths.Contains(backupPath))
             {
                 try
                 {
-                    progress?.Report((currentOp, totalOperations, Path.GetFileName(backupPath), "Marking deleted"));
-                    
-                    // Remove chunk references (this will delete orphaned chunks immediately)
+                    progress?.Report((deleteBaseOp + deleteIndex, totalOperations, Path.GetFileName(backupPath), "Marking deleted"));
+
                     if (_chunkIndexService != null)
                     {
                         var deletedChunks = await _chunkIndexService.RemoveFileReferencesAsync(
@@ -297,12 +305,11 @@ public partial class BackupOrchestrator
                                 $"for deleted file: {backupPath}");
                         }
                     }
-                    
-                    // Mark as excluded (deleted) but keep in Azure for potential restore
+
                     backupFile.Status = BackupStatus.Excluded;
                     _databaseService.SaveBackedUpFile(backupFile);
                     result.FilesDeleted++;
-                    
+
                     Log($"MirrorSyncToAzureAsync: Marked as deleted: {backupPath}");
                 }
                 catch (Exception ex)
@@ -315,9 +322,24 @@ public partial class BackupOrchestrator
         StatusChanged?.Invoke(this, 
             $"Mirror sync complete: {result.FilesTransferred} backed up, {result.FilesDeleted} marked deleted, " +
             $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
-        
+
         Log($"MirrorSyncToAzureAsync: Complete - {result.FilesTransferred} transferred, " +
             $"{result.FilesDeleted} deleted, {result.FilesUnchanged} unchanged");
+
+        mirrorAzureStopwatch.Stop();
+        var mirrorElapsed = mirrorAzureStopwatch.Elapsed.TotalSeconds;
+        Metrics?.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "mirror-to-azure",
+            Files = localFiles.Count,
+            Succeeded = result.FilesTransferred,
+            Failed = result.FilesErrored,
+            Bytes = result.BytesTransferred,
+            ElapsedSeconds = mirrorElapsed,
+            ThroughputMbps = mirrorElapsed > 0 ? result.BytesTransferred / mirrorElapsed / (1024 * 1024) : 0,
+            FileConcurrency = MaxParallelFileBackups,
+            MemoryBudgetMb = filesToBackup.Count > 0 ? (int)(_databaseService.GetConfiguration().MemoryLimitMB) : 0
+        });
 
         return result;
     }
@@ -495,9 +517,8 @@ public partial class BackupOrchestrator
     {
         ArgumentNullException.ThrowIfNull(filePaths);
 
-        // Create a shared memory budget from the user's config.
-        // All concurrent file backups share this single budget so the total
-        // in-flight chunk memory stays within the user's limit.
+        var opStopwatch = Stopwatch.StartNew();
+
         var config = _databaseService.GetConfiguration();
         using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
 
@@ -505,6 +526,43 @@ public partial class BackupOrchestrator
             $"(max {MaxParallelFileBackups} concurrent, " +
             $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
 
+        Metrics?.RecordContext("backup", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
+
+        var (completed, failed, processedBytes) = await BackupFilesCoreAsync(
+            filePaths, memoryBudget, progress, cancellationToken);
+
+        StatusChanged?.Invoke(this, $"Backup complete: {filePaths.Count} files processed");
+        Log($"BackupFilesAsync: Complete - {filePaths.Count} files processed, {processedBytes} bytes");
+
+        opStopwatch.Stop();
+        var opElapsed = opStopwatch.Elapsed.TotalSeconds;
+        Metrics?.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "backup",
+            Files = filePaths.Count,
+            Succeeded = completed,
+            Failed = failed,
+            Bytes = processedBytes,
+            ElapsedSeconds = opElapsed,
+            ThroughputMbps = opElapsed > 0 ? processedBytes / opElapsed / (1024 * 1024) : 0,
+            FileConcurrency = MaxParallelFileBackups,
+            MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024))
+        });
+    }
+
+    /// <summary>
+    /// Core parallel backup logic shared by <see cref="BackupFilesAsync"/> and
+    /// <see cref="MirrorSyncToAzureAsync"/>. Backs up files using <see cref="MaxParallelFileBackups"/>
+    /// concurrent workers with a shared <see cref="MemoryBudget"/>.
+    /// Does NOT record operation-level metrics — callers are responsible.
+    /// </summary>
+    /// <returns>Tuple of (completedFiles, failedFiles, totalBytesProcessed).</returns>
+    private async Task<(int completed, int failed, long processedBytes)> BackupFilesCoreAsync(
+        IList<string> filePaths,
+        MemoryBudget memoryBudget,
+        IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
         var totalFiles = filePaths.Count;
         long totalBytes = 0;
         long processedBytes = 0;
@@ -541,7 +599,7 @@ public partial class BackupOrchestrator
                     FileInfo fileInfo = new(filePath);
                     if (!fileInfo.Exists)
                     {
-                        Log($"BackupFilesAsync: File not found, skipping: {filePath}");
+                        Log($"BackupFilesCoreAsync: File not found, skipping: {filePath}");
                         return;
                     }
 
@@ -574,7 +632,7 @@ public partial class BackupOrchestrator
                             Interlocked.Add(ref processedBytes, remaining);
 
                         var done = Interlocked.Increment(ref completedFiles);
-                        Log($"BackupFilesAsync: [{done}/{totalFiles}] Successfully backed up: {fileName}");
+                        Log($"BackupFilesCoreAsync: [{done}/{totalFiles}] Successfully backed up: {fileName}");
                         _databaseService.RemovePendingChange(filePath);
 
                         progress?.Report((
@@ -584,18 +642,17 @@ public partial class BackupOrchestrator
                     }
                     else
                     {
-                        Log($"BackupFilesAsync: Failed to backup: {fileName}");
+                        Log($"BackupFilesCoreAsync: Failed to backup: {fileName}");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"BackupFilesAsync: Error backing up {filePath}: {ex.Message}");
+                    Log($"BackupFilesCoreAsync: Error backing up {filePath}: {ex.Message}");
                     ErrorOccurred?.Invoke(this, $"Failed to backup {fileName}: {ex.Message}");
                 }
             });
 
-        StatusChanged?.Invoke(this, $"Backup complete: {totalFiles} files processed");
-        Log($"BackupFilesAsync: Complete - {totalFiles} files processed, {Interlocked.Read(ref processedBytes)} bytes");
+        return (Volatile.Read(ref completedFiles), totalFiles - Volatile.Read(ref completedFiles), Interlocked.Read(ref processedBytes));
     }
 
     /// <summary>
@@ -624,64 +681,46 @@ public partial class BackupOrchestrator
             existingBackup = null;
         }
 
+        // Common fields are identical for every outcome — only Action and Reason vary.
+        var result = new PreviewFileAction
+        {
+            FilePath = filePath,
+            FileSize = fileInfo.Length,
+            LastModified = fileInfo.LastWriteTime
+        };
+
         if (existingBackup == null)
         {
-            return new PreviewFileAction
-            {
-                FilePath = filePath,
-                FileSize = fileInfo.Length,
-                LastModified = fileInfo.LastWriteTime,
-                Action = FileActionType.Create,
-                Reason = "New file - never backed up"
-            };
+            result.Action = FileActionType.Create;
+            result.Reason = "New file - never backed up";
         }
-
-        if (existingBackup.Status == BackupStatus.Completed)
+        else if (existingBackup.Status == BackupStatus.Completed)
         {
             if (fileInfo.LastWriteTimeUtc > existingBackup.LastModified ||
                 fileInfo.Length != existingBackup.FileSize)
             {
-                return new PreviewFileAction
-                {
-                    FilePath = filePath,
-                    FileSize = fileInfo.Length,
-                    LastModified = fileInfo.LastWriteTime,
-                    Action = FileActionType.Update,
-                    Reason = fileInfo.Length != existingBackup.FileSize
-                        ? $"Size changed ({existingBackup.FileSize} → {fileInfo.Length})"
-                        : "Modified since last backup"
-                };
+                result.Action = FileActionType.Update;
+                result.Reason = fileInfo.Length != existingBackup.FileSize
+                    ? $"Size changed ({existingBackup.FileSize} → {fileInfo.Length})"
+                    : "Modified since last backup";
             }
-
-            return new PreviewFileAction
+            else
             {
-                FilePath = filePath,
-                FileSize = fileInfo.Length,
-                LastModified = fileInfo.LastWriteTime,
-                Action = FileActionType.Skip,
-                Reason = "Already backed up and unchanged"
-            };
+                result.Action = FileActionType.Skip;
+                result.Reason = "Already backed up and unchanged";
+            }
+        }
+        else if (existingBackup.Status == BackupStatus.Failed)
+        {
+            result.Action = FileActionType.Create;
+            result.Reason = "Retrying previously failed backup";
+        }
+        else
+        {
+            result.Action = FileActionType.Skip;
+            result.Reason = "Excluded or in-progress";
         }
 
-        if (existingBackup.Status == BackupStatus.Failed)
-        {
-            return new PreviewFileAction
-            {
-                FilePath = filePath,
-                FileSize = fileInfo.Length,
-                LastModified = fileInfo.LastWriteTime,
-                Action = FileActionType.Create,
-                Reason = "Retrying previously failed backup"
-            };
-        }
-
-        return new PreviewFileAction
-        {
-            FilePath = filePath,
-            FileSize = fileInfo.Length,
-            LastModified = fileInfo.LastWriteTime,
-            Action = FileActionType.Skip,
-            Reason = "Excluded or in-progress"
-        };
+        return result;
     }
 }

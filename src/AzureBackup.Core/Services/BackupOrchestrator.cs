@@ -36,12 +36,15 @@ public partial class BackupOrchestrator : IAsyncDisposable
     private const int LockoutMinutesBase = 15;
     
     // Parallel upload settings - balance between bandwidth and memory usage
-    // For a file with many chunks, upload up to 4 chunks simultaneously
-    private const int MaxParallelChunkUploads = 4;
+    // For a file with many chunks, upload up to 6 chunks simultaneously
+    private const int MaxParallelChunkUploads = 6;
 
-    // File-level parallelism for multi-file operations
-    // 4 files x 4 chunks = 16 concurrent HTTP uploads max
-    private const int MaxParallelFileBackups = 4;
+    // File-level parallelism for multi-file operations.
+    // 8 concurrent CDC producers saturate the upload pipeline better than 4 because
+    // each file's CDC pass is sequential and CPU-bound — more files means more producers
+    // feeding the network in parallel. 8 files × 6 chunks = 48 concurrent HTTP uploads max.
+    // The MemoryBudget caps total in-flight memory regardless of file count.
+    private const int MaxParallelFileBackups = 8;
 
     // Batch size for the background backup monitoring loop
     private const int BackupLoopBatchSize = 50;
@@ -75,6 +78,12 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// When null, diagnostics are written to the system temp directory.
     /// </summary>
     public string? DiagnosticsDirectory { get; set; }
+
+    /// <summary>
+    /// Optional throughput metrics logger. When set, per-file and operation-level
+    /// metrics are recorded to JSONL files for post-hoc performance analysis.
+    /// </summary>
+    public ThroughputMetrics? Metrics { get; set; }
 
     public BackupOrchestrator(
         LocalDatabaseService databaseService,
@@ -416,6 +425,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     {
         var diag = new FileOperationDiagnostics(filePath, "Backup", DiagnosticsDirectory);
         using var _ = diag.SetAmbient();
+        var fileStopwatch = Stopwatch.StartNew();
         try
         {
             if (!File.Exists(filePath))
@@ -683,6 +693,24 @@ public partial class BackupOrchestrator : IAsyncDisposable
             });
 
             StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatHelper.FormatBytes(bytesUploaded)})");
+
+            // Record per-file throughput metrics
+            fileStopwatch.Stop();
+            var fileElapsed = fileStopwatch.Elapsed.TotalSeconds;
+            Metrics?.RecordFile(new FileMetrics
+            {
+                Operation = "backup",
+                Path = filePath,
+                Bytes = totalFileSize,
+                Chunks = chunks.Count,
+                ChunkMin = chunks.Min(c => c.Length),
+                ChunkMax = chunks.Max(c => c.Length),
+                ElapsedSeconds = fileElapsed,
+                ThroughputMbps = fileElapsed > 0 ? totalFileSize / fileElapsed / (1024 * 1024) : 0,
+                NewChunks = chunksToUpload.Count,
+                DedupChunks = chunks.Count - chunksToUpload.Count,
+                Tier = storageTier.ToString()
+            });
 
             return true;
         }

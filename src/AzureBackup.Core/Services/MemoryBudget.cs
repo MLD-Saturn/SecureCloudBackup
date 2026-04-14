@@ -23,6 +23,7 @@ public sealed class MemoryBudget : IDisposable
     private readonly bool _isUnlimited;
     private long _usedBytes;
     private int _waitersCount;
+    private long _stallCount;
     private readonly Lock _lock = new();
     private readonly SemaphoreSlim _budgetReleased = new(0, int.MaxValue);
 
@@ -40,6 +41,18 @@ public sealed class MemoryBudget : IDisposable
 
     /// <summary>True when the budget is unlimited (no throttling).</summary>
     public bool IsUnlimited => _isUnlimited;
+
+    /// <summary>
+    /// Number of times <see cref="AcquireAsync"/> had to wait because the budget was full.
+    /// Reset when <see cref="ResetStallCount"/> is called. Thread-safe.
+    /// </summary>
+    public long StallCount => Volatile.Read(ref _stallCount);
+
+    /// <summary>
+    /// Resets the stall counter to zero. Call at the start of each operation
+    /// to get per-operation stall counts.
+    /// </summary>
+    public void ResetStallCount() => Interlocked.Exchange(ref _stallCount, 0);
 
     /// <summary>
     /// Creates a new memory budget with the specified capacity.
@@ -79,6 +92,7 @@ public sealed class MemoryBudget : IDisposable
         }
 
         // Slow path: wait for budget to free up
+        Interlocked.Increment(ref _stallCount);
         Interlocked.Increment(ref _waitersCount);
         try
         {

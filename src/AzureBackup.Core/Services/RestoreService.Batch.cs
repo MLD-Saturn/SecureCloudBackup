@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -180,15 +181,16 @@ public partial class RestoreService
         ArgumentNullException.ThrowIfNull(backupFiles);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetDirectory);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceBasePath);
-        
+
         Log($"MirrorSyncToLocalAsync: Starting mirror sync from '{sourceBasePath}' to '{targetDirectory}'");
         MirrorSyncResult result = new();
         var fileList = backupFiles.ToList();
-        
+        var mirrorStopwatch = Stopwatch.StartNew();
+
         // Normalize paths
         sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         targetDirectory = Path.GetFullPath(targetDirectory);
-        
+
         if (!Directory.Exists(targetDirectory))
         {
             Directory.CreateDirectory(targetDirectory);
@@ -196,19 +198,15 @@ public partial class RestoreService
 
         StatusChanged?.Invoke(this, $"Mirror sync: {fileList.Count} files from backup");
 
-        // Build a set of expected files in target directory (thread-safe for parallel access)
+        // Phase 1: Classify files as unchanged vs needs-restore (parallel).
+        // Also builds the expectedLocalFiles set for the delete phase.
         ConcurrentDictionary<string, byte> expectedLocalFiles = new(StringComparer.OrdinalIgnoreCase);
+        var filesToRestore = new List<(BackedUpFile file, string targetPath)>();
+        var restoreIndexToOriginalIndex = new List<int>();
+        int unchangedCount = 0;
+        object classifyLock = new();
 
-        // Phase 1: Restore/update files from backup (parallel)
-        var totalOperations = fileList.Count;
-        int completedOps = 0;
-        object resultLock = new();
-
-        Log($"MirrorSyncToLocalAsync: Starting parallel restore phase ({totalOperations} files, max {MaxParallelFileRestores} concurrent)");
-
-        // Shared memory budget for the entire mirror sync operation.
-        var mirrorConfig = _databaseService.GetConfiguration();
-        using var memoryBudget = MemoryBudget.FromConfig(mirrorConfig, FileStreamOverhead);
+        Log($"MirrorSyncToLocalAsync: Classifying {fileList.Count} files...");
 
         await Parallel.ForEachAsync(
             fileList.Select((file, index) => (file, index)),
@@ -220,92 +218,89 @@ public partial class RestoreService
             async (item, ct) =>
             {
                 var (backupFile, fileIndex) = item;
-                var currentOp = Interlocked.Increment(ref completedOps);
 
-                try
+                var relativePath = PathHelper.GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
+                var targetPath = Path.Combine(targetDirectory, relativePath);
+                expectedLocalFiles.TryAdd(targetPath, 0);
+
+                var targetDir = Path.GetDirectoryName(targetPath);
+                if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
                 {
-                    // Calculate target path by remapping base path
-                    var relativePath = PathHelper.GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
-                    var targetPath = Path.Combine(targetDirectory, relativePath);
-                    expectedLocalFiles.TryAdd(targetPath, 0);
+                    Directory.CreateDirectory(targetDir);
+                }
 
-                    var targetDir = Path.GetDirectoryName(targetPath);
-                    if (!string.IsNullOrEmpty(targetDir) && !Directory.Exists(targetDir))
+                // Check if local file exists and is up to date
+                if (File.Exists(targetPath))
+                {
+                    FileInfo localInfo = new(targetPath);
+
+                    if (localInfo.Length == backupFile.FileSize && 
+                        Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
                     {
-                        Directory.CreateDirectory(targetDir);
-                    }
-
-                    // Check if local file exists and is up to date
-                    if (File.Exists(targetPath))
-                    {
-                        FileInfo localInfo = new(targetPath);
-
-                        // Compare size and modification time
-                        if (localInfo.Length == backupFile.FileSize && 
-                            Math.Abs((localInfo.LastWriteTimeUtc - backupFile.LastModified).TotalSeconds) < 2)
+                        var localHash = await HashHelper.ComputeFileHashAsync(targetPath, ct);
+                        if (string.Equals(localHash, backupFile.FileHash, StringComparison.Ordinal))
                         {
-                            // File appears unchanged - verify with hash for certainty
-                            var localHash = await HashHelper.ComputeFileHashAsync(targetPath, ct);
-                            if (string.Equals(localHash, backupFile.FileHash, StringComparison.Ordinal))
-                            {
-                                lock (resultLock) { result.FilesUnchanged++; }
-                                progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Unchanged"));
-                                return;
-                            }
-                        }
-                    }
-
-                    // File is missing or outdated - restore it
-                    progress?.Report((currentOp, totalOperations, Path.GetFileName(targetPath), "Restoring"));
-
-                    // Create per-file byte progress reporter using the pre-computed index
-                    var individualFileProgress = fileByteProgress != null
-                        ? new Progress<(long current, long total)>(p =>
-                            fileByteProgress.Report((p.current, backupFile.FileSize, fileIndex)))
-                        : null;
-
-                    var logPrefix = $"MirrorSyncToLocalAsync: [{currentOp}/{totalOperations}]";
-                    var (outcome, recoveredPath, _) = await RestoreFileWithRecoveryAsync(
-                        backupFile, targetPath, overwriteExisting: true, individualFileProgress, logPrefix, memoryBudget, ct);
-
-                    lock (resultLock)
-                    {
-                        switch (outcome)
-                        {
-                            case FileRestoreOutcome.Success:
-                                result.FilesTransferred++;
-                                result.BytesTransferred += backupFile.FileSize;
-                                break;
-                            case FileRestoreOutcome.CorruptedRecovery:
-                                result.FilesCorruptedRecovered++;
-                                result.BytesTransferred += backupFile.FileSize;
-                                if (recoveredPath != null)
-                                    result.CorruptedRecoveryPaths.Add(recoveredPath);
-                                break;
-                            case FileRestoreOutcome.Failed:
-                                result.FilesErrored++;
-                                result.Errors.Add($"Failed to restore: {backupFile.LocalPath}");
-                                break;
+                            Interlocked.Increment(ref unchangedCount);
+                            progress?.Report((Volatile.Read(ref unchangedCount), fileList.Count, Path.GetFileName(targetPath), "Unchanged"));
+                            return;
                         }
                     }
                 }
-                catch (Exception ex)
+
+                // Needs restore — add to the restore list with index mapping
+                lock (classifyLock)
                 {
-                    lock (resultLock)
-                    {
-                        result.FilesErrored++;
-                        result.Errors.Add($"Error restoring {backupFile.LocalPath}: {ex.Message}");
-                    }
-                    Log($"MirrorSyncToLocalAsync: Error restoring {backupFile.LocalPath}: {ex.Message}");
+                    restoreIndexToOriginalIndex.Add(fileIndex);
+                    filesToRestore.Add((backupFile, targetPath));
                 }
             });
 
-        // Phase 2: Delete local files that don't exist in backup (mirror mode)
+        result.FilesUnchanged = Volatile.Read(ref unchangedCount);
+
+        Log($"MirrorSyncToLocalAsync: {result.FilesUnchanged} unchanged, {filesToRestore.Count} need restore");
+
+        // Phase 2: Restore files using the shared two-tier parallel core.
+        // This gives MirrorSyncToLocalAsync the same parallelism, size-based scheduling,
+        // memory budget, and corruption metrics as RestoreFilesWithRemappingAsync.
+        if (filesToRestore.Count > 0)
+        {
+            var mirrorConfig = _databaseService.GetConfiguration();
+            using var memoryBudget = MemoryBudget.FromConfig(mirrorConfig, FileStreamOverhead);
+
+            Log($"MirrorSyncToLocalAsync: Restoring {filesToRestore.Count} files " +
+                $"(memoryBudget={(!memoryBudget.IsUnlimited ? $"{mirrorConfig.MemoryLimitMB} MB" : "unlimited")})");
+
+            Metrics?.RecordContext("mirror", mirrorConfig.MemoryLimitEnabled ? mirrorConfig.MemoryLimitMB : 0, mirrorConfig.MemoryLimitEnabled);
+
+            // Adapt byte progress to remap filtered indices → original file list indices
+            var adaptedByteProgress = fileByteProgress != null
+                ? new Progress<(long bytesCompleted, long fileSize, int fileIndex)>(p =>
+                {
+                    var originalIndex = restoreIndexToOriginalIndex[p.fileIndex];
+                    fileByteProgress.Report((p.bytesCompleted, p.fileSize, originalIndex));
+                })
+                : null;
+
+            var restoreResult = await RestoreFilesBatchCoreAsync(
+                filesToRestore, overwriteExisting: true, memoryBudget,
+                progress: null, adaptedByteProgress, cancellationToken);
+
+            // Merge restore results into mirror result
+            result.FilesTransferred = restoreResult.SuccessfulFiles.Count;
+            result.FilesCorruptedRecovered = restoreResult.CorruptedRecoveryFiles.Count;
+            result.FilesErrored = restoreResult.FailedFiles.Count;
+            result.BytesTransferred = restoreResult.TotalBytesRestored;
+            foreach (var (_, recoveredPath, _) in restoreResult.CorruptedRecoveryFiles)
+                result.CorruptedRecoveryPaths.Add(recoveredPath);
+            foreach (var failed in restoreResult.FailedFiles)
+                result.Errors.Add($"Failed to restore: {failed}");
+        }
+
+        // Phase 3: Delete local files that don't exist in backup (mirror mode)
         StatusChanged?.Invoke(this, "Scanning for files to delete...");
 
         try
         {
-            // Normalize target directory for comparison
             var normalizedTargetDir = Path.GetFullPath(targetDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
             var localFiles = Directory.EnumerateFiles(targetDirectory, "*", SearchOption.AllDirectories);
@@ -314,7 +309,6 @@ public partial class RestoreService
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                // Security: Verify file is actually within target directory (protection against symlink attacks)
                 var normalizedLocalFile = Path.GetFullPath(localFile);
                 if (!normalizedLocalFile.StartsWith(normalizedTargetDir + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 {
@@ -322,8 +316,6 @@ public partial class RestoreService
                     continue;
                 }
 
-                // Preserve corrupted recovery files — these were created by AttemptCorruptedRecoveryAsync
-                // and should not be deleted by the mirror cleanup phase
                 if (normalizedLocalFile.Contains($"{Path.DirectorySeparatorChar}__corrupted__{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
@@ -333,7 +325,7 @@ public partial class RestoreService
                 {
                     try
                     {
-                        progress?.Report((Volatile.Read(ref completedOps), totalOperations, Path.GetFileName(localFile), "Deleting"));
+                        progress?.Report((fileList.Count, fileList.Count, Path.GetFileName(localFile), "Deleting"));
                         File.Delete(localFile);
                         result.FilesDeleted++;
                         Log($"MirrorSyncToLocalAsync: Deleted {localFile}");
@@ -345,7 +337,6 @@ public partial class RestoreService
                 }
             }
 
-            // Clean up empty directories
             FileSystemHelper.CleanEmptyDirectories(targetDirectory);
         }
         catch (Exception ex)
@@ -367,6 +358,21 @@ public partial class RestoreService
         var summaryText = $"Mirror sync complete: {string.Join(", ", summaryParts)}";
         StatusChanged?.Invoke(this, summaryText);
         Log($"MirrorSyncToLocalAsync: {summaryText}");
+
+        mirrorStopwatch.Stop();
+        var mirrorElapsed = mirrorStopwatch.Elapsed.TotalSeconds;
+        var mirrorBytes = result.BytesTransferred;
+        Metrics?.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "mirror",
+            Files = fileList.Count,
+            Succeeded = result.FilesTransferred,
+            Failed = result.FilesErrored,
+            Bytes = mirrorBytes,
+            ElapsedSeconds = mirrorElapsed,
+            ThroughputMbps = mirrorElapsed > 0 ? mirrorBytes / mirrorElapsed / (1024 * 1024) : 0,
+            FileConcurrency = MaxParallelFileRestores
+        });
 
         return result;
     }
@@ -446,6 +452,20 @@ public partial class RestoreService
                         Log($"{logPrefix} CRC recovery diagnostics written to {promoDiagPath}");
                     }
 
+                    // Record machine-readable corruption metrics for CRC-only failures
+                    Metrics?.RecordCorruption(new CorruptionMetrics
+                    {
+                        Operation = "restore",
+                        Path = file.LocalPath,
+                        FileBytes = file.FileSize,
+                        TotalChunks = file.Chunks.Count,
+                        RecoveredChunks = file.Chunks.Count,
+                        UnrecoverableChunks = 0,
+                        TriggerError = ex.Message,
+                        RecoveredPath = targetPath,
+                        DiagFile = promoDiagPath ?? string.Empty
+                    });
+
                     try
                     {
                         if (File.Exists(targetPath))
@@ -488,6 +508,20 @@ public partial class RestoreService
                 {
                     Log($"{logPrefix} Recovery diagnostics written to {diagPath}");
                 }
+
+                // Record machine-readable corruption metrics alongside the .diag file
+                Metrics?.RecordCorruption(new CorruptionMetrics
+                {
+                    Operation = "restore",
+                    Path = file.LocalPath,
+                    FileBytes = file.FileSize,
+                    TotalChunks = file.Chunks.Count,
+                    RecoveredChunks = file.Chunks.Count - unrecoverableChunks,
+                    UnrecoverableChunks = unrecoverableChunks,
+                    TriggerError = ex.Message,
+                    RecoveredPath = recoveredPath,
+                    DiagFile = diagPath ?? string.Empty
+                });
 
                 return (FileRestoreOutcome.CorruptedRecovery, recoveredPath, unrecoverableChunks);
             }
@@ -663,17 +697,67 @@ public partial class RestoreService
     {
         ArgumentNullException.ThrowIfNull(filesWithPaths);
 
-        RestoreResult result = new();
         var fileList = filesWithPaths.ToList();
+        var opStopwatch = Stopwatch.StartNew();
+
+        Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping (parallel)");
+        StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
+
+        var config = _databaseService.GetConfiguration();
+        using var memoryBudget = MemoryBudget.FromConfig(config, FileStreamOverhead);
+
+        Log($"RestoreFilesWithRemappingAsync: memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")}");
+
+        Metrics?.RecordContext("restore", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
+
+        var result = await RestoreFilesBatchCoreAsync(
+            fileList, overwriteExisting, memoryBudget, progress, fileByteProgress, cancellationToken);
+
+        Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, " +
+            $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed, " +
+            $"{result.TotalBytesRestored} bytes");
+
+        opStopwatch.Stop();
+        var opElapsed = opStopwatch.Elapsed.TotalSeconds;
+        Metrics?.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "restore",
+            Files = fileList.Count,
+            Succeeded = result.SuccessfulFiles.Count + result.CorruptedRecoveryFiles.Count,
+            Failed = result.FailedFiles.Count,
+            Bytes = result.TotalBytesRestored,
+            Chunks = fileList.Sum(f => f.file.Chunks.Count),
+            ElapsedSeconds = opElapsed,
+            ThroughputMbps = opElapsed > 0 ? result.TotalBytesRestored / opElapsed / (1024 * 1024) : 0,
+            FileConcurrency = MaxParallelFileRestores,
+            MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
+            BudgetStalls = (int)memoryBudget.StallCount
+        });
+
+        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
+        return result;
+    }
+
+    /// <summary>
+    /// Core two-tier parallel restore logic shared by <see cref="RestoreFilesWithRemappingAsync"/>
+    /// and <see cref="MirrorSyncToLocalAsync"/>.
+    /// Uses size-aware parallelism: small files (≤16 MB) at 32× concurrency,
+    /// large files at <see cref="MaxParallelFileRestores"/>× with size-descending scheduling.
+    /// Does NOT create a memory budget or record operation-level metrics — callers are responsible.
+    /// </summary>
+    private async Task<RestoreResult> RestoreFilesBatchCoreAsync(
+        List<(BackedUpFile file, string targetPath)> fileList,
+        bool overwriteExisting,
+        MemoryBudget memoryBudget,
+        IProgress<(int current, int total, string file)>? progress,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress,
+        CancellationToken cancellationToken)
+    {
+        RestoreResult result = new();
         var totalFiles = fileList.Count;
         int[] completedFiles = [0];
         object resultLock = new();
 
-        Log($"RestoreFilesWithRemappingAsync: Restoring {totalFiles} files with path remapping (parallel)");
-        StatusChanged?.Invoke(this, $"Starting restore of {totalFiles} files");
-
-        // Size-aware parallelism: small files are latency-bound (high parallelism),
-        // large files are bandwidth-bound (moderate parallelism with deep chunk concurrency)
         const long SmallFileThreshold = 16L * 1024 * 1024; 
         const int MaxParallelSmallFiles = 32;
 
@@ -688,24 +772,11 @@ public partial class RestoreService
                 largeFiles.Add((fileList[i].file, fileList[i].targetPath, i));
         }
 
-        // Pre-sort large files by size descending so the biggest files start first.
-        // This saturates network bandwidth early and avoids a long tail of large files at the end.
         largeFiles.Sort((a, b) => b.file.FileSize.CompareTo(a.file.FileSize));
 
-        Log($"RestoreFilesWithRemappingAsync: {smallFiles.Count} small files (≤{SmallFileThreshold / (1024 * 1024)} MB, max {MaxParallelSmallFiles} concurrent), " +
+        Log($"RestoreFilesBatchCoreAsync: {smallFiles.Count} small files (≤{SmallFileThreshold / (1024 * 1024)} MB, max {MaxParallelSmallFiles} concurrent), " +
             $"{largeFiles.Count} large files (max {MaxParallelFileRestores} concurrent)");
 
-        // Create a shared memory budget from the user's config.
-        // All concurrent file restores share this single budget so the total
-        // in-flight chunk memory stays within the user's limit.
-        var config = _databaseService.GetConfiguration();
-        using var memoryBudget = MemoryBudget.FromConfig(config, FileStreamOverhead);
-
-        Log($"RestoreFilesWithRemappingAsync: memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")}");
-
-        // Run small and large file restores concurrently — they use different resources:
-        // small files are latency-bound (HTTP round-trips), large files are bandwidth-bound (chunk streaming).
-        // Running them together avoids wasting network bandwidth while small files do metadata I/O.
         List<Task> restoreTasks = [];
 
         if (smallFiles.Count > 0)
@@ -748,10 +819,6 @@ public partial class RestoreService
 
         await Task.WhenAll(restoreTasks);
 
-        Log($"RestoreFilesWithRemappingAsync: Complete - {result.SuccessfulFiles.Count} succeeded, " +
-            $"{result.CorruptedRecoveryFiles.Count} corrupted-recovered, {result.FailedFiles.Count} failed, " +
-            $"{result.TotalBytesRestored} bytes");
-        StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));
         return result;
     }
 

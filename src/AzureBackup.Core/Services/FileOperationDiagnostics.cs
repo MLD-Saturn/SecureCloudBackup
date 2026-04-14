@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace AzureBackup.Core.Services;
 
@@ -67,6 +69,7 @@ public sealed class FileOperationDiagnostics
     }
 
     private readonly ConcurrentQueue<string> _entries = new();
+    private readonly ConcurrentQueue<ChunkDiagRecord> _chunkRecords = new();
     private readonly string _filePath;
     private readonly string _operation;
     private readonly long _startTicks = Environment.TickCount64;
@@ -125,6 +128,16 @@ public sealed class FileOperationDiagnostics
         if (extra != null) sb.Append($", {extra}");
 
         Record(sb.ToString());
+        _chunkRecords.Enqueue(new ChunkDiagRecord
+        {
+            Phase = phase,
+            Index = chunkIndex,
+            Hash = chunkHash,
+            PlainSize = plainSize,
+            EncryptedSize = encryptedSize,
+            CrcValid = crcValid,
+            Extra = extra
+        });
     }
 
     /// <summary>
@@ -148,6 +161,16 @@ public sealed class FileOperationDiagnostics
         if (extra != null) sb.Append($", {extra}");
 
         Record(sb.ToString());
+        _chunkRecords.Enqueue(new ChunkDiagRecord
+        {
+            Phase = phase,
+            Index = -1,
+            Hash = chunkHash,
+            PlainSize = plainSize,
+            EncryptedSize = encryptedSize,
+            CrcValid = crcValid,
+            Extra = extra
+        });
     }
 
     /// <summary>
@@ -201,6 +224,24 @@ public sealed class FileOperationDiagnostics
                 writer.WriteLine(entry);
             }
 
+            // Write machine-readable companion file with structured chunk data
+            if (!_chunkRecords.IsEmpty)
+            {
+                var jsonlPath = diagPath + ".jsonl";
+                try
+                {
+                    using var jsonWriter = new StreamWriter(jsonlPath, append: false, Encoding.UTF8);
+                    while (_chunkRecords.TryDequeue(out var record))
+                    {
+                        jsonWriter.WriteLine(JsonSerializer.Serialize(record, ChunkDiagRecord.JsonOptions));
+                    }
+                }
+                catch
+                {
+                    // Best-effort — structured file is a bonus, not critical
+                }
+            }
+
             return diagPath;
         }
         catch
@@ -220,4 +261,38 @@ public sealed class FileOperationDiagnostics
         // Truncate to reasonable length
         return sb.Length > 80 ? sb.ToString(0, 80) : sb.ToString();
     }
+}
+
+/// <summary>
+/// Machine-readable chunk-level diagnostic record written to .diag.jsonl companion files.
+/// Each line represents one chunk operation (download, verify, decrypt) with its outcome.
+/// </summary>
+public sealed class ChunkDiagRecord
+{
+    internal static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault,
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+    };
+
+    /// <summary>Operation phase (e.g., "Downloaded", "Verified", "BestEffortOK", "BestEffortFAIL").</summary>
+    public string Phase { get; init; } = string.Empty;
+
+    /// <summary>Chunk index within the file (-1 if only hash is known).</summary>
+    public int Index { get; init; }
+
+    /// <summary>Full SHA-256 hash of the chunk content.</summary>
+    public string Hash { get; init; } = string.Empty;
+
+    /// <summary>Plaintext size in bytes.</summary>
+    public int PlainSize { get; init; }
+
+    /// <summary>Encrypted blob size in bytes (0 if not available).</summary>
+    public int EncryptedSize { get; init; }
+
+    /// <summary>CRC32 envelope check result (null if not checked).</summary>
+    public bool? CrcValid { get; init; }
+
+    /// <summary>Additional context (e.g., "aesGcm=OK", "blob=404").</summary>
+    public string? Extra { get; init; }
 }
