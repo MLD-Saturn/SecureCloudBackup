@@ -34,9 +34,12 @@ public partial class AzureBlobService : IBlobStorageService
         InitialTransferSize = 8 * 1024 * 1024   // Start with 8 MB initial transfer
     };
 
-    // Retry settings for upload integrity failures (MD5 mismatch from Azure)
-    private const int MaxUploadRetries = 25;
+    // Retry settings for upload failures. We retry on transient failures (MD5 mismatch
+    // from in-transit corruption, 5xx, 408, 429, socket / IO errors, timeouts) but NOT
+    // on permanent failures (auth, not found, forbidden) which should surface immediately.
+    private const int MaxUploadRetries = 10;
     private const int UploadRetryBaseDelayMs = 500;
+    private const int UploadRetryMaxDelayMs = 30_000;
 
     public bool IsConnected => _containerClient != null;
     public long TotalBytesUploaded { get; private set; }
@@ -256,10 +259,22 @@ public partial class AzureBlobService : IBlobStorageService
                     return blobName;
                 }
 
-                // Hash collision detected - find next available collision suffix
-                blobName = await FindNextCollisionBlobNameAsync(chunkHash, cancellationToken);
+                // Hash collision on the primary blob. Before writing a new collision version,
+                // probe existing _v2.._vN and dedup to an existing match if one exists. Only
+                // when NO existing version matches do we create a new one — otherwise we would
+                // upload a duplicate for every caller whose data hashes to the same value.
+                var (dedupedBlobName, isNewCollision) = await ResolveCollisionBlobNameAsync(
+                    chunkHash, chunkData, cancellationToken);
+                if (!isNewCollision)
+                {
+                    Log($"UploadChunkAsync: Deduplicated to existing collision blob {dedupedBlobName}");
+                    progress?.Report(encryptedLength);
+                    return dedupedBlobName;
+                }
+
+                blobName = dedupedBlobName;
                 blobClient = _containerClient!.GetBlobClient(blobName);
-                Log($"UploadChunkAsync: Using collision blob name: {blobName}");
+                Log($"UploadChunkAsync: Using new collision blob name: {blobName}");
             }
 
             await UploadEncryptedChunkAsync(blobClient, rentedBuffer, encryptedLength,
@@ -569,8 +584,62 @@ public partial class AzureBlobService : IBlobStorageService
     }
 
     /// <summary>
+    /// Resolves which blob name to use for a chunk whose primary hash slot is
+    /// occupied by a different payload (a genuine collision, corruption, or tampering).
+    /// <para>
+    /// Walks the collision suffix chain <c>chunks/{hash}_v2</c>, <c>_v3</c>, …
+    /// and verifies each entry against <paramref name="chunkData"/>. When an existing
+    /// version matches, its blob name is returned as a dedup target. Otherwise the
+    /// first unused suffix is returned for a new upload.
+    /// </para>
+    /// </summary>
+    /// <returns>A tuple of (blobName, isNewCollision). When isNewCollision is false,
+    /// the blob already exists and the caller should skip the upload.</returns>
+    private async Task<(string BlobName, bool IsNewCollision)> ResolveCollisionBlobNameAsync(
+        string chunkHash,
+        ReadOnlyMemory<byte> chunkData,
+        CancellationToken cancellationToken)
+    {
+        for (int version = 2; version <= 1000; version++)
+        {
+            var candidateName = $"chunks/{chunkHash}_v{version}";
+            var blobClient = _containerClient!.GetBlobClient(candidateName);
+
+            if (!await blobClient.ExistsAsync(cancellationToken))
+            {
+                Log($"ResolveCollisionBlobNameAsync: Found available collision slot: {candidateName}");
+                TotalOperations++;
+                return (candidateName, IsNewCollision: true);
+            }
+
+            TotalOperations++;
+
+            // An existing collision version exists — check whether it matches our data.
+            // If yes, dedup to it. If the stored content differs (hash-and-size collision
+            // collision, i.e. another distinct payload on the same version), keep probing.
+            try
+            {
+                await VerifyChunkIntegrityAsync(candidateName["chunks/".Length..], chunkData, cancellationToken);
+                Log($"ResolveCollisionBlobNameAsync: Existing {candidateName} matches, deduping");
+                return (candidateName, IsNewCollision: false);
+            }
+            catch (HashCollisionException)
+            {
+                // Different content at this version — keep probing.
+                continue;
+            }
+        }
+
+        // This should never happen — 1000 collisions for the same hash is beyond impossible
+        throw new InvalidOperationException(
+            $"Exceeded maximum collision versions (1000) for hash {chunkHash}. " +
+            "This indicates a serious system error.");
+    }
+
+    /// <summary>
     /// Finds the next available blob name for a hash collision.
     /// Searches for chunks/{hash}_v2, chunks/{hash}_v3, etc.
+    /// Kept for backward compatibility; new code should use <see cref="ResolveCollisionBlobNameAsync"/>.
     /// </summary>
     private async Task<string> FindNextCollisionBlobNameAsync(string chunkHash, CancellationToken cancellationToken)
     {
@@ -579,16 +648,16 @@ public partial class AzureBlobService : IBlobStorageService
         {
             var candidateName = $"chunks/{chunkHash}_v{version}";
             var blobClient = _containerClient!.GetBlobClient(candidateName);
-            
+
             if (!await blobClient.ExistsAsync(cancellationToken))
             {
                 Log($"FindNextCollisionBlobNameAsync: Found available collision name: {candidateName}");
                 return candidateName;
             }
-            
+
             TotalOperations++;
         }
-        
+
         // This should never happen - 1000 collisions for the same hash is beyond impossible
         throw new InvalidOperationException(
             $"Exceeded maximum collision versions (1000) for hash {chunkHash}. " +
@@ -599,16 +668,19 @@ public partial class AzureBlobService : IBlobStorageService
 
     /// <summary>
     /// Uploads data to a blob with MD5 integrity verification and automatic retry.
-    /// On MD5 mismatch (transit corruption), retries with exponential backoff.
-    /// When <paramref name="reEncrypt"/> is provided, retries re-encrypt from the
-    /// original plaintext, producing a fresh nonce/ciphertext/CRC to avoid
-    /// re-sending the same bytes that may have been corrupted in memory.
+    /// Retries transient failures (MD5 mismatch, 5xx, 408, 429, socket / IO errors,
+    /// timeouts) with exponential backoff capped at <see cref="UploadRetryMaxDelayMs"/>.
+    /// Permanent failures (401, 403, 404, authentication) are not retried.
+    /// When <paramref name="reEncrypt"/> is provided, MD5-mismatch retries re-encrypt
+    /// from the original plaintext, producing a fresh nonce/ciphertext/CRC to avoid
+    /// re-sending the same bytes that may have been corrupted in memory. Non-MD5
+    /// transient retries reuse the same bytes (no re-encryption cost).
     /// </summary>
     /// <param name="dataLength">Actual data length within <paramref name="data"/>.
     /// May be less than data.Length when using a rented buffer from ArrayPool.</param>
     /// <param name="reEncrypt">Optional callback that re-encrypts the original plaintext
     /// into the same (or a new) buffer. Returns the buffer and actual data length.
-    /// Invoked on retry attempts (attempt >= 2). Pass null for non-encrypted data.</param>
+    /// Invoked on MD5-mismatch retries only. Pass null for non-encrypted data.</param>
     private async Task UploadWithIntegrityRetryAsync(
         BlobClient blobClient,
         byte[] data,
@@ -618,14 +690,9 @@ public partial class AzureBlobService : IBlobStorageService
         Func<(byte[] Data, int Length)>? reEncrypt,
         CancellationToken cancellationToken)
     {
+        Exception? lastException = null;
         for (var attempt = 1; attempt <= MaxUploadRetries; attempt++)
         {
-            if (attempt > 1 && reEncrypt != null)
-            {
-                (data, dataLength) = reEncrypt();
-                Log($"{logContext}: Re-encrypted for retry attempt {attempt}");
-            }
-
             try
             {
                 // Compute MD5 for Azure server-side verification
@@ -636,22 +703,110 @@ public partial class AzureBlobService : IBlobStorageService
                 await blobClient.UploadAsync(stream, options, cancellationToken);
                 return; // Success
             }
-            catch (RequestFailedException ex) when (
+            catch (RequestFailedException ex) when (IsAuthenticationFailure(ex))
+            {
+                // Auth/authorization failure — never retried. Wrap in a typed exception
+                // so the orchestrator can invalidate cached credentials and prompt re-auth.
+                Log($"{logContext}: Authentication failure (HTTP {ex.Status} {ex.ErrorCode}): {ex.Message}");
+                throw new AzureAuthenticationException(
+                    $"Azure rejected the request (HTTP {ex.Status} {ex.ErrorCode}). " +
+                    "Credentials may be expired or lack the required permissions.",
+                    ex.Status, ex.ErrorCode, ex);
+            }
+            catch (Azure.Identity.AuthenticationFailedException ex)
+            {
+                Log($"{logContext}: Azure SDK AuthenticationFailedException: {ex.Message}");
+                throw new AzureAuthenticationException(
+                    "Azure authentication failed — the cached credential may be expired or revoked.",
+                    status: 401, errorCode: null, ex);
+            }
+            catch (RequestFailedException ex) when (IsPermanentFailure(ex))
+            {
+                // Don't retry permanent failures (auth/not-found/conflict). Surface immediately.
+                Log($"{logContext}: Permanent failure (HTTP {ex.Status} {ex.ErrorCode}), not retrying: {ex.Message}");
+                throw;
+            }
+            catch (Exception ex) when (
                 attempt < MaxUploadRetries &&
                 !cancellationToken.IsCancellationRequested &&
-                (ex.ErrorCode == "Md5Mismatch" || ex.Status == 400))
+                IsTransientFailure(ex))
             {
-                var delayMs = UploadRetryBaseDelayMs * (1 << (attempt - 1)); // Exponential backoff
-                Log($"{logContext}: MD5 mismatch on attempt {attempt}/{MaxUploadRetries}, " +
-                    $"data corrupted in transit. Retrying in {delayMs}ms...");
+                lastException = ex;
+                var isMd5Mismatch = ex is RequestFailedException rfe && rfe.ErrorCode == "Md5Mismatch";
+
+                // Only re-encrypt on MD5 mismatch; other transient failures don't imply
+                // corrupted bytes, so re-encrypting would be wasted CPU.
+                if (isMd5Mismatch && reEncrypt != null)
+                {
+                    (data, dataLength) = reEncrypt();
+                    Log($"{logContext}: MD5 mismatch on attempt {attempt}/{MaxUploadRetries}, re-encrypted for retry");
+                }
+
+                var delayMs = Math.Min(
+                    UploadRetryBaseDelayMs * (1 << Math.Min(attempt - 1, 10)),
+                    UploadRetryMaxDelayMs);
+                var reason = isMd5Mismatch
+                    ? "MD5 mismatch"
+                    : ex is RequestFailedException rf
+                        ? $"HTTP {rf.Status} {rf.ErrorCode}"
+                        : ex.GetType().Name;
+                Log($"{logContext}: Transient failure ({reason}) on attempt {attempt}/{MaxUploadRetries}, " +
+                    $"retrying in {delayMs}ms...");
+                FileOperationDiagnostics.RecordAmbient(
+                    $"[RETRY] {logContext} attempt={attempt}/{MaxUploadRetries} reason={reason} delayMs={delayMs}");
                 await Task.Delay(delayMs, cancellationToken);
             }
         }
 
-        // All retries exhausted — this is reachable only if MaxUploadRetries is 0
-        throw new InvalidOperationException(
-            $"{logContext}: Upload failed after {MaxUploadRetries} attempts due to repeated MD5 mismatches.");
+        var message = $"{logContext}: Upload failed after {MaxUploadRetries} attempts.";
+        if (lastException != null)
+        {
+            throw new IOException(
+                message + $" Last error: {lastException.GetType().Name}: {lastException.Message}",
+                lastException);
+        }
+        throw new InvalidOperationException(message);
     }
+
+    /// <summary>
+    /// Classifies an Azure request failure as an authentication / authorization failure.
+    /// </summary>
+    private static bool IsAuthenticationFailure(RequestFailedException ex)
+        => ex.Status is 401 or 403;
+
+    /// <summary>
+    /// Classifies an Azure upload failure as permanent (do not retry).
+    /// Permanent failures include not found, conflict, and bad request (non-MD5).
+    /// Authentication failures (401/403) are handled separately so callers can
+    /// invalidate cached credentials rather than treating them as generic errors.
+    /// </summary>
+    private static bool IsPermanentFailure(RequestFailedException ex)
+    {
+        // MD5 mismatch is transient (in-transit corruption), even though it arrives as HTTP 400
+        if (ex.ErrorCode == "Md5Mismatch") return false;
+        // 401/403 are handled by IsAuthenticationFailure before this is reached
+        return ex.Status is 400 or 404 or 409 or 412;
+    }
+
+    /// <summary>
+    /// Classifies an exception as a transient failure worth retrying.
+    /// </summary>
+    private static bool IsTransientFailure(Exception ex) => ex switch
+    {
+        RequestFailedException rfe =>
+            rfe.ErrorCode == "Md5Mismatch" ||
+            rfe.Status == 0 ||                    // no HTTP status = network error
+            rfe.Status == 408 ||                  // request timeout
+            rfe.Status == 429 ||                  // throttled
+            rfe.Status >= 500,                    // server error
+        TimeoutException => true,
+        IOException => true,
+        System.Net.Sockets.SocketException => true,
+        System.Net.Http.HttpRequestException => true,
+        // Task cancellation that was NOT caused by the user's token = server-side timeout
+        TaskCanceledException tc when !tc.CancellationToken.IsCancellationRequested => true,
+        _ => false
+    };
 
     /// <summary>
     /// Encrypts chunk data into a rented buffer and runs CRC diagnostics.

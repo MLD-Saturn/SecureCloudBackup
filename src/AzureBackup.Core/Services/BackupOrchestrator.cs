@@ -57,6 +57,14 @@ public partial class BackupOrchestrator : IAsyncDisposable
     public event EventHandler<string>? ErrorOccurred;
 
     /// <summary>
+    /// Raised when an Azure operation fails with an authentication / authorization error
+    /// (HTTP 401 or 403, or an <c>AuthenticationFailedException</c> from the Azure SDK).
+    /// Subscribers (the UI) should prompt the user to re-authenticate. The cached
+    /// credential is cleared before this event fires.
+    /// </summary>
+    public event EventHandler<AzureAuthenticationException>? AuthenticationFailed;
+
+    /// <summary>
     /// Event for detailed debug/diagnostic logging.
     /// Subscribe to this event to capture detailed operation logs.
     /// </summary>
@@ -159,11 +167,14 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// Initializes the orchestrator with a password.
     /// Includes rate limiting to prevent brute force attacks.
     /// </summary>
-    public async Task<bool> InitializeAsync(string password)
+    /// <param name="password">Password material, passed as <see cref="ReadOnlyMemory{T}"/>
+    /// so the caller can keep the plaintext in a <c>char[]</c> and zero it after use.</param>
+    public async Task<bool> InitializeAsync(ReadOnlyMemory<char> password)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
         Log("InitializeAsync: Starting initialization");
-        
+
         var config = _databaseService.GetConfiguration();
         Log($"InitializeAsync: Config loaded, AuthMethod={config.AuthMethod}, HasSalt={config.PasswordSalt != null}");
 
@@ -180,8 +191,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
         {
             // First time setup - enforce password strength
             Log("InitializeAsync: First time setup - validating password strength");
-            PasswordValidator.Validate(password);
-            
+            PasswordValidator.Validate(password.Span);
+
             // First time setup - create new salt
             config.PasswordSalt = EncryptionService.GenerateSalt();
             config.PasswordVerificationHash = await _encryptionService.CreatePasswordVerificationHashAsync(
@@ -197,13 +208,13 @@ public partial class BackupOrchestrator : IAsyncDisposable
             Log("InitializeAsync: Verifying existing password");
             var isValid = await _encryptionService.VerifyPasswordAsync(
                 password, config.PasswordSalt, config.PasswordVerificationHash!);
-            
+
             if (!isValid)
             {
                 // Record failed attempt
                 config.FailedLoginAttempts++;
                 Log($"InitializeAsync: Password verification failed, attempt #{config.FailedLoginAttempts}");
-                
+
                 if (config.FailedLoginAttempts >= MaxFailedAttempts)
                 {
                     // Calculate exponential backoff lockout
@@ -211,11 +222,11 @@ public partial class BackupOrchestrator : IAsyncDisposable
                     config.LockoutUntilUtc = DateTime.UtcNow.AddMinutes(lockoutMinutes);
                     Log($"InitializeAsync: Account locked for {lockoutMinutes} minutes");
                 }
-                
+
                 _databaseService.SaveConfiguration(config);
                 return false;
             }
-            
+
             // Successful login - reset failed attempts
             Log("InitializeAsync: Password verified successfully");
             if (config.FailedLoginAttempts > 0)
@@ -260,7 +271,80 @@ public partial class BackupOrchestrator : IAsyncDisposable
 
         return true;
     }
-    
+
+    /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="InitializeAsync(ReadOnlyMemory{char})"/>.
+    /// Prefer the span/memory overload so the plaintext password does not linger on the managed heap.
+    /// </summary>
+    public Task<bool> InitializeAsync(string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        return InitializeAsync(password.AsMemory());
+    }
+
+    /// <summary>
+    /// Invalidates the cached Azure credential after an authentication / authorization
+    /// failure and raises the <see cref="AuthenticationFailed"/> event so the UI can
+    /// prompt the user to re-authenticate.
+    /// </summary>
+    /// <remarks>
+    /// Safe to call multiple times. After this call, any Azure operation will fail
+    /// with a connection error until the user signs in again.
+    /// </remarks>
+    public void InvalidateAzureCredential(AzureAuthenticationException exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        Log($"InvalidateAzureCredential: Clearing cached credential after {exception.Status} {exception.ErrorCode}");
+
+        _credential = null;
+
+        try
+        {
+            // Mark config as no longer authenticated so the UI reflects reality.
+            var config = _databaseService.GetConfiguration();
+            if (config.IsEntraIdAuthenticated)
+            {
+                config.IsEntraIdAuthenticated = false;
+                _databaseService.SaveConfiguration(config);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"InvalidateAzureCredential: Could not update config: {ex.Message}");
+        }
+
+        AuthenticationFailed?.Invoke(this, exception);
+        ErrorOccurred?.Invoke(this,
+            "Azure authentication failed. Please sign in again from Settings.");
+    }
+
+    /// <summary>
+    /// Returns <c>true</c> if the given exception indicates an Azure auth/authz failure.
+    /// Callers in backup/restore loops use this to route via <see cref="InvalidateAzureCredential"/>.
+    /// </summary>
+    internal static bool TryExtractAuthFailure(Exception ex, out AzureAuthenticationException? auth)
+    {
+        if (ex is AzureAuthenticationException a)
+        {
+            auth = a;
+            return true;
+        }
+        if (ex is AggregateException agg)
+        {
+            foreach (var inner in agg.InnerExceptions)
+            {
+                if (TryExtractAuthFailure(inner, out auth))
+                    return true;
+            }
+        }
+        if (ex.InnerException != null)
+        {
+            return TryExtractAuthFailure(ex.InnerException, out auth);
+        }
+        auth = null;
+        return false;
+    }
+
     /// <summary>
     /// Connects to Azure based on the configured authentication method.
     /// </summary>

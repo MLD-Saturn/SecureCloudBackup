@@ -90,7 +90,7 @@ public class EncryptionServiceTests : IDisposable
 
         // Act & Assert
         await Assert.ThrowsAsync<ArgumentNullException>(() => 
-            _encryptionService.DeriveKeyAsync(null!, salt));
+            _encryptionService.DeriveKeyAsync((string)null!, salt));
     }
 
     [Fact]

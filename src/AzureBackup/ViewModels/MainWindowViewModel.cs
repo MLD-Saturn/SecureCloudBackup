@@ -731,6 +731,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _orchestrator.StatusChanged += (s, msg) => AddLog(msg);
         _orchestrator.ErrorOccurred += (s, msg) => AddLog($"ERROR: {msg}");
         _orchestrator.ProgressChanged += (s, e) => UpdateProgress(e);
+        // When Azure rejects our credential, reset the authenticated UI state so the
+        // user is prompted to sign in again instead of watching silent retry stalls.
+        _orchestrator.AuthenticationFailed += (s, ex) =>
+        {
+            AddLog($"Azure authentication failed (HTTP {ex.Status}). Please sign in again from Settings.");
+            IsEntraIdAuthenticated = false;
+            EntraIdStatus = "Not signed in";
+        };
 
         _restoreService.StatusChanged += (s, msg) => AddLog(msg);
         _restoreService.ErrorOccurred += (s, msg) => AddLog($"ERROR: {msg}");

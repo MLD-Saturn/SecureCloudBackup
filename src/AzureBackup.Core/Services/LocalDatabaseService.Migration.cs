@@ -86,12 +86,14 @@ public partial class LocalDatabaseService
     /// </summary>
     /// <param name="sourcePath">Path to the unencrypted database</param>
     /// <param name="targetPath">Path for the new encrypted database</param>
-    /// <param name="password">Password to encrypt the new database</param>
-    public static void MigrateToEncrypted(string sourcePath, string targetPath, string password)
+    /// <param name="password">Password to encrypt the new database. Span overload so the
+    /// plaintext can remain in a caller-owned <c>char[]</c> and be zeroed after use.</param>
+    public static void MigrateToEncrypted(string sourcePath, string targetPath, ReadOnlySpan<char> password)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
 
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException("Source database not found", sourcePath);
@@ -102,30 +104,46 @@ public partial class LocalDatabaseService
     }
 
     /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="MigrateToEncrypted(string, string, ReadOnlySpan{char})"/>.
+    /// </summary>
+    public static void MigrateToEncrypted(string sourcePath, string targetPath, string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        MigrateToEncrypted(sourcePath, targetPath, password.AsSpan());
+    }
+
+    /// <summary>
     /// Migrates a legacy encrypted database (raw password, no Argon2id) to the new format.
     /// Creates a new database with Argon2id key derivation and copies all data.
     /// </summary>
     /// <param name="sourcePath">Path to the legacy encrypted database</param>
     /// <param name="targetPath">Path for the new encrypted database</param>
-    /// <param name="password">Password (same password used for the legacy database)</param>
+    /// <param name="password">Password (same password used for the legacy database). Span overload
+    /// so the plaintext can remain in a caller-owned <c>char[]</c> and be zeroed after use.</param>
     /// <exception cref="InvalidPasswordException">Thrown if password is incorrect for the legacy database</exception>
-    public static void MigrateLegacyEncrypted(string sourcePath, string targetPath, string password)
+    public static void MigrateLegacyEncrypted(string sourcePath, string targetPath, ReadOnlySpan<char> password)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
 
         if (!File.Exists(sourcePath))
             throw new FileNotFoundException("Source database not found", sourcePath);
 
+        // Legacy LiteDB API only accepts string passwords. The string is short-lived
+        // (scoped to this method) and this legacy migration path runs at most once per
+        // user — after the upgrade the Argon2id path uses a derived-key Base64 string,
+        // never the user's plaintext password.
+        var legacyPasswordString = new string(password);
         // Open source with legacy encryption (raw password)
         var sourceConnString = new ConnectionString
         {
             Filename = sourcePath,
-            Password = password, // Raw password - legacy method
+            Password = legacyPasswordString, // Raw password - legacy method
             Connection = ConnectionType.Shared
         };
-        
+
         LiteDatabase sourceDb;
         try
         {
@@ -139,7 +157,7 @@ public partial class LocalDatabaseService
         {
             throw new InvalidPasswordException("Invalid password for legacy database. Please try again.", ex);
         }
-        
+
         using (sourceDb)
         {
             CopyToEncryptedDatabase(sourceDb, targetPath, password);
@@ -147,26 +165,36 @@ public partial class LocalDatabaseService
     }
 
     /// <summary>
-    /// Creates a new Argon2id-encrypted database and copies all collections from the source.
-    /// Shared by <see cref="MigrateToEncrypted"/> and <see cref="MigrateLegacyEncrypted"/>.
+    /// Legacy <c>string</c> overload of <see cref="MigrateLegacyEncrypted(string, string, ReadOnlySpan{char})"/>.
     /// </summary>
-    private static void CopyToEncryptedDatabase(LiteDatabase sourceDb, string targetPath, string password)
+    public static void MigrateLegacyEncrypted(string sourcePath, string targetPath, string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        MigrateLegacyEncrypted(sourcePath, targetPath, password.AsSpan());
+    }
+
+    /// <summary>
+    /// Creates a new Argon2id-encrypted database and copies all collections from the source.
+    /// Shared by <see cref="MigrateToEncrypted(string, string, ReadOnlySpan{char})"/> and
+    /// <see cref="MigrateLegacyEncrypted(string, string, ReadOnlySpan{char})"/>.
+    /// </summary>
+    private static void CopyToEncryptedDatabase(LiteDatabase sourceDb, string targetPath, ReadOnlySpan<char> password)
     {
         // Generate salt for the new encrypted database
         var salt = new byte[SaltSize];
         RandomNumberGenerator.Fill(salt);
-        
+
         // Save the salt file
         var saltFilePath = GetSaltFilePath(targetPath);
         File.WriteAllBytes(saltFilePath, salt);
-        
+
         // Derive strong key using Argon2id
         var derivedKey = DeriveKeyFromPassword(password, salt);
-        
+
         try
         {
             var dbPassword = Convert.ToBase64String(derivedKey);
-            
+
             // Create target (encrypted with derived key)
             var targetConnString = new ConnectionString
             {
@@ -181,7 +209,7 @@ public partial class LocalDatabaseService
             {
                 var sourceCollection = sourceDb.GetCollection(collectionName);
                 var targetCollection = targetDb.GetCollection(collectionName);
-                
+
                 foreach (var doc in sourceCollection.FindAll())
                 {
                     targetCollection.Insert(doc);

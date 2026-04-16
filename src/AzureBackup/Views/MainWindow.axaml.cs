@@ -73,20 +73,29 @@ public partial class MainWindow : Window
     {
         const int maxAttempts = 3;
         var attempts = 0;
-        
+
         while (attempts < maxAttempts)
         {
             PasswordDialog dialog = new();
             var result = await dialog.ShowDialog<bool?>(this);
-            
+
             if (result != true)
             {
                 // User cancelled
                 return false;
             }
-            
-            var password = dialog.Password;
-            var (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(password);
+
+            var password = dialog.TakePassword();
+            bool success;
+            string? errorMessage;
+            try
+            {
+                (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(password);
+            }
+            finally
+            {
+                Array.Clear(password);
+            }
 
             if (success)
             {
@@ -97,24 +106,31 @@ public partial class MainWindow : Window
                 }
                 return true;
             }
-            
+
             attempts++;
-            
+
             if (attempts < maxAttempts)
             {
                 // Show error in a new dialog
                 PasswordDialog retryDialog = new();
                 retryDialog.ShowError($"{errorMessage} ({maxAttempts - attempts} attempts remaining)");
-                
+
                 var retryResult = await retryDialog.ShowDialog<bool?>(this);
-                
+
                 if (retryResult != true)
                 {
                     return false;
                 }
-                
-                password = retryDialog.Password;
-                (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(password);
+
+                var retryPassword = retryDialog.TakePassword();
+                try
+                {
+                    (success, errorMessage) = await vm.TryUnlockWithPasswordAsync(retryPassword);
+                }
+                finally
+                {
+                    Array.Clear(retryPassword);
+                }
 
                 if (success)
                 {
@@ -124,11 +140,11 @@ public partial class MainWindow : Window
                     }
                     return true;
                 }
-                
+
                 attempts++;
             }
         }
-        
+
         // Max attempts reached
         vm.AddLogMessage("Maximum password attempts reached. Please try again later.");
         return false;

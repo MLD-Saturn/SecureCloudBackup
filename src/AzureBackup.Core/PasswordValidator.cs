@@ -15,7 +15,7 @@ public static class PasswordValidator
     /// Requires minimum length and all four character types: uppercase, lowercase, digits, and special characters.
     /// </summary>
     /// <exception cref="SecurityPolicyException">Thrown when the password does not meet requirements.</exception>
-    public static void Validate(string password)
+    public static void Validate(ReadOnlySpan<char> password)
     {
         if (password.Length < MinPasswordLength)
         {
@@ -24,10 +24,14 @@ public static class PasswordValidator
                 SecurityPolicyType.WeakPassword);
         }
 
-        var hasUpper = password.Any(char.IsUpper);
-        var hasLower = password.Any(char.IsLower);
-        var hasDigit = password.Any(char.IsDigit);
-        var hasSpecial = password.Any(c => !char.IsLetterOrDigit(c));
+        bool hasUpper = false, hasLower = false, hasDigit = false, hasSpecial = false;
+        foreach (var c in password)
+        {
+            if (char.IsUpper(c)) hasUpper = true;
+            else if (char.IsLower(c)) hasLower = true;
+            else if (char.IsDigit(c)) hasDigit = true;
+            else if (!char.IsLetterOrDigit(c)) hasSpecial = true;
+        }
 
         if (!hasUpper || !hasLower || !hasDigit || !hasSpecial)
         {
@@ -35,5 +39,14 @@ public static class PasswordValidator
                 "Password must contain all of: uppercase, lowercase, digits, and special characters.",
                 SecurityPolicyType.WeakPassword);
         }
+    }
+
+    /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="Validate(ReadOnlySpan{char})"/>.
+    /// </summary>
+    public static void Validate(string password)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        Validate(password.AsSpan());
     }
 }

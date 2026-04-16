@@ -68,18 +68,25 @@ public class EncryptionService : IDisposable
     /// This is a computationally expensive operation by design.
     /// The returned key should be zeroed after use.
     /// </summary>
-    public async Task<byte[]> DeriveKeyAsync(string password, byte[] salt)
+    /// <remarks>
+    /// Accepts <see cref="ReadOnlyMemory{T}"/> rather than <c>string</c> so callers that
+    /// hold password material in a <c>char[]</c> can keep the plaintext out of the
+    /// string intern table / long-lived managed heap. The string overload is retained
+    /// for compatibility but immediately copies into a span before calling this core.
+    /// </remarks>
+    public async Task<byte[]> DeriveKeyAsync(ReadOnlyMemory<char> password, byte[] salt)
     {
         Log("DeriveKeyAsync: Starting key derivation with Argon2id");
-        ArgumentNullException.ThrowIfNull(password);
         ArgumentNullException.ThrowIfNull(salt);
-        
-        
+
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+
         if (salt.Length != SaltSize)
             throw new ArgumentException($"Salt must be {SaltSize} bytes", nameof(salt));
 
         // Convert password to bytes and zero after use
-        var passwordBytes = Encoding.UTF8.GetBytes(password);
+        var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
             using Argon2id argon2 = new(passwordBytes)
@@ -98,6 +105,16 @@ public class EncryptionService : IDisposable
         {
             CryptographicOperations.ZeroMemory(passwordBytes);
         }
+    }
+
+    /// <summary>
+    /// Legacy <c>string</c> overload. Prefer the <see cref="ReadOnlyMemory{T}"/> overload
+    /// so the plaintext password does not linger in the string intern table.
+    /// </summary>
+    public Task<byte[]> DeriveKeyAsync(string password, byte[] salt)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        return DeriveKeyAsync(password.AsMemory(), salt);
     }
 
 
@@ -150,6 +167,8 @@ public class EncryptionService : IDisposable
     /// Computes HMAC-SHA256 of a string using the derived encryption key.
     /// Convenience overload for path-based blob name generation.
     /// Uses stackalloc for typical file paths to avoid a heap allocation per call.
+    /// For longer inputs, uses a rented, zero-on-return pool buffer so the UTF-8
+    /// encoded plaintext is not left on the managed heap for the GC to reclaim.
     /// </summary>
     public string ComputeHmacHex(string input)
     {
@@ -163,22 +182,37 @@ public class EncryptionService : IDisposable
             return ComputeHmacHex(buffer[..bytesWritten]);
         }
 
-        return ComputeHmacHex(Encoding.UTF8.GetBytes(input));
+        // Long input: rent a buffer, zero it on return so the plaintext does not
+        // linger in the pooled arrays for a future consumer to peek at.
+        var rented = System.Buffers.ArrayPool<byte>.Shared.Rent(maxByteCount);
+        try
+        {
+            var bytesWritten = Encoding.UTF8.GetBytes(input, rented);
+            return ComputeHmacHex(rented.AsSpan(0, bytesWritten));
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(rented, clearArray: true);
+        }
     }
 
     /// <summary>
     /// Creates a verification hash that can be stored to verify the password later.
     /// This is NOT the encryption key - it's a separate derivation for verification only.
     /// </summary>
-    public async Task<byte[]> CreatePasswordVerificationHashAsync(string password, byte[] salt)
+    public async Task<byte[]> CreatePasswordVerificationHashAsync(ReadOnlyMemory<char> password, byte[] salt)
     {
+        ArgumentNullException.ThrowIfNull(salt);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+
         // Use a different context to derive a verification hash
         byte[] verificationSalt = new byte[SaltSize];
         Array.Copy(salt, verificationSalt, SaltSize);
         verificationSalt[0] ^= 0xFF; // Modify salt to get different derivation
 
         // Convert password to bytes and zero after use
-        var passwordBytes = Encoding.UTF8.GetBytes(password);
+        var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
             using Argon2id argon2 = new(passwordBytes)
@@ -198,12 +232,30 @@ public class EncryptionService : IDisposable
     }
 
     /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="CreatePasswordVerificationHashAsync(ReadOnlyMemory{char}, byte[])"/>.
+    /// </summary>
+    public Task<byte[]> CreatePasswordVerificationHashAsync(string password, byte[] salt)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        return CreatePasswordVerificationHashAsync(password.AsMemory(), salt);
+    }
+
+    /// <summary>
     /// Verifies a password against a stored verification hash.
     /// </summary>
-    public async Task<bool> VerifyPasswordAsync(string password, byte[] salt, byte[] storedHash)
+    public async Task<bool> VerifyPasswordAsync(ReadOnlyMemory<char> password, byte[] salt, byte[] storedHash)
     {
         var computedHash = await CreatePasswordVerificationHashAsync(password, salt);
         return CryptographicOperations.FixedTimeEquals(computedHash, storedHash);
+    }
+
+    /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="VerifyPasswordAsync(ReadOnlyMemory{char}, byte[], byte[])"/>.
+    /// </summary>
+    public Task<bool> VerifyPasswordAsync(string password, byte[] salt, byte[] storedHash)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        return VerifyPasswordAsync(password.AsMemory(), salt, storedHash);
     }
 
     /// <summary>

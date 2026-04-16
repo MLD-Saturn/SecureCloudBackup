@@ -61,17 +61,19 @@ public partial class LocalDatabaseService : IDisposable
     /// against brute force attacks even if the database file is stolen.
     /// </summary>
     /// <param name="databasePath">Path to the database file</param>
-    /// <param name="password">Password used to encrypt the database</param>
+    /// <param name="password">Password used to encrypt the database. Supplied as a span so the
+    /// caller can keep the plaintext in a <c>char[]</c> and zero it after use.</param>
     /// <exception cref="InvalidPasswordException">Thrown if password is incorrect for existing database</exception>
-    public void Initialize(string databasePath, string password)
+    public void Initialize(string databasePath, ReadOnlySpan<char> password)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(password);
-        
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+
         Log($"Initialize: Opening encrypted database at {databasePath}");
-        
+
         _databasePath = databasePath;
-        
+
         var directory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
         {
@@ -82,7 +84,7 @@ public partial class LocalDatabaseService : IDisposable
         // Get or create the database salt
         var saltFilePath = GetSaltFilePath(databasePath);
         byte[] salt;
-        
+
         if (File.Exists(saltFilePath))
         {
             // Existing database - read salt
@@ -105,13 +107,13 @@ public partial class LocalDatabaseService : IDisposable
         // Derive strong key using Argon2id (same parameters as EncryptionService)
         Log("Initialize: Deriving database key with Argon2id...");
         var derivedKey = DeriveKeyFromPassword(password, salt);
-        
+
         try
         {
             // Convert derived key to Base64 for LiteDB password
             // LiteDB will use this as the encryption password
             var dbPassword = Convert.ToBase64String(derivedKey);
-            
+
             // Build connection string with derived key
             var connectionString = new ConnectionString
             {
@@ -123,7 +125,7 @@ public partial class LocalDatabaseService : IDisposable
             try
             {
                 _database = new LiteDatabase(connectionString);
-                
+
                 _configCollection = _database.GetCollection<BackupConfiguration>("config");
                 _filesCollection = _database.GetCollection<BackedUpFile>("files");
                 _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
@@ -134,7 +136,7 @@ public partial class LocalDatabaseService : IDisposable
                 _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
                 _filesCollection.EnsureIndex(x => x.Status);
                 _filesCollection.EnsureIndex(x => x.FileHash);
-                
+
                 // Chunk index indexes
                 _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
                 _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
@@ -155,17 +157,27 @@ public partial class LocalDatabaseService : IDisposable
             // Zero the derived key from memory
             CryptographicOperations.ZeroMemory(derivedKey);
         }
-        
+
         Log("Initialize: Encrypted database initialized successfully with Argon2id-derived key");
+    }
+
+    /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="Initialize(string, ReadOnlySpan{char})"/>.
+    /// Prefer the span overload so the plaintext password does not linger on the managed heap.
+    /// </summary>
+    public void Initialize(string databasePath, string password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+        Initialize(databasePath, password.AsSpan());
     }
 
     /// <summary>
     /// Derives a key from a password using Argon2id.
     /// Uses the same parameters as EncryptionService for consistency.
     /// </summary>
-    private static byte[] DeriveKeyFromPassword(string password, byte[] salt)
+    private static byte[] DeriveKeyFromPassword(ReadOnlySpan<char> password, byte[] salt)
     {
-        var passwordBytes = System.Text.Encoding.UTF8.GetBytes(password);
+        var passwordBytes = PasswordBytes.FromChars(password);
         try
         {
             using Argon2id argon2 = new(passwordBytes)

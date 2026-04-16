@@ -273,8 +273,17 @@ public partial class BackupOrchestrator
                 })
                 : null;
 
-            var (completed, failed, bytes) = await BackupFilesCoreAsync(
-                filesToBackup, memoryBudget, adaptedProgress, cancellationToken);
+            var (completed, failed, bytes) = (0, 0, 0L);
+            try
+            {
+                (completed, failed, bytes) = await BackupFilesCoreAsync(
+                    filesToBackup, memoryBudget, adaptedProgress, cancellationToken);
+            }
+            catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
+            {
+                InvalidateAzureCredential(auth!);
+                throw;
+            }
 
             result.FilesTransferred = completed;
             result.FilesErrored = failed;
@@ -528,8 +537,18 @@ public partial class BackupOrchestrator
 
         Metrics?.RecordContext("backup", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
 
-        var (completed, failed, processedBytes) = await BackupFilesCoreAsync(
-            filePaths, memoryBudget, progress, cancellationToken);
+        int completed = 0, failed = 0;
+        long processedBytes = 0;
+        try
+        {
+            (completed, failed, processedBytes) = await BackupFilesCoreAsync(
+                filePaths, memoryBudget, progress, cancellationToken);
+        }
+        catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
+        {
+            InvalidateAzureCredential(auth!);
+            throw;
+        }
 
         StatusChanged?.Invoke(this, $"Backup complete: {filePaths.Count} files processed");
         Log($"BackupFilesAsync: Complete - {filePaths.Count} files processed, {processedBytes} bytes");

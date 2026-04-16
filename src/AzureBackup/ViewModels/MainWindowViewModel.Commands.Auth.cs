@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -266,6 +267,11 @@ public partial class MainWindowViewModel
         }
 
         IsOperationInProgress = true;
+        // Snapshot the password into a caller-owned char[] so we can pass it
+        // down as a ReadOnlySpan<char> / ReadOnlyMemory<char> and zero it deterministically
+        // when the operation finishes. The XAML-bound string is cleared below.
+        var passwordChars = new char[Password.Length];
+        Password.AsSpan().CopyTo(passwordChars);
         try
         {
             // Step 1: Handle migration from unencrypted database if needed
@@ -273,15 +279,15 @@ public partial class MainWindowViewModel
             {
                 AddLog("Migrating database to encrypted format...");
                 var tempPath = AppMode.DatabasePath + ".encrypted";
-                
+
                 try
                 {
                     // Migrate to encrypted format
-                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, Password);
-                    
+                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
+
                     // Close any existing connections and swap files
                     _databaseService.Close();
-                    
+
                     // Backup old database and replace with encrypted one
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
                     File.Move(AppMode.DatabasePath, backupPath);
@@ -292,7 +298,7 @@ public partial class MainWindowViewModel
                     if (File.Exists(tempSaltPath))
                         File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
-                    
+
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
                 }
@@ -307,18 +313,18 @@ public partial class MainWindowViewModel
                     return;
                 }
             }
-            
+
             // Step 2: Handle migration from legacy encrypted database (raw password) to Argon2id
             if (_needsLegacyMigration)
             {
                 AddLog("Upgrading database encryption to Argon2id...");
                 var tempPath = AppMode.DatabasePath + ".upgraded";
-                
+
                 try
                 {
-                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, Password);
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
-                    
+
                     var backupPath = AppMode.DatabasePath + ".legacy.bak";
                     File.Move(AppMode.DatabasePath, backupPath);
                     File.Move(tempPath, AppMode.DatabasePath);
@@ -328,7 +334,7 @@ public partial class MainWindowViewModel
                     if (File.Exists(tempSaltPath))
                         File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
-                    
+
                     AddLog("Database encryption upgraded to Argon2id successfully");
                     _needsLegacyMigration = false;
                 }
@@ -352,7 +358,7 @@ public partial class MainWindowViewModel
             // Step 3: Initialize the encrypted database with password
             try
             {
-                _databaseService.Initialize(AppMode.DatabasePath, Password);
+                _databaseService.Initialize(AppMode.DatabasePath, passwordChars.AsSpan());
                 AddLog("Database unlocked successfully");
             }
             catch (AzureBackup.Core.InvalidPasswordException)
@@ -360,12 +366,12 @@ public partial class MainWindowViewModel
                 AddLog("Invalid password - please try again");
                 return;
             }
-            
+
             // Step 4: Load configuration from the now-unlocked database
             LoadConfiguration();
-            
+
             // Step 5: Initialize encryption service for backup operations
-            var success = await _orchestrator.InitializeAsync(Password);
+            var success = await _orchestrator.InitializeAsync(passwordChars.AsMemory());
             if (success)
             {
                 IsInitialized = true;
@@ -425,6 +431,10 @@ public partial class MainWindowViewModel
         }
         finally
         {
+            // Zero the caller-owned char[] and drop the bound string reference.
+            System.Array.Clear(passwordChars);
+            Password = string.Empty;
+            PasswordConfirm = string.Empty;
             IsOperationInProgress = false;
         }
     }
@@ -492,6 +502,10 @@ public partial class MainWindowViewModel
         }
 
         IsOperationInProgress = true;
+        // Snapshot the password into a caller-owned char[] so we can pass it
+        // down as a ReadOnlySpan<char> / ReadOnlyMemory<char> and zero it deterministically.
+        var passwordChars = new char[Password.Length];
+        Password.AsSpan().CopyTo(passwordChars);
         try
         {
             // Step 1: Handle migration from unencrypted database if needed
@@ -499,10 +513,10 @@ public partial class MainWindowViewModel
             {
                 AddLog("Migrating database to encrypted format...");
                 var tempPath = AppMode.DatabasePath + ".encrypted";
-                
+
                 try
                 {
-                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, Password);
+                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
                     
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
@@ -538,7 +552,7 @@ public partial class MainWindowViewModel
                 
                 try
                 {
-                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, Password);
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
                     
                     var backupPath = AppMode.DatabasePath + ".legacy.bak";
@@ -574,17 +588,17 @@ public partial class MainWindowViewModel
             // Step 2: Initialize the encrypted database with password
             try
             {
-                _databaseService.Initialize(AppMode.DatabasePath, Password);
+                _databaseService.Initialize(AppMode.DatabasePath, passwordChars.AsSpan());
             }
             catch (AzureBackup.Core.InvalidPasswordException)
             {
                 AddLog("Invalid password - please try again");
                 return;
             }
-            
+
             // Step 3: Load configuration from the now-unlocked database
             LoadConfiguration();
-            
+
             // For new setups, restore user input that LoadConfiguration may have overwritten
             // (config is empty for new databases, so LoadConfiguration sets defaults)
             if (isNewSetup)
@@ -593,9 +607,9 @@ public partial class MainWindowViewModel
                 ContainerName = userContainerName;
                 StorageAccountName = userStorageAccountName;
             }
-            
+
             // Step 4: Initialize encryption service for backup operations
-            var success = await _orchestrator.InitializeAsync(Password);
+            var success = await _orchestrator.InitializeAsync(passwordChars.AsMemory());
             if (!success)
             {
                 AddLog("Failed to initialize encryption");
@@ -677,6 +691,9 @@ public partial class MainWindowViewModel
         }
         finally
         {
+            System.Array.Clear(passwordChars);
+            Password = string.Empty;
+            PasswordConfirm = string.Empty;
             IsOperationInProgress = false;
         }
     }
@@ -686,14 +703,29 @@ public partial class MainWindowViewModel
     /// Used by the startup password dialog.
     /// Handles migration from unencrypted database automatically.
     /// </summary>
-    /// <param name="password">The password to try</param>
+    /// <param name="password">Password characters owned by the caller. The caller is
+    /// responsible for clearing this array with <see cref="System.Array.Clear(System.Array)"/>
+    /// after this method returns.</param>
     /// <returns>Tuple of (success, errorMessage). If success is true, errorMessage is null.</returns>
-    public async Task<(bool success, string? errorMessage)> TryUnlockWithPasswordAsync(string password)
+    public async Task<(bool success, string? errorMessage)> TryUnlockWithPasswordAsync(char[] password)
     {
-        if (string.IsNullOrWhiteSpace(password))
+        if (password is null || password.Length == 0)
         {
             return (false, "Please enter a password");
         }
+
+        // Check for whitespace-only input without allocating a string.
+        bool hasNonWhitespace = false;
+        foreach (var c in password)
+        {
+            if (!char.IsWhiteSpace(c)) { hasNonWhitespace = true; break; }
+        }
+        if (!hasNonWhitespace)
+        {
+            return (false, "Please enter a password");
+        }
+
+        var passwordMemory = password.AsMemory();
 
         try
         {
@@ -702,12 +734,12 @@ public partial class MainWindowViewModel
             {
                 AddLog("Migrating database to encrypted format...");
                 var tempPath = AppMode.DatabasePath + ".encrypted";
-                
+
                 try
                 {
-                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, password);
+                    LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, passwordMemory.Span);
                     _databaseService.Close();
-                    
+
                     var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
                     System.IO.File.Move(AppMode.DatabasePath, backupPath);
                     System.IO.File.Move(tempPath, AppMode.DatabasePath);
@@ -717,7 +749,7 @@ public partial class MainWindowViewModel
                     if (File.Exists(tempSaltPath))
                         File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
-                    
+
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
                 }
@@ -732,18 +764,18 @@ public partial class MainWindowViewModel
                     return (false, $"Migration failed: {ex.Message}");
                 }
             }
-            
+
             // Step 1b: Handle migration from legacy encrypted database to Argon2id
             if (_needsLegacyMigration)
             {
                 AddLog("Upgrading database encryption to Argon2id...");
                 var tempPath = AppMode.DatabasePath + ".upgraded";
-                
+
                 try
                 {
-                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, password);
+                    LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordMemory.Span);
                     _databaseService.Close();
-                    
+
                     var backupPath = AppMode.DatabasePath + ".legacy.bak";
                     System.IO.File.Move(AppMode.DatabasePath, backupPath);
                     System.IO.File.Move(tempPath, AppMode.DatabasePath);
@@ -753,7 +785,7 @@ public partial class MainWindowViewModel
                     if (File.Exists(tempSaltPath))
                         File.Move(tempSaltPath, finalSaltPath);
                     File.Delete(backupPath);
-                    
+
                     AddLog("Database encryption upgraded to Argon2id successfully");
                     _needsLegacyMigration = false;
                 }
@@ -776,18 +808,18 @@ public partial class MainWindowViewModel
             // Step 2: Initialize the encrypted database with password
             try
             {
-                _databaseService.Initialize(AppMode.DatabasePath, password);
+                _databaseService.Initialize(AppMode.DatabasePath, passwordMemory.Span);
             }
             catch (AzureBackup.Core.InvalidPasswordException)
             {
                 return (false, "Invalid password");
             }
-            
+
             // Step 3: Load configuration from the now-unlocked database
             LoadConfiguration();
-            
+
             // Step 4: Initialize encryption service for backup operations
-            var success = await _orchestrator.InitializeAsync(password);
+            var success = await _orchestrator.InitializeAsync(passwordMemory);
             if (!success)
             {
                 return (false, "Failed to initialize encryption");
@@ -832,6 +864,30 @@ public partial class MainWindowViewModel
         catch (System.Exception ex)
         {
             return (false, $"Unlock failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Legacy <c>string</c> overload of <see cref="TryUnlockWithPasswordAsync(char[])"/>.
+    /// Prefer the <c>char[]</c> overload so the plaintext password can be zeroed after use.
+    /// This wrapper copies into a temporary <c>char[]</c> and clears it before returning.
+    /// </summary>
+    public async Task<(bool success, string? errorMessage)> TryUnlockWithPasswordAsync(string password)
+    {
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            return (false, "Please enter a password");
+        }
+
+        var buffer = new char[password.Length];
+        password.AsSpan().CopyTo(buffer);
+        try
+        {
+            return await TryUnlockWithPasswordAsync(buffer);
+        }
+        finally
+        {
+            System.Array.Clear(buffer);
         }
     }
 
