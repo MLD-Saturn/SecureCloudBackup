@@ -917,6 +917,11 @@ public partial class MainWindowViewModel
     /// </remarks>
     private async Task EnsureReverseChunkIndexBuiltAsync()
     {
+        // Start the periodic WAL checkpoint timer once per app session. Doing this
+        // here (rather than in the ctor) guarantees the database is initialised
+        // before the first tick fires.
+        StartCheckpointTimerIfNotRunning();
+
         if (_databaseService.IsReverseChunkIndexBuilt())
         {
             return;
@@ -949,6 +954,36 @@ public partial class MainWindowViewModel
             // Let the caller's main flow continue; GetChunkEntriesForFile will
             // simply return empty until the next successful rebuild attempt.
         }
+    }
+
+    /// <summary>
+    /// Starts the hourly LiteDB WAL checkpoint timer if it has not been started
+    /// yet. Idempotent; the three login paths may all call this safely.
+    /// </summary>
+    private void StartCheckpointTimerIfNotRunning()
+    {
+        if (_checkpointTimer is not null) return;
+
+        // One hour cadence: aggressive enough to prevent multi-GB WAL bloat during
+        // continuous-backup sessions but infrequent enough that the brief
+        // write-lock window during checkpoint stays well below perceptible.
+        var interval = TimeSpan.FromHours(1);
+        _checkpointTimer = new System.Threading.Timer(
+            _ =>
+            {
+                try
+                {
+                    _databaseService.Checkpoint();
+                }
+                catch (Exception ex)
+                {
+                    // A background-timer exception must never crash the process.
+                    AddLog($"Periodic WAL checkpoint failed: {ex.Message}");
+                }
+            },
+            state: null,
+            dueTime: interval,
+            period: interval);
     }
 
     #endregion

@@ -27,6 +27,16 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private readonly ThroughputMetrics _throughputMetrics;
     private ChunkIndexService? _chunkIndexService;
 
+    /// <summary>
+    /// Periodic LiteDB WAL checkpoint timer (Phase 5 / discovered-#3). LiteDB only
+    /// checkpoints automatically when the WAL crosses its internal threshold or on
+    /// a clean shutdown; on long-running sessions with sustained small writes the
+    /// <c>-log</c> file can grow into the gigabytes before either trigger fires.
+    /// An hourly explicit checkpoint flushes the WAL into the main data file so
+    /// the next open stays fast and disk usage stays predictable.
+    /// </summary>
+    private System.Threading.Timer? _checkpointTimer;
+
     private CancellationTokenSource? _operationCts;
 
     /// <summary>
@@ -1153,6 +1163,19 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         await _orchestrator.DisposeAsync();
         await _blobService.DisposeAsync();
         _encryptionService.Dispose();
+
+        // Stop the periodic WAL checkpoint timer before disposing the database so
+        // a late-firing callback cannot race against a disposed LiteDB instance.
+        if (_checkpointTimer is not null)
+        {
+            await _checkpointTimer.DisposeAsync();
+            _checkpointTimer = null;
+        }
+
+        // Final explicit checkpoint on clean shutdown - flushes anything still
+        // sitting in the WAL into the main data file so the next open is fast.
+        try { _databaseService.Checkpoint(); } catch { /* best effort on shutdown */ }
+
         _databaseService.Dispose();
         _fileWatcherService.Dispose();
         _throughputMetrics.Dispose();
