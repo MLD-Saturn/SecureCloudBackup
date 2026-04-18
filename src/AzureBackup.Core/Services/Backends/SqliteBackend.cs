@@ -1155,15 +1155,17 @@ internal sealed class SqliteBackend : IDatabaseBackend
             return;
         }
 
-        // Snapshot the work list: every distinct file_path that has at least
-        // one chunk row but no matching chunk_file_refs row. The NOT EXISTS
-        // subquery makes the rebuild naturally idempotent - any partial
-        // progress from a cancelled prior run is preserved.
-        var paths = new List<string>();
-        using (var cmd = _connection.CreateCommand())
+        // Snapshot the work list ONCE up front so the IProgress<>
+        // contract has a real total to report against. The actual
+        // rebuild then fires as a single INSERT...SELECT - the engine
+        // does the JOIN, filtering, and bulk write entirely inside
+        // the C layer with no managed-memory round-trips.
+        cancellationToken.ThrowIfCancellationRequested();
+        var total = 0;
+        using (var countCmd = _connection.CreateCommand())
         {
-            cmd.CommandText = """
-                SELECT DISTINCT f.local_path
+            countCmd.CommandText = """
+                SELECT COUNT(DISTINCT f.local_path)
                 FROM files f
                 INNER JOIN file_chunks fc ON fc.file_id = f.id
                 WHERE NOT EXISTS (
@@ -1171,82 +1173,65 @@ internal sealed class SqliteBackend : IDatabaseBackend
                     WHERE cfr.file_path = f.local_path
                 );
                 """;
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) paths.Add(reader.GetString(0));
+            total = Convert.ToInt32(countCmd.ExecuteScalar());
         }
-
-        var total = paths.Count;
         progress?.Report((0, total));
 
-        // Batch many files per transaction so the per-commit fsync amortises
-        // across thousands of inserts. C-3 (3/N) measured the previous
-        // one-transaction-per-file design at ~12 s for 100K chunks across
-        // 1000 files; the dominant cost was 1000 fsyncs, not the
-        // INSERT statements themselves.
+        // C-3 (3c) rewrite: previously this was a 256-file batched loop with
+        // a per-batch INSERT...SELECT...WHERE local_path IN (...). The batching
+        // was added in C-3 (3a) to amortise per-file fsyncs; once the per-file
+        // fsync was gone, the batching itself became overhead (managed-memory
+        // path-list slicing, per-batch placeholder string construction,
+        // per-batch transaction begin/commit). C-3 (3b) measured the batched
+        // version at 0.572 ratio at 500K - meaningful but not gate-clearing.
         //
-        // The work batches by FILES (not rows) so cancellation lands on a
-        // file boundary - readers never see a half-populated file in the
-        // reverse index. Batch size 256 files keeps the transaction WAL
-        // pages bounded (~1 MB at 100 chunks/file) while collapsing the
-        // fsync cost by 256x.
-        const int FileBatchSize = 256;
-
-        // The fetch query is run inside the transaction, ONCE per batch,
-        // selecting (path, chunk_hash, chunk_index) for every file in the
-        // batch. We then materialise the rows up front and close the
-        // reader BEFORE running the insert prepared statement on the same
-        // connection, because Microsoft.Data.Sqlite does not allow
-        // interleaved active readers + active writes on the same
-        // connection without subtle correctness pitfalls.
-        var processed = 0;
+        // Rewrite: ONE INSERT...SELECT for the whole rebuild, in ONE
+        // transaction. NOT EXISTS preserves idempotency - cancelled or
+        // partial prior runs naturally skip already-populated paths. The
+        // engine does everything internally; no row materialisation in C#.
+        cancellationToken.ThrowIfCancellationRequested();
         var referencedAt = FormatUtc(DateTime.UtcNow);
 
-        for (var batchStart = 0; batchStart < paths.Count; batchStart += FileBatchSize)
+        using (var tx = _connection.BeginTransaction())
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var batchCount = Math.Min(FileBatchSize, paths.Count - batchStart);
-            var batchPaths = paths.GetRange(batchStart, batchCount);
-
-            // INSERT ... SELECT in one statement does the whole batch
-            // inside the engine, so we never round-trip rows back to
-            // managed memory. The `f.local_path IN (...)` clause is bound
-            // via N parameters per batch.
-            using var tx = _connection.BeginTransaction();
             using (var insert = _connection.CreateCommand())
             {
                 insert.Transaction = tx;
-
-                // Build "$p0, $p1, ... $pN" placeholder list - SQLite has no
-                // array binding, but a few hundred placeholders is cheap.
-                var placeholders = string.Join(",",
-                    Enumerable.Range(0, batchCount).Select(i => "$p" + i));
-                insert.CommandText = $"""
+                insert.CommandText = """
                     INSERT INTO chunk_file_refs
                         (file_path, chunk_hash, chunk_index, referenced_at)
                     SELECT f.local_path, fc.hash, fc.chunk_index, $referenced_at
                     FROM files f
                     INNER JOIN file_chunks fc ON fc.file_id = f.id
-                    WHERE f.local_path IN ({placeholders});
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM chunk_file_refs cfr
+                        WHERE cfr.file_path = f.local_path
+                    );
                     """;
-
                 insert.Parameters.AddWithValue("$referenced_at", referencedAt);
-                for (var i = 0; i < batchCount; i++)
-                {
-                    insert.Parameters.AddWithValue("$p" + i, batchPaths[i]);
-                }
-
                 insert.ExecuteNonQuery();
             }
             tx.Commit();
+        }
+        progress?.Report((total, total));
 
-            processed += batchCount;
-            progress?.Report((processed, total));
+        // C-3 (3c) - I4: explicit WAL checkpoint after the rebuild. The
+        // rebuild can produce tens of MB of WAL pages for the 500K case;
+        // without an explicit checkpoint the next operation would absorb
+        // the cost. TRUNCATE leaves the WAL file empty and zero-sized so
+        // a subsequent measurement (or production query) starts from a
+        // clean slate. Done OUTSIDE the rebuild transaction because
+        // checkpoint requires no active transaction.
+        using (var checkpointCmd = _connection.CreateCommand())
+        {
+            checkpointCmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            checkpointCmd.ExecuteNonQuery();
         }
 
-        // Mark complete so future calls short-circuit. Done outside the
-        // per-batch transactions so a cancel between batches does NOT leave
-        // a "complete" sentinel against partial work.
+        // Mark complete so future calls short-circuit. Done LAST so a
+        // failure during checkpoint (very unlikely - WAL checkpoint with
+        // no concurrent writer cannot fail) leaves the rebuild repeatable
+        // rather than falsely marked done.
         SetIndexMetadata(ReverseIndexSentinelKey, DateTime.UtcNow);
     }
 
@@ -1780,12 +1765,22 @@ internal sealed class SqliteBackend : IDatabaseBackend
         // foreign_keys: required for ON DELETE CASCADE to work; off by default.
         // synchronous=NORMAL: safe with WAL, much faster than FULL.
         // temp_store=MEMORY: avoid disk for sort/group temporaries.
+        // cache_size: -65536 means "65536 KiB of cache" (negative values are KB,
+        //   positive values are PAGE COUNT). Default is 2000 pages = 8 MB which
+        //   is too small for the rebuild + bulk-insert workloads we measured in
+        //   C-3 (3b): the 100K and 500K cells spilled the page cache and paid
+        //   significant decrypt-thrash cost. 64 MB sized to comfortably hold
+        //   the working set of the largest one-time migration step (~50 MB at
+        //   500K chunks). The cache lives in the SQLite/SQLCipher allocator,
+        //   not the .NET GC heap, so this does NOT show up as managed
+        //   allocations in benchmark results.
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
             PRAGMA journal_mode = WAL;
             PRAGMA foreign_keys = ON;
             PRAGMA synchronous = NORMAL;
             PRAGMA temp_store = MEMORY;
+            PRAGMA cache_size = -65536;
             """;
         cmd.ExecuteNonQuery();
     }
