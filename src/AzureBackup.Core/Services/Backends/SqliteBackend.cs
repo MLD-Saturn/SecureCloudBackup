@@ -1192,8 +1192,44 @@ internal sealed class SqliteBackend : IDatabaseBackend
         cancellationToken.ThrowIfCancellationRequested();
         var referencedAt = FormatUtc(DateTime.UtcNow);
 
+        // C-3 (3c-2) - I3: bulk-insert into an indexed table is significantly
+        // slower than bulk-insert into an unindexed table because every row
+        // touches every index. chunk_file_refs has TWO indexes
+        // (idx_chunk_file_refs_path, idx_chunk_file_refs_hash) so each
+        // INSERT does 1 table write + 2 index writes = 3x the disk pages
+        // touched. Dropping the indexes, doing the bulk insert, then
+        // recreating them in one shot is the standard "fast bulk load"
+        // pattern.
+        //
+        // SAFETY GUARD: only do the drop+recreate when chunk_file_refs is
+        // EMPTY. If a previous rebuild was cancelled mid-INSERT and left
+        // partial rows, the NOT EXISTS clause in our SELECT needs the
+        // path index to be cheap (otherwise it degenerates to a full
+        // scan of chunk_file_refs for every candidate row in the JOIN).
+        // The "empty table" check is a single-row count of pages 1-2
+        // and costs microseconds; the optimisation when it applies saves
+        // multi-second index-write cost at scale.
+        var dropAndRecreate = false;
+        using (var emptyCheck = _connection.CreateCommand())
+        {
+            emptyCheck.CommandText = "SELECT EXISTS(SELECT 1 FROM chunk_file_refs LIMIT 1);";
+            var hasAnyRow = Convert.ToInt32(emptyCheck.ExecuteScalar()) == 1;
+            dropAndRecreate = !hasAnyRow;
+        }
+
         using (var tx = _connection.BeginTransaction())
         {
+            if (dropAndRecreate)
+            {
+                using var drop = _connection.CreateCommand();
+                drop.Transaction = tx;
+                drop.CommandText = """
+                    DROP INDEX IF EXISTS idx_chunk_file_refs_path;
+                    DROP INDEX IF EXISTS idx_chunk_file_refs_hash;
+                    """;
+                drop.ExecuteNonQuery();
+            }
+
             using (var insert = _connection.CreateCommand())
             {
                 insert.Transaction = tx;
@@ -1211,6 +1247,21 @@ internal sealed class SqliteBackend : IDatabaseBackend
                 insert.Parameters.AddWithValue("$referenced_at", referencedAt);
                 insert.ExecuteNonQuery();
             }
+
+            if (dropAndRecreate)
+            {
+                // Recreate inside the same transaction so a crash mid-rebuild
+                // leaves the schema consistent on rollback. SQLite builds the
+                // index in one pass over the now-populated table.
+                using var recreate = _connection.CreateCommand();
+                recreate.Transaction = tx;
+                recreate.CommandText = """
+                    CREATE INDEX IF NOT EXISTS idx_chunk_file_refs_path ON chunk_file_refs(file_path);
+                    CREATE INDEX IF NOT EXISTS idx_chunk_file_refs_hash ON chunk_file_refs(chunk_hash);
+                    """;
+                recreate.ExecuteNonQuery();
+            }
+
             tx.Commit();
         }
         progress?.Report((total, total));

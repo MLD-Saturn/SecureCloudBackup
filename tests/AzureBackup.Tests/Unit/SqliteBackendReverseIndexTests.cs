@@ -278,6 +278,48 @@ public class SqliteBackendReverseIndexTests : IDisposable
     }
 
     [Fact]
+    public void RebuildReverseChunkIndex_FreshDb_IndexesSurviveDropAndRecreate()
+    {
+        // Arrange: fresh empty chunk_file_refs (so the rebuild takes the
+        // C-3 (3c-2) drop+recreate optimisation path) and a few files
+        // queued for backfill.
+        SeedChunkIndex("PIDX1", "PIDX2", "PIDX3");
+        _backend.SaveBackedUpFile(MakeFile(@"C:\idx\a.bin", "PIDX1"));
+        _backend.SaveBackedUpFile(MakeFile(@"C:\idx\b.bin", "PIDX2"));
+        _backend.SaveBackedUpFile(MakeFile(@"C:\idx\c.bin", "PIDX3"));
+
+        // Wipe chunk_file_refs and the sentinel via the bench helper so
+        // the rebuild has work AND the empty-table optimisation triggers.
+        _backend.ClearReverseChunkIndexForBenchmark();
+
+        // Act
+        _backend.RebuildReverseChunkIndex();
+
+        // Assert: rebuild completed and refs are queryable.
+        Assert.True(_backend.IsReverseChunkIndexBuilt());
+        Assert.Equal(1, _backend.GetChunkEntriesForFile(@"C:\idx\a.bin").Count);
+
+        // Assert: BOTH indexes were recreated. We open a separate
+        // read-only connection (via the C-3 (4a) factory) and query
+        // sqlite_master directly; this avoids adding a sqlite_master
+        // accessor to the production backend just for one test.
+        // If I3's recreate step ever regresses (e.g. someone refactors
+        // the rebuild and forgets to recreate one of the indexes), this
+        // test fails loudly.
+        using var probe = SqliteBackend.OpenReadOnlyForBenchmark(
+            _dbPath, "ReverseTestPwd!".AsSpan());
+        var indexNames = new List<string>();
+        using var cmd = probe.CreateCommand();
+        cmd.CommandText =
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'chunk_file_refs';";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) indexNames.Add(reader.GetString(0));
+
+        Assert.Contains("idx_chunk_file_refs_path", indexNames);
+        Assert.Contains("idx_chunk_file_refs_hash", indexNames);
+    }
+
+    [Fact]
     public void GetChunkEntriesForFile_NullOrWhitespace_Throws()
     {
         Assert.Throws<ArgumentException>(() => _backend.GetChunkEntriesForFile(""));
