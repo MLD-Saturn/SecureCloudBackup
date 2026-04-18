@@ -120,4 +120,31 @@ public class SqliteBackendBulkInsertHelperTests : IDisposable
         Assert.Throws<ArgumentNullException>(() =>
             _backend.BulkInsertFilesForBenchmark(null!));
     }
+
+    [Fact]
+    public void ClearReverseChunkIndexForBenchmark_RemovesRefsAndSentinel()
+    {
+        // Arrange: seed a file via the bulk helper (which writes
+        // chunk_file_refs) and mark the reverse index built.
+        var when = new DateTime(2026, 4, 17, 21, 30, 45, DateTimeKind.Utc);
+        _backend.SaveChunkIndexEntry(new ChunkIndexEntry
+        {
+            ChunkHash = "AAAA", FirstUploadedAt = when,
+            SizeBytes = 1024, ReferenceCount = 1, LastVerifiedAt = when,
+        });
+        _backend.BulkInsertFilesForBenchmark(new[] { MakeFile(@"C:\clear.bin", "AAAA") });
+        _backend.SetIndexMetadata("ReverseIndexBuiltAt", DateTime.UtcNow);
+        Assert.True(_backend.IsReverseChunkIndexBuilt());
+        Assert.Single(_backend.GetChunkEntriesForFile(@"C:\clear.bin"));
+
+        // Act
+        _backend.ClearReverseChunkIndexForBenchmark();
+
+        // Assert: refs gone, sentinel cleared, file row + chunks intact.
+        Assert.Empty(_backend.GetChunkEntriesForFile(@"C:\clear.bin"));
+        Assert.False(_backend.IsReverseChunkIndexBuilt());
+        var file = _backend.GetBackedUpFile(@"C:\clear.bin");
+        Assert.NotNull(file);
+        Assert.Single(file!.Chunks);
+    }
 }

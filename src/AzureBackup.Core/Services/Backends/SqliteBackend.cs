@@ -753,6 +753,43 @@ internal sealed class SqliteBackend : IDatabaseBackend
         tx.Commit();
     }
 
+    /// <summary>
+    /// Benchmark-only: drops every row from <c>chunk_file_refs</c> and
+    /// clears the <c>ReverseIndexBuiltAt</c> sentinel so a subsequent
+    /// <see cref="RebuildReverseChunkIndex"/> call has work to do.
+    /// Used by the C-3 (3/N) head-to-head where the SQLite leg is seeded
+    /// via <see cref="BulkInsertFilesForBenchmark"/> (which writes
+    /// chunk_file_refs as a side-effect) and we need to wipe the reverse
+    /// index between iterations to measure the rebuild cost in isolation.
+    ///
+    /// <para>
+    /// <b>Not</b> exposed via <see cref="IDatabaseBackend"/>: production
+    /// code never wants to drop the reverse index without rebuilding it.
+    /// </para>
+    /// </summary>
+    internal void ClearReverseChunkIndexForBenchmark()
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        using var tx = _connection.BeginTransaction();
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            cmd.CommandText = "DELETE FROM chunk_file_refs;";
+            cmd.ExecuteNonQuery();
+        }
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // Match the constant ReverseIndexSentinelKey used by
+            // RebuildReverseChunkIndex / IsReverseChunkIndexBuilt.
+            cmd.CommandText = "DELETE FROM index_metadata WHERE key = 'ReverseIndexBuiltAt';";
+            cmd.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+
     private List<ChunkInfo> LoadChunksForFile(long fileId)
     {
         if (_connection == null)
