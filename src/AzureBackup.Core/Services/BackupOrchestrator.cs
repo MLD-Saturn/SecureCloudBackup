@@ -579,7 +579,12 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 FullMode = BoundedChannelFullMode.Wait
             });
 
-            long bytesUploaded = 0;
+            // Phase 6 / discovered-#2: pad each hot atomic counter onto its own
+            // cache line. Without padding, MaxParallelChunkUploads consumers all
+            // contend for the cache line containing both bytesUploaded and
+            // chunksUploadedCount, producing measurable ping-pong on x64.
+            PaddedLong bytesUploaded = default;
+            PaddedLong chunksUploadedCount = default;
             var totalFileSize = fileInfo.Length;
 
             // CDC progress: report chunking phase to the user so large files don't appear hung
@@ -603,8 +608,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 }
             }, cancellationToken);
 
-            // Track chunks uploaded for status messages
-            int chunksUploadedCount = 0;
+            // Track chunks uploaded for status messages. Padded - see
+            // chunksUploadedCount declaration above for rationale.
 
             // Consumers: upload workers read from channel in parallel
             var consumerTasks = Enumerable.Range(0, MaxParallelChunkUploads).Select(async _ =>
@@ -634,7 +639,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
 
                         var uploadProgress = new Progress<long>(b =>
                         {
-                            var uploaded = Interlocked.Add(ref bytesUploaded, b);
+                            var uploaded = bytesUploaded.Add(b);
                             progress?.Report((uploaded, totalFileSize));
                         });
 
@@ -663,8 +668,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
                                 $"pre_last=0x{preLastByte:X2}→0x{postLastByte:X2}");
                         }
 
-                        var completed = Interlocked.Increment(ref chunksUploadedCount);
-                        StatusChanged?.Invoke(this, $"Uploading: {fileName} — chunk {completed} ({FormatHelper.FormatBytes(Interlocked.Read(ref bytesUploaded))}/{FormatHelper.FormatBytes(totalFileSize)})");
+                        var completed = chunksUploadedCount.Increment();
+                        StatusChanged?.Invoke(this, $"Uploading: {fileName} — chunk {completed} ({FormatHelper.FormatBytes(bytesUploaded.Read())}/{FormatHelper.FormatBytes(totalFileSize)})");
                     }
                     finally
                     {
@@ -760,8 +765,9 @@ public partial class BackupOrchestrator : IAsyncDisposable
             }
 
             // Update config stats
+            var totalBytesUploaded = bytesUploaded.Read();
             var config = _databaseService.GetConfiguration();
-            config.TotalBytesUploaded += bytesUploaded;
+            config.TotalBytesUploaded += totalBytesUploaded;
             config.LastBackupTime = DateTime.UtcNow;
             _databaseService.SaveConfiguration(config);
 
@@ -771,12 +777,12 @@ public partial class BackupOrchestrator : IAsyncDisposable
             ProgressChanged?.Invoke(this, new BackupProgressEventArgs
             {
                 FilePath = filePath,
-                BytesUploaded = bytesUploaded,
+                BytesUploaded = totalBytesUploaded,
                 ChunksUploaded = chunksToUpload.Count,
                 TotalChunks = chunks.Count
             });
 
-            StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatHelper.FormatBytes(bytesUploaded)})");
+            StatusChanged?.Invoke(this, $"Completed: {fileName} — {chunksToUpload.Count}/{chunks.Count} chunks uploaded ({FormatHelper.FormatBytes(totalBytesUploaded)})");
 
             // Record per-file throughput metrics
             fileStopwatch.Stop();

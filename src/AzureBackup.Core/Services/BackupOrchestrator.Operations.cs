@@ -596,8 +596,11 @@ public partial class BackupOrchestrator
     {
         var totalFiles = filePaths.Count;
         long totalBytes = 0;
-        long processedBytes = 0;
-        int completedFiles = 0;
+        // Phase 6 / discovered-#2: pad the two hot atomic counters onto their
+        // own cache lines so MaxParallelFileBackups workers do not false-share
+        // when concurrently updating processedBytes and completedFiles.
+        PaddedLong processedBytes = default;
+        PaddedLong completedFiles = default;
 
         // Calculate total bytes
         foreach (var filePath in filePaths)
@@ -644,11 +647,11 @@ public partial class BackupOrchestrator
                     {
                         var delta = p.current - Interlocked.Exchange(ref lastReportedFileBytes, p.current);
                         if (delta > 0)
-                            Interlocked.Add(ref processedBytes, delta);
+                            processedBytes.Add(delta);
 
                         progress?.Report((
-                            Volatile.Read(ref completedFiles), totalFiles, fileName,
-                            Interlocked.Read(ref processedBytes), totalBytes,
+                            (int)completedFiles.Read(), totalFiles, fileName,
+                            processedBytes.Read(), totalBytes,
                             p.current, currentFileSize));
                     });
 
@@ -660,15 +663,15 @@ public partial class BackupOrchestrator
                         var finalReported = Interlocked.Exchange(ref lastReportedFileBytes, currentFileSize);
                         var remaining = currentFileSize - finalReported;
                         if (remaining > 0)
-                            Interlocked.Add(ref processedBytes, remaining);
+                            processedBytes.Add(remaining);
 
-                        var done = Interlocked.Increment(ref completedFiles);
+                        var done = completedFiles.Increment();
                         Log($"BackupFilesCoreAsync: [{done}/{totalFiles}] Successfully backed up: {fileName}");
                         _databaseService.RemovePendingChange(filePath);
 
                         progress?.Report((
-                            done, totalFiles, fileName,
-                            Interlocked.Read(ref processedBytes), totalBytes,
+                            (int)done, totalFiles, fileName,
+                            processedBytes.Read(), totalBytes,
                             currentFileSize, currentFileSize));
                     }
                     else
@@ -683,7 +686,8 @@ public partial class BackupOrchestrator
                 }
             });
 
-        return (Volatile.Read(ref completedFiles), totalFiles - Volatile.Read(ref completedFiles), Interlocked.Read(ref processedBytes));
+        var completedSnapshot = (int)completedFiles.Read();
+        return (completedSnapshot, totalFiles - completedSnapshot, processedBytes.Read());
     }
 
     /// <summary>

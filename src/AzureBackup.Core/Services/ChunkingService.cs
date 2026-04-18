@@ -195,18 +195,53 @@ public class ChunkingService
         => HashHelper.ComputeHash(data);
 
     /// <summary>
-    /// Chunks a file and streams only the changed chunks to a bounded channel in a single file open.
-    /// Phase 1: Sequential CDC pass — produces chunk metadata + file hash (no data retained).
-    /// Phase 2: Filtered seek pass — re-reads only chunks not in existingHashes from the same stream.
-    /// The caller provides consumer tasks that read ChunkPayloads from the channel for upload.
-    /// Backpressure is handled by the bounded channel — the producer blocks when consumers are busy.
+    /// Chunks a file in a single sequential pass and streams every changed chunk
+    /// to the supplied bounded channel as soon as its boundary is detected.
     /// </summary>
-    /// <param name="filePath">Path to the file to chunk</param>
-    /// <param name="existingHashes">Hashes of chunks already stored in Azure (from previous backup)</param>
-    /// <param name="channel">Bounded channel to write changed chunk payloads to</param>
-    /// <param name="cdcProgress">Reports CDC phase progress as (bytesProcessed, totalBytes)</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>All chunk metadata and the file-level SHA-256 hash</returns>
+    /// <remarks>
+    /// <para>
+    /// <b>Phase 6 / P1 rewrite.</b> The previous implementation ran two passes:
+    /// Phase 1 (CDC scan, data discarded) followed by Phase 2 (re-read each
+    /// changed chunk and push). That cost ~2x the file I/O for any file whose
+    /// chunks were not all unchanged, and it required a hash-verify guard
+    /// against the rare "file modified between phases" race.
+    /// </para>
+    /// <para>
+    /// The new path computes the rolling hash, file hash, and chunk hash on a
+    /// single sequential scan. When a chunk boundary fires AND the resulting
+    /// hash is not in <paramref name="existingHashes"/>, we copy the chunk into
+    /// a fresh ArrayPool buffer and write a <see cref="ChunkPayload"/> to
+    /// <paramref name="channel"/>. The producer keeps owning its CDC scratch
+    /// buffer; the consumer owns the per-chunk payload buffer and is
+    /// responsible for returning it via <c>ArrayPool.Shared.Return</c>.
+    /// </para>
+    /// <para>
+    /// Backpressure is provided by the bounded channel: when consumers are
+    /// busy uploading, <c>WriteAsync</c> awaits and the producer naturally
+    /// slows. The CDC loop itself remains synchronous between dispatches,
+    /// so a stalled consumer cannot wedge an in-progress chunk computation.
+    /// </para>
+    /// <para>
+    /// Trade-off intentionally accepted: file modifications that occur during
+    /// the single pass are no longer detected by hash comparison. They will
+    /// still be caught on the next backup cycle when the file's
+    /// <c>LastWriteTime</c> changes. This matches the behaviour of every other
+    /// modern dedup-backup engine (restic, BorgBackup) and removes the entire
+    /// Phase 2 re-read pass.
+    /// </para>
+    /// </remarks>
+    /// <param name="filePath">Path to the file to chunk.</param>
+    /// <param name="existingHashes">
+    /// Hashes of chunks already stored in Azure (from a previous backup).
+    /// Must use <see cref="StringComparer.Ordinal"/> for correctness.
+    /// </param>
+    /// <param name="channel">Bounded channel that receives changed-chunk payloads.</param>
+    /// <param name="cdcProgress">
+    /// Optional reporter receiving (bytesProcessed, totalBytes, chunksFound)
+    /// after each chunk boundary.
+    /// </param>
+    /// <param name="cancellationToken">Cancellation token honoured per chunk.</param>
+    /// <returns>The full ordered chunk list and the file-level SHA-256 hash.</returns>
     public async Task<(List<ChunkInfo> Chunks, string FileHash)> ChunkAndStreamChangedAsync(
         string filePath,
         HashSet<string> existingHashes,
@@ -228,61 +263,35 @@ public class ChunkingService
         var fileLength = stream.Length;
         var config = GetChunkConfig(filePath, fileLength);
 
-        // Phase 1 & 2 combined for small files: single chunk, read once, write to channel if changed
+        // Tiny files: single chunk, single read, single dispatch decision.
         if (fileLength <= config.MinChunkSize)
         {
-            var dataLength = (int)fileLength;
-            // ArrayPool.Rent(0) throws; rent minimum of 1 for empty files
-            var data = ArrayPool<byte>.Shared.Rent(Math.Max(dataLength, 1));
-            await stream.ReadExactlyAsync(data.AsMemory(0, dataLength), cancellationToken);
-
-            fileHasher.AppendData(data.AsSpan(0, dataLength));
-
-            var info = new ChunkInfo
-            {
-                Index = 0,
-                Offset = 0,
-                Length = dataLength,
-                Hash = ComputeChunkHash(data.AsSpan(0, dataLength))
-            };
-            chunks.Add(info);
-
-            cdcProgress?.Report((fileLength, fileLength, 1));
-
-            if (!existingHashes.Contains(info.Hash))
-            {
-                await channel.WriteAsync(new ChunkPayload(info, data, dataLength), cancellationToken);
-            }
-            else
-            {
-                ArrayPool<byte>.Shared.Return(data);
-                info.BlobName = $"chunks/{info.Hash}";
-            }
-
+            await EmitSingleChunkAsync(stream, fileLength, fileHasher, existingHashes,
+                channel, cdcProgress, chunks, cancellationToken);
             return (chunks, FinalizeFileHash(fileHasher));
         }
 
-        // Phase 1: CDC pass — sequential read, builds chunk list + file hash, no data retained
+        // Single-pass CDC: read sequentially, dispatch each chunk to the channel
+        // the moment its boundary is found. The buffer must be large enough to
+        // hold one full max-sized chunk plus the rolling-hash window.
         var cdcBufferSize = (int)Math.Min((long)config.MaxChunkSize + WindowSize, fileLength);
         var buffer = ArrayPool<byte>.Shared.Rent(cdcBufferSize);
         try
         {
             var chunkStart = 0L;
-            var position = 0L;
             var chunkIndex = 0;
             var rollingHash = 0u;
             byte[] window = new byte[WindowSize];
             var windowPos = 0;
             var windowFilled = false;
 
-            while (position < fileLength)
+            while (chunkStart < fileLength)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var bytesToRead = (int)Math.Min(buffer.Length, fileLength - chunkStart);
                 stream.Position = chunkStart;
                 var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, bytesToRead), cancellationToken);
-
                 if (bytesRead == 0) break;
 
                 var chunkLength = 0;
@@ -304,9 +313,10 @@ public class ChunkingService
 
                     window[windowPos] = b;
                     // Branchless-friendly wrap (~5-10% faster than modulo on x64
-                    // because WindowSize=48 is not a power of two, so the JIT cannot
-                    // lower `% WindowSize` to an AND). Keeping WindowSize=48 avoids
-                    // changing CDC chunk boundaries for existing backups.
+                    // because WindowSize=48 is not a power of two, so the JIT
+                    // cannot lower `% WindowSize` to an AND). Keeping
+                    // WindowSize=48 avoids changing CDC chunk boundaries for
+                    // existing backups.
                     if (++windowPos == WindowSize)
                     {
                         windowPos = 0;
@@ -323,17 +333,32 @@ public class ChunkingService
                         var chunkSpan = buffer.AsSpan(0, chunkLength);
                         fileHasher.AppendData(chunkSpan);
 
-                        chunks.Add(new ChunkInfo
+                        var chunk = new ChunkInfo
                         {
                             Index = chunkIndex++,
                             Offset = chunkStart,
                             Length = chunkLength,
                             Hash = ComputeChunkHash(chunkSpan)
-                        });
+                        };
+                        chunks.Add(chunk);
+
+                        if (existingHashes.Contains(chunk.Hash))
+                        {
+                            // Already stored - mark for the metadata writer and skip the upload path.
+                            chunk.BlobName = $"chunks/{chunk.Hash}";
+                        }
+                        else
+                        {
+                            // Hand the chunk's bytes to a consumer immediately. We
+                            // must copy because the next chunk will reuse `buffer`.
+                            var payloadBuffer = ArrayPool<byte>.Shared.Rent(chunkLength);
+                            chunkSpan.CopyTo(payloadBuffer);
+                            await channel.WriteAsync(
+                                new ChunkPayload(chunk, payloadBuffer, chunkLength),
+                                cancellationToken);
+                        }
 
                         chunkStart += chunkLength;
-                        position = chunkStart;
-                        chunkLength = 0;
                         rollingHash = 0;
                         windowFilled = false;
                         windowPos = 0;
@@ -341,6 +366,8 @@ public class ChunkingService
 
                         cdcProgress?.Report((chunkStart, fileLength, chunks.Count));
 
+                        // Break out of the inner loop so we re-seek to chunkStart
+                        // and refill the buffer with the next chunk's bytes.
                         break;
                     }
                 }
@@ -348,48 +375,65 @@ public class ChunkingService
                 if (chunkStart >= fileLength) break;
             }
 
-            // Phase 2: Filtered seek pass — re-read only changed chunks from the same stream.
-            // Chunk data uses rented ArrayPool buffers to avoid LOH allocations.
-            // The upload consumer returns these buffers after encrypting and uploading.
-            foreach (var chunk in chunks)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (existingHashes.Contains(chunk.Hash))
-                {
-                    chunk.BlobName = $"chunks/{chunk.Hash}";
-                    continue;
-                }
-
-                stream.Position = chunk.Offset;
-                var data = ArrayPool<byte>.Shared.Rent(chunk.Length);
-                await stream.ReadExactlyAsync(data.AsMemory(0, chunk.Length), cancellationToken);
-
-                // Verify the re-read data matches the Phase 1 hash.
-                // The file could have been modified between CDC (Phase 1) and this seek pass (Phase 2).
-                // Without this check, we'd silently upload data that doesn't match the stored hash,
-                // causing every future restore to fail chunk hash verification.
-                var rereadHash = ComputeChunkHash(data.AsSpan(0, chunk.Length));
-                if (!string.Equals(rereadHash, chunk.Hash, StringComparison.Ordinal))
-                {
-                    ArrayPool<byte>.Shared.Return(data);
-                    FileOperationDiagnostics.RecordAmbient(
-                        $"[FILE MODIFIED] Phase 2 re-read hash mismatch for chunk {chunk.Index}: " +
-                        $"phase1={chunk.Hash[..12]}..., phase2={rereadHash[..12]}..., " +
-                        $"offset={chunk.Offset}, length={chunk.Length}");
-                    throw new IOException(
-                        $"File was modified during backup (chunk {chunk.Index} hash changed between CDC and upload). " +
-                        $"The file will be retried on the next backup cycle.");
-                }
-
-                await channel.WriteAsync(new ChunkPayload(chunk, data, chunk.Length), cancellationToken);
-            }
-
             return (chunks, FinalizeFileHash(fileHasher));
         }
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    /// <summary>
+    /// Specialised single-chunk path for files at or below the configured
+    /// minimum chunk size. Avoids the rolling-hash machinery entirely.
+    /// </summary>
+    private static async Task EmitSingleChunkAsync(
+        FileStream stream,
+        long fileLength,
+        IncrementalHash fileHasher,
+        HashSet<string> existingHashes,
+        ChannelWriter<ChunkPayload> channel,
+        IProgress<(long bytesProcessed, long totalBytes, int chunksFound)>? cdcProgress,
+        List<ChunkInfo> chunks,
+        CancellationToken cancellationToken)
+    {
+        var dataLength = (int)fileLength;
+        // ArrayPool.Rent(0) throws; rent minimum of 1 for empty files
+        var data = ArrayPool<byte>.Shared.Rent(Math.Max(dataLength, 1));
+        try
+        {
+            await stream.ReadExactlyAsync(data.AsMemory(0, dataLength), cancellationToken);
+
+            fileHasher.AppendData(data.AsSpan(0, dataLength));
+
+            var info = new ChunkInfo
+            {
+                Index = 0,
+                Offset = 0,
+                Length = dataLength,
+                Hash = ComputeChunkHash(data.AsSpan(0, dataLength))
+            };
+            chunks.Add(info);
+
+            cdcProgress?.Report((fileLength, fileLength, 1));
+
+            if (!existingHashes.Contains(info.Hash))
+            {
+                // Ownership transfers to the consumer.
+                await channel.WriteAsync(new ChunkPayload(info, data, dataLength), cancellationToken);
+                data = null!; // disable the finally-return
+            }
+            else
+            {
+                info.BlobName = $"chunks/{info.Hash}";
+            }
+        }
+        finally
+        {
+            if (data is not null)
+            {
+                ArrayPool<byte>.Shared.Return(data);
+            }
         }
     }
 
