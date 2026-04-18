@@ -208,4 +208,41 @@ internal interface IDatabaseBackend : IDisposable
     void RebuildReverseChunkIndex(
         IProgress<(int processed, int total)>? progress = null,
         CancellationToken cancellationToken = default);
+
+    // ---- Pending changes queue ---------------------------------------------
+
+    /// <summary>
+    /// Inserts a single change into the pending queue, replacing any
+    /// existing pending entry that targets the same
+    /// <see cref="FileChangeEvent.FilePath"/>. The replace-then-insert pair
+    /// runs inside one transaction.
+    /// </summary>
+    void QueueFileChange(FileChangeEvent change);
+
+    /// <summary>
+    /// Bulk variant of <see cref="QueueFileChange"/>: deduplicates the input
+    /// by <see cref="FileChangeEvent.FilePath"/> (last-write-wins) and
+    /// performs all DELETE + INSERT work inside a single transaction. A
+    /// null or empty input sequence is a no-op.
+    /// </summary>
+    void QueueFileChangesBatch(IEnumerable<FileChangeEvent> changes);
+
+    /// <summary>
+    /// Returns the next batch of pending changes ordered by
+    /// <see cref="FileChangeEvent.DetectedAt"/> ascending. <paramref name="batchSize"/>
+    /// values <= 0 are treated as the default of 100.
+    /// </summary>
+    List<FileChangeEvent> GetPendingChanges(int batchSize = 100);
+
+    /// <summary>
+    /// Removes every pending row whose <see cref="FileChangeEvent.FilePath"/>
+    /// matches <paramref name="filePath"/>. No-op if no rows match.
+    /// </summary>
+    void RemovePendingChange(string filePath);
+
+    /// <summary>
+    /// Returns every pending file path as an ordinal-ignore-case set so
+    /// callers can answer "is X pending?" without one round-trip per check.
+    /// </summary>
+    HashSet<string> GetAllPendingChangePaths();
 }
