@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>AzureBackup.Benchmarks.OpenDatabaseBackendBenchmark-20260418-020001</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8246/25H2/2025Update/HudsonValley2)
+Intel Core i7-9700K CPU 3.60GHz (Coffee Lake), 1 CPU, 8 logical and 8 physical cores
+.NET SDK 10.0.202
+  [Host]     : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+  Job-CARYJT : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+</code></pre>
+<pre><code>InvocationCount=1  IterationCount=5  RunStrategy=Throughput  
+UnrollFactor=1  WarmupCount=2  
+</code></pre>
+
+<table>
+<thead><tr><th>Method  </th><th>Backend</th><th>Mean</th><th>Error</th><th>StdDev</th><th>Gen0</th><th>Gen1</th><th>Gen2</th><th>Allocated</th>
+</tr>
+</thead><tbody><tr><td>OpenAndDispose</td><td>LiteDB</td><td>99.00 ms</td><td>5.162 ms</td><td>1.341 ms</td><td>2000.0000</td><td>2000.0000</td><td>2000.0000</td><td>66 MB</td>
+</tr><tr><td>OpenAndDispose</td><td>SQLite</td><td>484.98 ms</td><td>5.192 ms</td><td>1.348 ms</td><td>2000.0000</td><td>2000.0000</td><td>2000.0000</td><td>64.77 MB</td>
+</tr></tbody></table>
+</body>
+</html>
