@@ -1616,10 +1616,62 @@ internal sealed class SqliteBackend : IDatabaseBackend
 
     private void OpenAndUnlock(string databasePath, byte[] derivedKey)
     {
+        // The writer always wants a read/write connection; the pre-existence
+        // probe writes to the WAL on first open. Read-only callers (pool)
+        // get their own connections via OpenAndUnlockReadOnlyForBenchmark.
+        _connection = OpenAndUnlockCore(
+            databasePath, derivedKey, SqliteOpenMode.ReadWriteCreate, validateKey: true);
+    }
+
+    /// <summary>
+    /// Benchmark-only: opens a read-only SQLCipher-keyed connection to an
+    /// existing database. Re-uses the writer's exact key-derivation +
+    /// PRAGMA-tuning sequence so a connection opened by this method is
+    /// guaranteed to read pages the writer wrote.
+    ///
+    /// <para>
+    /// Used by C-3 (4/N) <c>SqlitePooledReader</c> to spin up a pool of
+    /// parallel-read connections against an already-initialised database.
+    /// NOT exposed via <see cref="IDatabaseBackend"/>: production code
+    /// would build a managed pool with rent/return semantics; the
+    /// benchmark only needs raw connections.
+    /// </para>
+    ///
+    /// <para>
+    /// Each returned connection has been issued <c>PRAGMA key</c> and a
+    /// page-decrypt probe. Caller owns the connection lifetime.
+    /// </para>
+    /// </summary>
+    internal static SqliteConnection OpenReadOnlyForBenchmark(
+        string databasePath, ReadOnlySpan<char> password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+        if (!File.Exists(databasePath))
+            throw new FileNotFoundException("Database does not exist", databasePath);
+
+        var salt = LoadOrCreateSalt(databasePath);
+        var derivedKey = DeriveKeyFromPassword(password, salt);
+        try
+        {
+            return OpenAndUnlockCore(
+                databasePath, derivedKey, SqliteOpenMode.ReadOnly, validateKey: true);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(derivedKey);
+        }
+    }
+
+    private static SqliteConnection OpenAndUnlockCore(
+        string databasePath, byte[] derivedKey,
+        SqliteOpenMode mode, bool validateKey)
+    {
         var connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
+            Mode = mode,
             Cache = SqliteCacheMode.Private,
             // Disable connection pooling. We manage exactly one connection
             // per backend instance; pooling would silently hand a previously
@@ -1672,7 +1724,7 @@ internal sealed class SqliteBackend : IDatabaseBackend
             // the engine reads encrypted pages off disk; a wrong key surfaces
             // as SQLITE_NOTADB (26) at that point.
             var dbExistedBeforeOpen = new FileInfo(databasePath).Length > 0;
-            if (dbExistedBeforeOpen)
+            if (validateKey && dbExistedBeforeOpen)
             {
                 try
                 {
@@ -1710,7 +1762,7 @@ internal sealed class SqliteBackend : IDatabaseBackend
                 }
             }
 
-            _connection = connection;
+            return connection;
         }
         catch
         {

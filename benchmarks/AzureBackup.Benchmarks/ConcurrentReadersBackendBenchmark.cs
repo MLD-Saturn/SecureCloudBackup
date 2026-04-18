@@ -223,10 +223,24 @@ public class ConcurrentReadersBackendBenchmark
         try { Directory.Delete(_testDir, recursive: true); } catch { /* best effort */ }
     }
 
+    private readonly object _singleConnLock = new();
+
     /// <summary>
     /// Fan-out N parallel <c>GetChunkEntriesForFile</c> calls and wait
     /// for all to complete. Returns the result count from the first
     /// task as a smoke check that the queries actually executed.
+    ///
+    /// <para>
+    /// <b>SingleConn locking note.</b> Microsoft.Data.Sqlite does not
+    /// permit two threads to use the same SqliteConnection concurrently;
+    /// the first attempt at this benchmark crashed at 4 readers with
+    /// <c>List.RemoveAt: index out of range</c> from inside M.D.Sqlite's
+    /// command-tracker. The lock here makes the as-shipped SqliteBackend
+    /// behave honestly (every reader serialises through one connection),
+    /// which is what production code calling SqliteBackend today already
+    /// has to do via the wrapping LocalDatabaseService RWLock. The
+    /// resulting numbers reflect that constraint accurately.
+    /// </para>
     /// </summary>
     [Benchmark]
     public int Concurrent()
@@ -239,7 +253,13 @@ public class ConcurrentReadersBackendBenchmark
             tasks[i] = Backend switch
             {
                 "LiteDB" => Task.Run(() => _liteDb!.GetChunkEntriesForFile(file).Count),
-                "SQLiteSingleConn" => Task.Run(() => _sqlite!.GetChunkEntriesForFile(file).Count),
+                "SQLiteSingleConn" => Task.Run(() =>
+                {
+                    lock (_singleConnLock)
+                    {
+                        return _sqlite!.GetChunkEntriesForFile(file).Count;
+                    }
+                }),
                 "SQLitePooled" => Task.Run(() => _sqlitePool!.GetChunkEntriesForFile(file, idx).Count),
                 _ => throw new InvalidOperationException($"Unknown backend: {Backend}"),
             };
@@ -274,64 +294,15 @@ internal sealed class SqlitePooledReader : IDisposable
         _connections = new SqliteConnection[connectionCount];
         for (int i = 0; i < connectionCount; i++)
         {
-            // Match the writer's connection-string config exactly EXCEPT
-            // mode=ReadOnly so the pool cannot accidentally write.
-            var connectionString = new SqliteConnectionStringBuilder
-            {
-                DataSource = databasePath,
-                Mode = SqliteOpenMode.ReadOnly,
-                Cache = SqliteCacheMode.Private,
-                Pooling = false,
-            }.ToString();
-
-            var conn = new SqliteConnection(connectionString);
-            conn.Open();
-
-            // SQLCipher keying. Copy the writer's PBKDF2 + base64
-            // approach from SqliteBackend.OpenAndUnlock so the salt and
-            // iteration count match. Reuses the password-as-key path
-            // because read connections have nothing else to do during
-            // open.
-            using (var keyCmd = conn.CreateCommand())
-            {
-                keyCmd.CommandText = "PRAGMA cipher_compatibility = 4;" +
-                    "PRAGMA kdf_iter = 1;";
-                keyCmd.ExecuteNonQuery();
-
-                // The writer side derives a key via PBKDF2 + base64 quote.
-                // For the pooled reader we use the simpler "password as
-                // hex key" path that SQLCipher accepts when given the
-                // raw PRAGMA key string. This works because SqliteBackend's
-                // writer uses the same "PRAGMA key = '<base64>'" form
-                // and any open connection that supplies the same key
-                // material can read the file.
-                //
-                // To match exactly: re-derive PBKDF2 with the same params
-                // as the writer.
-                var saltSource = System.Text.Encoding.UTF8.GetBytes("AzureBackup-SQLCipher-v1");
-                var derivedKey = System.Security.Cryptography.Rfc2898DeriveBytes.Pbkdf2(
-                    password, saltSource, 100_000,
-                    System.Security.Cryptography.HashAlgorithmName.SHA512, 32);
-
-                keyCmd.CommandText = "SELECT quote($key);";
-                keyCmd.Parameters.AddWithValue("$key", Convert.ToBase64String(derivedKey));
-                var quoted = (string?)keyCmd.ExecuteScalar();
-                keyCmd.Parameters.Clear();
-                keyCmd.CommandText = $"PRAGMA key = {quoted};";
-                keyCmd.ExecuteNonQuery();
-            }
-
-            // Validate that the key worked by reading a single row from
-            // a known-existing table. If the key is wrong this throws
-            // SqliteException with code 26 (NOTADB) and the pool fails
-            // fast at construction.
-            using (var probe = conn.CreateCommand())
-            {
-                probe.CommandText = "SELECT 1 FROM index_metadata LIMIT 1;";
-                probe.ExecuteNonQuery();
-            }
-
-            _connections[i] = conn;
+            // Reuse SqliteBackend's exact key-derivation + PRAGMA-tuning
+            // pipeline. The earlier hand-rolled PBKDF2 pool diverged from
+            // the writer in three ways (different salt, different KDF,
+            // wrong cipher_compatibility reset) and every cell failed with
+            // SQLITE_NOTADB. Routing through the factory eliminates all
+            // three classes of drift by construction - if the writer
+            // changes its keying, the pool follows automatically.
+            _connections[i] = SqliteBackend.OpenReadOnlyForBenchmark(
+                databasePath, password.AsSpan());
         }
     }
 
