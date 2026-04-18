@@ -175,4 +175,37 @@ internal interface IDatabaseBackend : IDisposable
     /// is zero - candidates for deletion in an orphan-cleanup pass.
     /// </summary>
     List<ChunkIndexEntry> GetOrphanedChunks();
+
+    // ---- Reverse chunk index (chunk_file_refs) -----------------------------
+
+    /// <summary>
+    /// Returns every <see cref="ChunkIndexEntry"/> referenced by
+    /// <paramref name="filePath"/>. Implementations are expected to use
+    /// the indexed reverse path (chunk_file_refs joined with chunk_index)
+    /// rather than scanning the primary chunk index.
+    /// </summary>
+    /// <remarks>
+    /// In the LiteDB backend this method went through several iterations
+    /// (see Phase 5 / P3 and the b0c9439 regression). The SQLite backend
+    /// uses a single SELECT JOIN with WHERE file_path = ? - clean SQL,
+    /// no expression-tree limitations.
+    /// </remarks>
+    List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath);
+
+    /// <summary>
+    /// Returns true once <see cref="RebuildReverseChunkIndex"/> has
+    /// completed at least once for this database. Detected via a
+    /// dedicated <c>index_metadata</c> sentinel key so the check is O(1).
+    /// </summary>
+    bool IsReverseChunkIndexBuilt();
+
+    /// <summary>
+    /// Populates the reverse index for any backed-up files that lack
+    /// matching <c>chunk_file_refs</c> rows. Idempotent. Used at
+    /// migration time when a LiteDB-era database is opened by SQLite for
+    /// the first time and again as a maintenance command.
+    /// </summary>
+    void RebuildReverseChunkIndex(
+        IProgress<(int processed, int total)>? progress = null,
+        CancellationToken cancellationToken = default);
 }

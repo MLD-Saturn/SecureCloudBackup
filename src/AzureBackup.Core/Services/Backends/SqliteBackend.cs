@@ -573,15 +573,27 @@ internal sealed class SqliteBackend : IDatabaseBackend
         // the UPDATE branch even if the caller forgot to round-trip first.
         file.Id = (int)fileId;
 
-        // Replace the chunk list. CASCADE on the FK would do this for free
-        // on a row delete, but we keep the parent row and only swap the
-        // chunks, so an explicit DELETE is required.
+        // Replace the chunk list AND the matching chunk_file_refs rows. The
+        // reverse index in chunk_file_refs is a denormalised projection of
+        // (file_path, chunk_hash) pairs that powers GetChunkEntriesForFile;
+        // in the SQLite backend SaveBackedUpFile is the canonical writer of
+        // that relationship (LiteDB used to derive it from a separate
+        // ReferencingFiles list on each ChunkIndexEntry, which we dropped
+        // per eval doc \u00a74). Keeping both writes inside the same
+        // transaction means readers never see a divergent state.
         using (var clear = _connection.CreateCommand())
         {
             clear.Transaction = tx;
             clear.CommandText = "DELETE FROM file_chunks WHERE file_id = $file_id;";
             clear.Parameters.AddWithValue("$file_id", fileId);
             clear.ExecuteNonQuery();
+        }
+        using (var clearRefs = _connection.CreateCommand())
+        {
+            clearRefs.Transaction = tx;
+            clearRefs.CommandText = "DELETE FROM chunk_file_refs WHERE file_path = $file_path;";
+            clearRefs.Parameters.AddWithValue("$file_path", file.LocalPath);
+            clearRefs.ExecuteNonQuery();
         }
 
         if (file.Chunks.Count > 0)
@@ -601,6 +613,19 @@ internal sealed class SqliteBackend : IDatabaseBackend
             var p_hash = insert.Parameters.Add("$hash", SqliteType.Text);
             var p_blob = insert.Parameters.Add("$blob_name", SqliteType.Text);
 
+            using var insertRef = _connection.CreateCommand();
+            insertRef.Transaction = tx;
+            insertRef.CommandText = """
+                INSERT INTO chunk_file_refs
+                    (file_path, chunk_hash, chunk_index, referenced_at)
+                VALUES ($file_path, $chunk_hash, $chunk_index, $referenced_at);
+                """;
+            var refPath = insertRef.Parameters.AddWithValue("$file_path", file.LocalPath);
+            var refHash = insertRef.Parameters.Add("$chunk_hash", SqliteType.Text);
+            var refIndex = insertRef.Parameters.Add("$chunk_index", SqliteType.Integer);
+            var refTime = insertRef.Parameters.AddWithValue("$referenced_at",
+                FormatUtc(file.BackedUpAt));
+
             for (var i = 0; i < file.Chunks.Count; i++)
             {
                 var chunk = file.Chunks[i];
@@ -611,10 +636,16 @@ internal sealed class SqliteBackend : IDatabaseBackend
                 p_hash.Value = chunk.Hash ?? string.Empty;
                 p_blob.Value = (object?)chunk.BlobName ?? string.Empty;
                 insert.ExecuteNonQuery();
+
+                refHash.Value = chunk.Hash ?? string.Empty;
+                refIndex.Value = chunk.Index;
+                insertRef.ExecuteNonQuery();
             }
 
             // Document binding so the analyzer sees the params are used.
             _ = p_fileId;
+            _ = refPath;
+            _ = refTime;
         }
 
         tx.Commit();
@@ -910,6 +941,164 @@ internal sealed class SqliteBackend : IDatabaseBackend
             CurrentTier = (StorageTier)reader.GetInt32(5),
             LastVerifiedAt = ParseUtc(reader.GetString(6)),
         };
+
+    // ---- Reverse chunk index (chunk_file_refs) -----------------------------
+
+    // Sentinel key in index_metadata that flips to a non-null timestamp once
+    // the reverse-index rebuild completes. Reads are O(1) on the primary key.
+    private const string ReverseIndexSentinelKey = "ReverseIndexBuiltAt";
+
+    /// <summary>
+    /// Returns the chunk-index rows referenced by <paramref name="filePath"/>.
+    /// Single SELECT joining chunk_file_refs (indexed on file_path) against
+    /// chunk_index (primary-key keyed on chunk_hash). DISTINCT collapses
+    /// the row count when a file references the same chunk multiple times,
+    /// which the LiteDB-era code path also did implicitly.
+    /// </summary>
+    public List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var result = new List<ChunkIndexEntry>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT DISTINCT
+                ci.chunk_hash, ci.first_uploaded_at, ci.original_uploader_path,
+                ci.size_bytes, ci.reference_count, ci.current_tier, ci.last_verified_at
+            FROM chunk_file_refs cfr
+            INNER JOIN chunk_index ci ON ci.chunk_hash = cfr.chunk_hash
+            WHERE cfr.file_path = $file_path;
+            """;
+        cmd.Parameters.AddWithValue("$file_path", filePath);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(ReadChunkEntry(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// O(1) sentinel lookup against index_metadata. Returns true once
+    /// <see cref="RebuildReverseChunkIndex"/> has run successfully at
+    /// least once for this database.
+    /// </summary>
+    public bool IsReverseChunkIndexBuilt()
+        => GetIndexMetadata(ReverseIndexSentinelKey) != null;
+
+    /// <summary>
+    /// Backfills chunk_file_refs from file_chunks for any (file, chunk)
+    /// pair that does not already have a matching reverse-index row. The
+    /// SaveBackedUpFile path keeps the two tables in sync going forward,
+    /// so this rebuild is exclusively for upgrade scenarios where a
+    /// LiteDB-era database has been migrated and the reverse index has
+    /// not yet been populated.
+    ///
+    /// <para>
+    /// The method walks distinct file paths in batches so each write
+    /// transaction stays short. Cancellation is honoured between batches.
+    /// On cancellation the partial rows are NOT rolled back - the next
+    /// invocation picks up where this one left off because the work loop
+    /// inserts only the rows that are missing.
+    /// </para>
+    /// </summary>
+    public void RebuildReverseChunkIndex(
+        IProgress<(int processed, int total)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        if (IsReverseChunkIndexBuilt())
+        {
+            return;
+        }
+
+        // Snapshot the work list: every distinct file_path that has at least
+        // one chunk row but no matching chunk_file_refs row. EXCEPT keeps
+        // the result small when the rebuild is partially complete.
+        var paths = new List<string>();
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT DISTINCT f.local_path
+                FROM files f
+                INNER JOIN file_chunks fc ON fc.file_id = f.id
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM chunk_file_refs cfr
+                    WHERE cfr.file_path = f.local_path
+                );
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) paths.Add(reader.GetString(0));
+        }
+
+        var total = paths.Count;
+        progress?.Report((0, total));
+
+        // Process one file per transaction so a cancel mid-rebuild leaves
+        // the DB in a consistent state. File counts are typically small
+        // even on large backups (~thousands), so per-file transaction
+        // overhead is negligible.
+        var processed = 0;
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            // Fetch the (hash, index) pairs for this file and insert each
+            // into chunk_file_refs. We cannot use INSERT ... SELECT here
+            // because referenced_at needs to be a freshly-stamped value
+            // and we do not retain the original BackedUpAt across the
+            // join in the rebuild path.
+            using var tx = _connection.BeginTransaction();
+
+            using (var fetch = _connection.CreateCommand())
+            {
+                fetch.Transaction = tx;
+                fetch.CommandText = """
+                    SELECT fc.hash, fc.chunk_index
+                    FROM file_chunks fc
+                    INNER JOIN files f ON f.id = fc.file_id
+                    WHERE f.local_path = $path
+                    ORDER BY fc.chunk_order;
+                    """;
+                fetch.Parameters.AddWithValue("$path", path);
+
+                using var reader = fetch.ExecuteReader();
+
+                using var insert = _connection.CreateCommand();
+                insert.Transaction = tx;
+                insert.CommandText = """
+                    INSERT INTO chunk_file_refs
+                        (file_path, chunk_hash, chunk_index, referenced_at)
+                    VALUES ($file_path, $chunk_hash, $chunk_index, $referenced_at);
+                    """;
+                insert.Parameters.AddWithValue("$file_path", path);
+                var pHash = insert.Parameters.Add("$chunk_hash", SqliteType.Text);
+                var pIndex = insert.Parameters.Add("$chunk_index", SqliteType.Integer);
+                insert.Parameters.AddWithValue("$referenced_at", FormatUtc(DateTime.UtcNow));
+
+                while (reader.Read())
+                {
+                    pHash.Value = reader.GetString(0);
+                    pIndex.Value = reader.GetInt32(1);
+                    insert.ExecuteNonQuery();
+                }
+            }
+
+            tx.Commit();
+
+            processed++;
+            progress?.Report((processed, total));
+        }
+
+        // Mark complete so future calls short-circuit. Done outside the
+        // per-file transactions so a cancel between files does NOT leave
+        // a "complete" sentinel against partial work.
+        SetIndexMetadata(ReverseIndexSentinelKey, DateTime.UtcNow);
+    }
 
     /// <summary>
     /// Closes the underlying connection and releases native handles.
