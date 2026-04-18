@@ -72,4 +72,20 @@ internal interface IDatabaseBackend : IDisposable
     /// overwriting any previous value.
     /// </summary>
     void SetIndexMetadata(string key, DateTime value);
+
+    // ---- Configuration ------------------------------------------------------
+
+    /// <summary>
+    /// Returns the singleton <see cref="BackupConfiguration"/> row, or a new
+    /// default-constructed instance when no configuration has been saved yet.
+    /// Always returns a non-null result so callers do not need null checks.
+    /// </summary>
+    BackupConfiguration GetConfiguration();
+
+    /// <summary>
+    /// Upserts the singleton <see cref="BackupConfiguration"/> row plus its
+    /// nested watched-folder and global-exclude lists. Performed under a
+    /// single transaction so partial writes can never be observed.
+    /// </summary>
+    void SaveConfiguration(BackupConfiguration configuration);
 }
