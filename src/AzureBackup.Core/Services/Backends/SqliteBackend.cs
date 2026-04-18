@@ -410,6 +410,245 @@ internal sealed class SqliteBackend : IDatabaseBackend
         => DateTime.Parse(value, System.Globalization.CultureInfo.InvariantCulture,
             System.Globalization.DateTimeStyles.RoundtripKind);
 
+    // ---- BackedUpFile -------------------------------------------------------
+
+    /// <summary>
+    /// Looks up a single backed-up-file row by local path and rebuilds its
+    /// nested chunk list in <c>chunk_order</c> order. Returns <c>null</c>
+    /// when no row matches.
+    /// </summary>
+    public BackedUpFile? GetBackedUpFile(string localPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(localPath);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        long id;
+        BackedUpFile file;
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT id, local_path, blob_name, file_size, last_modified,
+                       file_hash, status, backed_up_at, metadata_version
+                FROM files WHERE local_path = $local_path;
+                """;
+            cmd.Parameters.AddWithValue("$local_path", localPath);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+
+            id = reader.GetInt64(0);
+            file = new BackedUpFile
+            {
+                Id = (int)id,
+                LocalPath = reader.GetString(1),
+                BlobName = reader.GetString(2),
+                FileSize = reader.GetInt64(3),
+                LastModified = ParseUtc(reader.GetString(4)),
+                FileHash = reader.GetString(5),
+                Status = (BackupStatus)reader.GetInt32(6),
+                BackedUpAt = ParseUtc(reader.GetString(7)),
+                MetadataVersion = reader.GetInt32(8),
+            };
+        }
+
+        file.Chunks = LoadChunksForFile(id);
+        return file;
+    }
+
+    /// <summary>
+    /// Returns every backed-up-file row with its chunk list populated.
+    /// Two queries: one over <c>files</c>, one over <c>file_chunks</c>
+    /// pre-grouped in memory by <c>file_id</c>. This avoids the N+1
+    /// pattern that <see cref="GetBackedUpFile"/> uses for single rows.
+    /// </summary>
+    public List<BackedUpFile> GetAllBackedUpFiles()
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var byId = new Dictionary<long, BackedUpFile>();
+        var result = new List<BackedUpFile>();
+
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT id, local_path, blob_name, file_size, last_modified,
+                       file_hash, status, backed_up_at, metadata_version
+                FROM files;
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var id = reader.GetInt64(0);
+                var file = new BackedUpFile
+                {
+                    Id = (int)id,
+                    LocalPath = reader.GetString(1),
+                    BlobName = reader.GetString(2),
+                    FileSize = reader.GetInt64(3),
+                    LastModified = ParseUtc(reader.GetString(4)),
+                    FileHash = reader.GetString(5),
+                    Status = (BackupStatus)reader.GetInt32(6),
+                    BackedUpAt = ParseUtc(reader.GetString(7)),
+                    MetadataVersion = reader.GetInt32(8),
+                };
+                byId[id] = file;
+                result.Add(file);
+            }
+        }
+
+        if (byId.Count == 0) return result;
+
+        // Single pass over file_chunks; chunk_order ASC so we can append
+        // directly into each file's Chunks list without sorting later.
+        using (var cmd = _connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                SELECT file_id, chunk_index, offset, length, hash, blob_name
+                FROM file_chunks
+                ORDER BY file_id, chunk_order;
+                """;
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!byId.TryGetValue(reader.GetInt64(0), out var file)) continue;
+                file.Chunks.Add(new ChunkInfo
+                {
+                    Index = reader.GetInt32(1),
+                    Offset = reader.GetInt64(2),
+                    Length = reader.GetInt32(3),
+                    Hash = reader.GetString(4),
+                    BlobName = reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
+                });
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Inserts or updates a file row keyed by <see cref="BackedUpFile.LocalPath"/>.
+    /// The nested chunk list is replaced atomically inside a single
+    /// transaction; readers never observe a partial chunk list.
+    /// </summary>
+    public void SaveBackedUpFile(BackedUpFile file)
+    {
+        ArgumentNullException.ThrowIfNull(file);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        using var tx = _connection.BeginTransaction();
+
+        long fileId;
+        using (var upsert = _connection.CreateCommand())
+        {
+            upsert.Transaction = tx;
+            upsert.CommandText = """
+                INSERT INTO files (local_path, blob_name, file_size, last_modified,
+                                   file_hash, status, backed_up_at, metadata_version)
+                VALUES ($local_path, $blob_name, $file_size, $last_modified,
+                        $file_hash, $status, $backed_up_at, $metadata_version)
+                ON CONFLICT(local_path) DO UPDATE SET
+                    blob_name = excluded.blob_name,
+                    file_size = excluded.file_size,
+                    last_modified = excluded.last_modified,
+                    file_hash = excluded.file_hash,
+                    status = excluded.status,
+                    backed_up_at = excluded.backed_up_at,
+                    metadata_version = excluded.metadata_version
+                RETURNING id;
+                """;
+            upsert.Parameters.AddWithValue("$local_path", file.LocalPath);
+            upsert.Parameters.AddWithValue("$blob_name", file.BlobName ?? string.Empty);
+            upsert.Parameters.AddWithValue("$file_size", file.FileSize);
+            upsert.Parameters.AddWithValue("$last_modified", FormatUtc(file.LastModified));
+            upsert.Parameters.AddWithValue("$file_hash", file.FileHash ?? string.Empty);
+            upsert.Parameters.AddWithValue("$status", (int)file.Status);
+            upsert.Parameters.AddWithValue("$backed_up_at", FormatUtc(file.BackedUpAt));
+            upsert.Parameters.AddWithValue("$metadata_version", file.MetadataVersion);
+            fileId = (long)upsert.ExecuteScalar()!;
+        }
+
+        // Mirror the model id back to the caller so subsequent saves take
+        // the UPDATE branch even if the caller forgot to round-trip first.
+        file.Id = (int)fileId;
+
+        // Replace the chunk list. CASCADE on the FK would do this for free
+        // on a row delete, but we keep the parent row and only swap the
+        // chunks, so an explicit DELETE is required.
+        using (var clear = _connection.CreateCommand())
+        {
+            clear.Transaction = tx;
+            clear.CommandText = "DELETE FROM file_chunks WHERE file_id = $file_id;";
+            clear.Parameters.AddWithValue("$file_id", fileId);
+            clear.ExecuteNonQuery();
+        }
+
+        if (file.Chunks.Count > 0)
+        {
+            using var insert = _connection.CreateCommand();
+            insert.Transaction = tx;
+            insert.CommandText = """
+                INSERT INTO file_chunks
+                    (file_id, chunk_order, chunk_index, offset, length, hash, blob_name)
+                VALUES ($file_id, $chunk_order, $chunk_index, $offset, $length, $hash, $blob_name);
+                """;
+            var p_fileId = insert.Parameters.AddWithValue("$file_id", fileId);
+            var p_order = insert.Parameters.Add("$chunk_order", SqliteType.Integer);
+            var p_index = insert.Parameters.Add("$chunk_index", SqliteType.Integer);
+            var p_offset = insert.Parameters.Add("$offset", SqliteType.Integer);
+            var p_length = insert.Parameters.Add("$length", SqliteType.Integer);
+            var p_hash = insert.Parameters.Add("$hash", SqliteType.Text);
+            var p_blob = insert.Parameters.Add("$blob_name", SqliteType.Text);
+
+            for (var i = 0; i < file.Chunks.Count; i++)
+            {
+                var chunk = file.Chunks[i];
+                p_order.Value = i;
+                p_index.Value = chunk.Index;
+                p_offset.Value = chunk.Offset;
+                p_length.Value = chunk.Length;
+                p_hash.Value = chunk.Hash ?? string.Empty;
+                p_blob.Value = (object?)chunk.BlobName ?? string.Empty;
+                insert.ExecuteNonQuery();
+            }
+
+            // Document binding so the analyzer sees the params are used.
+            _ = p_fileId;
+        }
+
+        tx.Commit();
+    }
+
+    private List<ChunkInfo> LoadChunksForFile(long fileId)
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var chunks = new List<ChunkInfo>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT chunk_index, offset, length, hash, blob_name
+            FROM file_chunks
+            WHERE file_id = $file_id
+            ORDER BY chunk_order;
+            """;
+        cmd.Parameters.AddWithValue("$file_id", fileId);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            chunks.Add(new ChunkInfo
+            {
+                Index = reader.GetInt32(0),
+                Offset = reader.GetInt64(1),
+                Length = reader.GetInt32(2),
+                Hash = reader.GetString(3),
+                BlobName = reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+            });
+        }
+        return chunks;
+    }
+
     /// <summary>
     /// Closes the underlying connection and releases native handles.
     /// Safe to call multiple times.
@@ -704,12 +943,13 @@ internal sealed class SqliteBackend : IDatabaseBackend
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 local_path TEXT NOT NULL UNIQUE,
+                blob_name TEXT NOT NULL DEFAULT '',
                 file_size INTEGER NOT NULL,
                 last_modified TEXT NOT NULL,
-                file_hash TEXT NULL,
+                file_hash TEXT NOT NULL DEFAULT '',
                 status INTEGER NOT NULL,
-                backed_up_at TEXT NULL,
-                error_message TEXT NULL
+                backed_up_at TEXT NOT NULL,
+                metadata_version INTEGER NOT NULL DEFAULT 1
             );
             CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
             CREATE INDEX IF NOT EXISTS idx_files_file_hash ON files(file_hash);

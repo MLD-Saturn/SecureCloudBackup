@@ -88,4 +88,28 @@ internal interface IDatabaseBackend : IDisposable
     /// single transaction so partial writes can never be observed.
     /// </summary>
     void SaveConfiguration(BackupConfiguration configuration);
+
+    // ---- BackedUpFile -------------------------------------------------------
+
+    /// <summary>
+    /// Looks up a single backed-up file by its local path. Returns
+    /// <c>null</c> when no row matches. The returned object includes its
+    /// full <see cref="BackedUpFile.Chunks"/> list in original index order.
+    /// </summary>
+    BackedUpFile? GetBackedUpFile(string localPath);
+
+    /// <summary>
+    /// Inserts or updates a backed-up-file record by <see cref="BackedUpFile.LocalPath"/>.
+    /// The nested chunk list is replaced atomically: any existing chunks
+    /// for the same row are deleted and the new set inserted in a single
+    /// transaction so readers never observe a partial chunk list.
+    /// </summary>
+    void SaveBackedUpFile(BackedUpFile file);
+
+    /// <summary>
+    /// Returns every backed-up-file row in the database, each populated
+    /// with its full <see cref="BackedUpFile.Chunks"/> list. Order across
+    /// files is not specified.
+    /// </summary>
+    List<BackedUpFile> GetAllBackedUpFiles();
 }
