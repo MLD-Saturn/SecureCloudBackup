@@ -436,6 +436,22 @@ Immediate next work, in order:
    the C-3 (5b) measured topology. Pool lands as a separate commit
    if/when it becomes necessary.
 2. **C-2** — the migration code path with blocking-modal progress UI.
+   **Status: code path landed (`9fda662`).** The migration logic is
+   complete and tested (3 integration tests covering full round-trip,
+   idempotency, and wrong-password safety). Detection happens in
+   `LocalDatabaseService.Initialize`: when the flag is on AND the
+   target file is not a SQLite database (probed via SqliteBackend
+   open + InvalidPasswordException catch), we read every collection
+   from LiteDB and write it into a fresh SqliteBackend at
+   `<path>.sqlite-tmp`, then rename the four files into place. The
+   original LiteDB is preserved at `<path>.litedb-backup`. The
+   blocking-modal progress UI is **NOT** wired - migration runs
+   synchronously on the calling thread. The `IProgress<>` parameter
+   on `MigrateFromLiteDb` is plumbed but no caller builds a
+   reporter; that lands when MainWindow grows the modal.
+   Concurrent-write safety (the `SqliteBackend` write lock) was
+   discovered as a prerequisite while landing this and is part of
+   the same commit.
 3. **C-6** — one release in main behind the preview flag before
    forced migration.
 4. **Post-ship calibration re-run** (optional) — scenarios 1, 3, 4

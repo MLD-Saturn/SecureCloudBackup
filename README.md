@@ -182,9 +182,22 @@ docs/
 
 ## Experimental: SQLite backend preview
 
-As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. This is the preview gate described in `docs/option-c-evaluation.md` §11.8 — the C-6 soak step before a forced migration.
+As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. As of commit `9fda662` (C-2), turning the flag on against an existing LiteDB database **automatically migrates** every collection (config, chunk_index, files + chunks, pending changes, all index metadata) into a fresh SQLite database, then atomically swaps the files. Your LiteDB database is preserved as `<path>.litedb-backup` so you can roll back manually by deleting the new SQLite file and renaming `.litedb-backup` back into place.
 
-**This is a preview flag.** It is not yet wired to any migration path. Pointing it at an existing LiteDB database will silently create a fresh empty SQLite database alongside — your LiteDB data is preserved but the SQLite preview starts empty. The real migration lands in C-2.
+This is still a preview gate — see `docs/option-c-evaluation.md` §11.8 for the C-6 soak step before SQLite becomes the default.
+
+### How migration works
+
+1. On `Initialize` with `AZBK_USE_SQLITE=1` set, the app probes the existing database file. If it opens cleanly as SQLCipher, no migration runs.
+2. If the probe fails with an invalid-password exception (the file is LiteDB, not SQLite), the app opens it as LiteDB and copies every row into a fresh SQLite database written to `<path>.sqlite-tmp`.
+3. On success the rename dance runs: original LiteDB → `.litedb-backup`, original salt → `.litedb-backup.salt`, temp SQLite → target path, temp salt → `<path>.salt`.
+4. On failure the temp SQLite is deleted and the LiteDB database remains authoritative; the next launch retries from scratch.
+
+For a backup with ~5000 files and ~500K chunks the migration takes 10–15 seconds based on the C-3 head-to-head numbers. **The migration runs synchronously on the calling thread — there is no progress UI yet.** Be patient on first flag-on launch.
+
+### Wrong-password safety
+
+If you flip the flag and enter the wrong password, the app throws `InvalidPasswordException` BEFORE running migration. Your LiteDB database file is not touched. You can re-enter the correct password and migration runs normally.
 
 ### How to enable
 
@@ -214,7 +227,14 @@ The flag is read **once** per `LocalDatabaseService.Initialize` call. Flipping i
 
 ### How to turn it off
 
-Unset the environment variable and restart the app. The original LiteDB path is always the default — your LiteDB database file is never touched by the SQLite preview.
+Unset the environment variable and restart the app. The original LiteDB path is always the default. **Important caveat post-C-2:** if migration has already run (the `.litedb-backup` file exists), simply unsetting the flag will make the app open the LiteDB file at the original path — but that path now hosts the SQLite database. To roll back manually:
+
+1. Stop the app.
+2. Delete the SQLite files: `<path>`, `<path>.salt`, `<path>-wal`, `<path>-shm` (the last two may not exist).
+3. Rename `<path>.litedb-backup` → `<path>` and `<path>.litedb-backup.salt` → `<path>.salt`.
+4. Unset `AZBK_USE_SQLITE` and restart.
+
+Any writes that happened against the SQLite database between migration and rollback will be lost.
 
 ## Benchmarks
 
