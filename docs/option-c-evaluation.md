@@ -274,3 +274,165 @@ infrastructure that touches the entire app.
 | 1 | **Pure-relational schema** | Self-documenting, FK-enforced, future-proof for queries (see §4). |
 | 2 | **Delete LiteDB file on successful migration** | Atomicity is guaranteed by writing SQLite to a temp filename and only renaming + deleting once the SQLite WAL is checkpointed (see §5). |
 | 3 | **No migration telemetry** | Keep the migration code path minimal; rely on log statements to the existing diagnostic log if real-world data is ever needed. |
+
+## 11. C-3 decision rationale — **SHIP**
+
+This section replaces §6 (performance projections) with measured
+numbers and resolves the §9 decision gate. Written at the close of
+C-3, after every head-to-head benchmark in §6 had been built, run,
+and in several cases re-run after code-review-driven optimisations.
+
+### 11.1 Measured scorecard (5 scenarios)
+
+| # | Scenario | Ratio (SQLite / LiteDB) | Speedup | Source | Verdict |
+|--:|---|---:|---:|---|:---|
+| 1 | `GetChunkEntriesForFile` | 0.001–0.02 | 50–1000× | C-3 (2/N), commit `c97c559` | ✅ **PASS** |
+| 2 | `RebuildReverseChunkIndex` | **0.116–0.201** | **5–8.7×** | C-3 (3d), commit `4614004` | ✅ **PASS** |
+| 3 | `ConcurrentReaders` (pool, 16 threads) | 0.0001 | **7 275×** | C-3 (4b), commit `577bcc0` | ✅ **PASS** |
+| 4 | `BackedUpFile upsert` | 0.061–0.207 | 4.8–16.5× | C-3 (5b), commit `8aeda95` | ✅ **PASS** |
+| 5 | `Open + decrypt` | 4.90 | 0.2× (slower) | C-3 (6b), commit `16e2855` | ❌ **LOSE** |
+
+**4 of 5 decisive passes.** Gate (§9: "Ratio < 0.5 on at least 3 of 5
+scenarios") is cleared with margin to spare. Scenario 5 is the only
+loss and is a **one-time-per-launch cost** (~385 ms marginal over
+LiteDB), not a hot-path cost.
+
+### 11.2 Projections vs reality
+
+The §6 projections, written before any measurement, proved
+conservative on every scenario:
+
+| Scenario | §6 projection | Measured | Off by |
+|---|---|---|---|
+| `GetChunkEntriesForFile` (500K/100) | ~30–60 ms | 264 μs | **100–230× better** |
+| Concurrent readers (16 threads) | ~1.5–3 s | 0.80 ms | **1 875–3 750× better** |
+| Reverse-index rebuild (500K) | ~10–20 s | 4.96 s | 2–4× better |
+| Database open / decrypt | ~1 s | 485 ms | 2× better |
+| `BackedUpFile` upsert | ~0.5 ms | 0.6–2 ms | In range |
+
+The single biggest reframing during C-3 was **scenario 5**: the doc
+assumed Argon2id was a pure SQLite tax, but the measurement showed
+both backends pay Argon2id equally (LiteDB also runs Argon2id at
+open; the perceived "instant" startup users feel today is actually
+~100 ms). SQLCipher adds ~385 ms of marginal cost on top of the
+shared Argon2id, not 300–1000 ms of net new cost.
+
+### 11.3 Memory pressure (not in original projections)
+
+| Scenario | LiteDB allocation | SQLite allocation | Ratio |
+|---|---:|---:|---:|
+| ConcurrentReaders @ 16 | 1 054 MB per iteration | 707 KB | 0.0007 |
+| RebuildReverseChunkIndex @ 500K | **35 GB per iteration** | **8 KB** | 0.0000002 |
+| BackedUpFile upsert @ 100 chunks | 880 KB | 168 KB | 0.191 |
+| GetChunkEntriesForFile @ 500K | 66 MB per iteration | 44 KB | 0.0007 |
+
+The ConcurrentReaders and Rebuild cases trigger **tens of thousands
+of Gen 2 collections per single iteration** on LiteDB. SQLite
+triggers **zero** Gen 2 collections on every scenario we measured.
+This is an independent argument for SQLite beyond the raw-throughput
+wins.
+
+### 11.4 Production-relevant improvements committed during C-3
+
+The C-3 phase produced production improvements beyond the original
+C-1 scope. Enumerated for handoff to C-1 final step b:
+
+1. **`PRAGMA cache_size = -65536`** (64 MB) in `ApplyPragmas` — C-3
+   (3c-1) commit `9891bf0`. Every SQLite operation benefits.
+   Scenarios 1/3/4 not re-measured with this change active; numbers
+   would be equal or slightly better.
+
+2. **`RebuildReverseChunkIndex` rewritten** from 256-file batched
+   loop to single `INSERT … SELECT` with `NOT EXISTS` idempotency —
+   C-3 (3c-1). Net −30 LOC, 5× faster at scale.
+
+3. **Index drop + recreate during bulk rebuild** — C-3 (3c-2) commit
+   `a90e168`. Gated by empty-table safety check so resumed rebuilds
+   stay correct. Regression test added.
+
+4. **`OpenAndUnlockCore` static helper** extracted from
+   `OpenAndUnlock` — C-3 (4a) commit `163a0f4`. Lets the writer and
+   any read-only callers share the exact same key-derivation path.
+   This is the foundation for the future production connection pool.
+
+5. **Explicit WAL checkpoints** after one-time migration operations
+   — C-3 (3c-1) + C-3 (3c-3). Keeps next-operation latency low.
+
+### 11.5 Benchmark-only scaffolding that stays in the benchmark project
+
+These were built during C-3 specifically because the production
+refactor was deferred behind the gate. They are **not** production
+code and should not leak into `SqliteBackend`'s public API:
+
+* `SqliteBackend.BulkInsertFilesForBenchmark` (internal)
+* `SqliteBackend.ClearReverseChunkIndexForBenchmark` (internal)
+* `SqliteBackend.OpenReadOnlyForBenchmark` (internal static)
+* `SqlitePooledReader` class (in the benchmark project)
+
+C-1 final step b should build the production versions with proper
+rent/return semantics. The production versions should replace the
+`*ForBenchmark` helpers wherever the benchmark uses them, after which
+the helpers become regression targets in the benchmark project only.
+
+### 11.6 Updated §7 risks
+
+| # | Risk | Status after C-3 |
+|--:|---|---|
+| 4 | Performance regression in some edge case | **Resolved** for the 4 measured hot paths. Scenario 5 (open + decrypt) is a ~385 ms per-launch regression; mitigation is a brief spinner if smoke testing shows a visible pause. |
+| 6 | Migration takes longer than the user is willing to wait | **Revised lower.** At 500K chunks the reverse-index rebuild phase alone is now 5 s (was projected 10–20 s). Total migration flow (open LiteDB + copy rows + rebuild + swap) is expected ~60–90 s for a 500K-chunk heavy user. Eval doc §2's blocking-modal-with-progress UX still correct. |
+| Others | unchanged | — |
+
+### 11.7 Updated §8 effort estimate
+
+Working-day estimates, calibrated against C-3 actuals:
+
+| Phase | Description | Original | **Actual / Revised** |
+|---|---|---:|---:|
+| C-0 | This evaluation document | 0.5 d | 0.5 d (done) |
+| C-1 | Prototype backend | 3–4 d | ~6 d done (includes C-1e reverse-index + C-1f contract tests + C-1g GetStatistics + C-1-final-a LiteDbBackend adapter) |
+| C-2 | Migration code path with progress UI | 1–2 d | 1–2 d (unchanged, now unblocked) |
+| C-3 | Re-run every Phase 4/5/6 benchmark against SQLite | 1 d | **~5 d actual** (scaffolding + 6 benchmarks + 2 optimisation-then-rerun passes + analysis docs) |
+| C-4 | Decision | — | **Done: SHIP** |
+| C-5 | Remove LiteDB code + package | 0.5 d | 0.5 d (unchanged) |
+| C-6 | Soak in main behind preview flag | — | — |
+
+The C-3 overrun (1 d → 5 d) came from three things:
+
+1. **Benchmark bugs** surfaced only after partial runs, requiring
+   (3a) and (4a) fix commits. Two of the five scenarios needed a
+   rewrite pass.
+2. **Code-review-driven optimisation** of scenario 2 after its
+   marginal result (the C-3 (3c) pass, three commits). This was
+   outside the original scope but turned the one marginal result
+   into a decisive pass.
+3. **Honest-disclosure writeups** per scenario to keep attribution
+   traceable.
+
+None of the overrun is unrecoverable; the prototype phase itself
+came in at ~6 d vs a 3–4 d estimate, so the total is ~12 d vs ~7 d.
+Acceptable for a foundational infrastructure decision.
+
+### 11.8 Final recommendation
+
+**Ship Option C (LiteDB → SQLCipher).**
+
+4 of 5 scenarios pass the gate decisively. The fifth (open + decrypt)
+is a one-time per-launch cost of ~385 ms marginal over LiteDB — noticeable
+only on cold start and addressable with a brief spinner if smoke
+testing reveals a pause.
+
+Immediate next work, in order:
+
+1. **C-1 final step b** — the `LocalDatabaseService` refactor onto
+   `IDatabaseBackend`, with a feature flag (`AZBK_USE_SQLITE` env
+   var or equivalent) routing a user to either `LiteDbBackend` or
+   `SqliteBackend`. Production connection pool on top of
+   `OpenAndUnlockCore` is part of this step.
+2. **C-2** — the migration code path with blocking-modal progress UI.
+3. **C-6** — one release in main behind the preview flag before
+   forced migration.
+4. **Post-ship calibration re-run** (optional) — scenarios 1, 3, 4
+   with the new `cache_size = 64 MB` setting active, for a fully
+   symmetric decision record. Gate clears without this; not a
+   blocker.
+
