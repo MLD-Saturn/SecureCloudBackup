@@ -428,6 +428,13 @@ Immediate next work, in order:
    var or equivalent) routing a user to either `LiteDbBackend` or
    `SqliteBackend`. Production connection pool on top of
    `OpenAndUnlockCore` is part of this step.
+   **Status: landed (b-1 = `088d019`, b-2 = this commit).** The
+   feature flag is documented in the root `README.md` under
+   "Experimental: SQLite backend preview". The production
+   connection pool was deferred - the current SqliteBackend still
+   uses one connection per LocalDatabaseService instance, matching
+   the C-3 (5b) measured topology. Pool lands as a separate commit
+   if/when it becomes necessary.
 2. **C-2** — the migration code path with blocking-modal progress UI.
 3. **C-6** — one release in main behind the preview flag before
    forced migration.

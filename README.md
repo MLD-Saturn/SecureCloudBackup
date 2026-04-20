@@ -178,6 +178,43 @@ docs/
 
 - [Azure Setup Guide](docs/SETUP.md) -- create a storage account and configure access
 - [User Guide](docs/USER_GUIDE.md) -- daily usage, restore, sync, and troubleshooting
+- [Option C Evaluation](docs/option-c-evaluation.md) -- LiteDB → SQLite + SQLCipher decision, head-to-head benchmark results, and ship recommendation
+
+## Experimental: SQLite backend preview
+
+As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. This is the preview gate described in `docs/option-c-evaluation.md` §11.8 — the C-6 soak step before a forced migration.
+
+**This is a preview flag.** It is not yet wired to any migration path. Pointing it at an existing LiteDB database will silently create a fresh empty SQLite database alongside — your LiteDB data is preserved but the SQLite preview starts empty. The real migration lands in C-2.
+
+### How to enable
+
+Set the environment variable `AZBK_USE_SQLITE` before launching the app:
+
+```powershell
+# PowerShell (current session only)
+$env:AZBK_USE_SQLITE = "1"
+azurebackup.exe
+```
+
+```bash
+# bash / zsh
+AZBK_USE_SQLITE=1 ./azurebackup
+```
+
+Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). Any other value (including unset, empty, `0`, `false`) leaves the service on the original LiteDB path.
+
+The flag is read **once** per `LocalDatabaseService.Initialize` call. Flipping it mid-session has no effect.
+
+### What changes under the flag
+
+* Storage engine: SQLCipher-encrypted SQLite with WAL journaling instead of LiteDB.
+* On-disk layout: a `.db` + companion `-wal` / `-shm` files, plus the same `.salt` file convention.
+* Performance: 4 of 5 measured scenarios in C-3 are 5× to 7000× faster on SQLite; open+decrypt is ~5× slower (one-time per launch). See `docs/option-c-evaluation.md` §11.1 for the full scorecard.
+* Public API: **zero changes.** Every consumer (`BackupOrchestrator`, `ChunkIndexService`, `FileWatcherService`, `RestoreService`, the view models) sees the same `LocalDatabaseService` type with the same methods.
+
+### How to turn it off
+
+Unset the environment variable and restart the app. The original LiteDB path is always the default — your LiteDB database file is never touched by the SQLite preview.
 
 ## Benchmarks
 
