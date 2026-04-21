@@ -200,4 +200,66 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         Assert.Contains(StorageTier.Hot, summary.TierBreakdown.Keys);
         Assert.Contains(StorageTier.Cold, summary.TierBreakdown.Keys);
     }
+
+    /// <summary>
+    /// C-5: BackupIndexToAzureAsync + RestoreIndexFromAzureAsync must
+    /// preserve the chunk_file_refs reverse-index. Pre-C-5 the v1
+    /// backup carried only ChunkIndexEntry rows and relied on the
+    /// LiteDB-era ReferencingFiles list to reconstruct refs on
+    /// restore. Under SQLite GetAllChunkIndexEntries leaves
+    /// ReferencingFiles empty by design, so a v1 round-trip silently
+    /// dropped every reverse-index row. v2 carries chunk_file_refs
+    /// alongside the entries and the restore path replays them.
+    /// </summary>
+    [Fact]
+    public async Task BackupAndRestoreIndex_PreservesReverseIndex()
+    {
+        var sharedHash = "f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1";
+        var soloHash = "0102030405060708010203040506070801020304050607080102030405060708";
+        var file1 = @"C:\backupRestore\file1.txt";
+        var file2 = @"C:\backupRestore\file2.txt";
+
+        // Seed: shared chunk referenced by both files; solo chunk by file2.
+        var sharedData = new byte[1024];
+        var soloData = new byte[1024];
+        Random.Shared.NextBytes(sharedData);
+        Random.Shared.NextBytes(soloData);
+        await _blobService.UploadChunkDirectAsync(sharedData, sharedHash, StorageTier.Cool);
+        await _blobService.UploadChunkDirectAsync(soloData, soloHash, StorageTier.Cool);
+
+        _indexService.AddReference(sharedHash, file1, 0, 1024, StorageTier.Cool, true);
+        _indexService.AddReference(sharedHash, file2, 0, 1024, StorageTier.Cool, false);
+        _indexService.AddReference(soloHash, file2, 1, 1024, StorageTier.Cool, true);
+
+        // Sanity: chunk_file_refs has the expected 3 rows pre-backup.
+        Assert.Equal(2, _databaseService.GetReferenceCountForChunk(sharedHash));
+        Assert.Equal(1, _databaseService.GetReferenceCountForChunk(soloHash));
+
+        // Act: backup -> wipe + restore (RestoreIndexFromAzureAsync
+        // already calls ClearChunkIndex internally).
+        await _indexService.BackupIndexToAzureAsync();
+        var ok = await _indexService.RestoreIndexFromAzureAsync();
+        Assert.True(ok);
+
+        // Assert: reference counts and the reverse-index reflect the
+        // pre-backup state, not zero.
+        Assert.Equal(2, _databaseService.GetReferenceCountForChunk(sharedHash));
+        Assert.Equal(1, _databaseService.GetReferenceCountForChunk(soloHash));
+
+        var sharedRefs = _databaseService.GetReferencingFilesForChunk(sharedHash);
+        Assert.Equal(2, sharedRefs.Count);
+        Assert.Contains(sharedRefs, r => r.FilePath == file1);
+        Assert.Contains(sharedRefs, r => r.FilePath == file2);
+
+        var soloRefs = _databaseService.GetReferencingFilesForChunk(soloHash);
+        Assert.Single(soloRefs);
+        Assert.Equal(file2, soloRefs[0].FilePath);
+
+        // GetChunkEntriesForFile is the lookup the orchestrator uses
+        // to remove a file's references; if the reverse index were
+        // empty after restore, RemoveFileReferencesAsync would be a
+        // silent no-op.
+        var file2Entries = _databaseService.GetChunkEntriesForFile(file2);
+        Assert.Equal(2, file2Entries.Count);
+    }
 }

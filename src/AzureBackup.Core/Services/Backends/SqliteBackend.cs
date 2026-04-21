@@ -1027,6 +1027,39 @@ internal sealed class SqliteBackend : IDatabaseBackend
     }
 
     /// <summary>
+    /// Returns every row in <c>chunk_file_refs</c>. Used by the
+    /// Azure index backup path so the encrypted blob carries the
+    /// reverse-index alongside the primary chunk_index. Without
+    /// this, RestoreIndexFromAzureAsync would lose every reference
+    /// (under SQLite GetAllChunkIndexEntries leaves
+    /// ChunkIndexEntry.ReferencingFiles empty by design).
+    /// </summary>
+    internal List<ChunkFileRefRow> GetAllChunkFileRefs()
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var result = new List<ChunkFileRefRow>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT file_path, chunk_hash, chunk_index, referenced_at
+            FROM chunk_file_refs;
+            """;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(new ChunkFileRefRow
+            {
+                FilePath = reader.GetString(0),
+                ChunkHash = reader.GetString(1),
+                ChunkIndex = reader.GetInt32(2),
+                ReferencedAt = ParseUtc(reader.GetString(3)),
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Deletes every reverse-index row for a single file path. Returns
     /// the number of rows deleted. Mirrors
     /// <c>LocalDatabaseService.DeleteChunkFileRefsForFile</c>.

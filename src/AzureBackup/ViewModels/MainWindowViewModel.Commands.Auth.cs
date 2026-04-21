@@ -355,10 +355,11 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-2: detect existing LiteDB database and migrate to
-            // SQLite under the AZBK_USE_SQLITE flag, with progress
-            // surfaced via AddLog. No-op when flag is off, file is new,
-            // or file is already SQLite.
+            // C-5: SQLite is the production default. If the file at
+            // DatabasePath is still a LiteDB database (upgrading user)
+            // EnsureMigratedToSqliteAsync runs the migration with
+            // progress surfaced via AddLog. No-op when the file is
+            // already SQLite or does not exist yet.
             if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
             {
                 return;
@@ -599,7 +600,8 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-2: detect existing LiteDB database and migrate to SQLite.
+            // C-5: detect a LiteDB database left over from a prior
+            // release and migrate to SQLite (no-op on fresh installs).
             if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
             {
                 return;
@@ -827,7 +829,8 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-2: detect existing LiteDB database and migrate to SQLite.
+            // C-5: detect a LiteDB database left over from a prior
+            // release and migrate to SQLite (no-op on fresh installs).
             if (!await EnsureMigratedToSqliteAsync(passwordMemory))
             {
                 return (false, "Migration to SQLite failed - see log for details");
@@ -945,13 +948,20 @@ public partial class MainWindowViewModel
     /// </returns>
     /// <remarks>
     /// <para>
-    /// Decision tree:
+    /// Decision tree (C-5: SQLite is unconditional in production;
+    /// LiteDB only reachable via an AsyncLocal test override):
     /// </para>
     /// <list type="bullet">
-    ///   <item>SQLite flag OFF -- no migration needed; return true.</item>
-    ///   <item>Flag ON, no file at path -- new database; return true.</item>
-    ///   <item>Flag ON, file IS already SQLite (probe true) -- nothing to migrate; return true.</item>
-    ///   <item>Flag ON, file is LiteDB (probe false) -- run migration with throttled progress, return true on success.</item>
+    ///   <item>Test override pinning LiteDB -- skip; the test is
+    ///     intentionally working with a LiteDB database.</item>
+    ///   <item>No file at path -- new database; return true.</item>
+    ///   <item>File IS already SQLite (probe true) -- run
+    ///     <see cref="LocalDatabaseService.CleanupStaleLegacyBackup"/>
+    ///     to remove any leftover .litedb-backup from a pre-C-5
+    ///     release, then return true.</item>
+    ///   <item>File is LiteDB (probe false) -- run migration with
+    ///     throttled progress, return true on success. Migration's
+    ///     step 4 deletes the .litedb-backup files.</item>
     /// </list>
     ///
     /// <para>

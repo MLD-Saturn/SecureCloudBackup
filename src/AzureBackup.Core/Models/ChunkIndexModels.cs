@@ -237,8 +237,16 @@ public class ChunkIndexBackup
 {
     /// <summary>
     /// Version of the backup format.
+    /// <list type="bullet">
+    ///   <item>1 - chunk_index entries only (LiteDB-era; reverse index
+    ///     was reconstructable from the per-entry ReferencingFiles list).</item>
+    ///   <item>2 - C-5: also carries <see cref="ReverseIndex"/> because
+    ///     SQLite leaves <see cref="ChunkIndexEntry.ReferencingFiles"/>
+    ///     empty on read and a v1 round-trip would silently drop every
+    ///     reverse-index row.</item>
+    /// </list>
     /// </summary>
-    public int Version { get; set; } = 1;
+    public int Version { get; set; } = 2;
 
     /// <summary>
     /// When this backup was created.
@@ -249,6 +257,14 @@ public class ChunkIndexBackup
     /// All chunk index entries.
     /// </summary>
     public List<ChunkIndexEntry> Entries { get; set; } = [];
+
+    /// <summary>
+    /// Every (file_path, chunk_hash, chunk_index) triple that points
+    /// at one of the <see cref="Entries"/>. Empty for v1 backups; the
+    /// restore path falls back to rebuilding the reverse index from
+    /// <see cref="ChunkIndexEntry.ReferencingFiles"/> in that case.
+    /// </summary>
+    public List<ChunkFileRefRow> ReverseIndex { get; set; } = [];
 
     /// <summary>
     /// Summary statistics at time of backup.

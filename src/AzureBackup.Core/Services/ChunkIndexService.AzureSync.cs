@@ -16,11 +16,20 @@ public partial class ChunkIndexService
     {
         Log("Backing up chunk index to Azure...");
 
+        // C-5: capture reverse-index rows alongside chunk_index entries.
+        // Pre-C-5 the LiteDB backend returned ChunkIndexEntry rows with
+        // ReferencingFiles populated, so the reverse index was implicitly
+        // part of the backup. Under SQLite GetAllChunkIndexEntries leaves
+        // ReferencingFiles empty by design, so a v1 backup-then-restore
+        // round-trip would silently lose every reference. v2 carries the
+        // reverse-index as a flat list and the restore path replays it
+        // via BulkInsertChunkFileRefs.
         var backup = new ChunkIndexBackup
         {
-            Version = 1,
+            Version = 2,
             CreatedAt = DateTime.UtcNow,
             Entries = _databaseService.GetAllChunkIndexEntries(),
+            ReverseIndex = _databaseService.GetAllChunkFileRefs(),
             Summary = GetIndexSummary()
         };
 
@@ -38,7 +47,9 @@ public partial class ChunkIndexService
         catch { /* Ignore if legacy blob doesn't exist */ }
 
         _databaseService.SetIndexMetadata("LastAzureSyncAt", DateTime.UtcNow);
-        Log($"Index backup complete: {backup.Entries.Count} entries, {FormatHelper.FormatBytes(data.Length)} stored (encrypted)");
+        Log($"Index backup complete: {backup.Entries.Count} entries, " +
+            $"{backup.ReverseIndex.Count} reverse-index rows, " +
+            $"{FormatHelper.FormatBytes(data.Length)} stored (encrypted)");
     }
 
     /// <summary>
@@ -90,7 +101,46 @@ public partial class ChunkIndexService
                 _databaseService.SaveChunkIndexEntry(entry);
             }
 
-            Log($"Index restored: {backup.Entries.Count} entries from {backup.CreatedAt}");
+            // C-5: restore the reverse index too. Three cases:
+            //   v2 backup -> ReverseIndex carries the canonical rows;
+            //                bulk-insert them.
+            //   v1 backup -> ReverseIndex is empty; reconstruct rows
+            //                from the per-entry ReferencingFiles list,
+            //                which the LiteDB-era backup populated.
+            //   either with no usable refs -> leave chunk_file_refs
+            //                empty; the next backup-or-rebuild pass
+            //                will repopulate it.
+            // ClearChunkIndex above already wiped chunk_file_refs so
+            // we are inserting into an empty table.
+            if (backup.ReverseIndex.Count > 0)
+            {
+                _databaseService.BulkInsertChunkFileRefs(backup.ReverseIndex);
+                Log($"Reverse index restored: {backup.ReverseIndex.Count} rows (v2 backup)");
+            }
+            else
+            {
+                var derived = backup.Entries
+                    .SelectMany(e => e.ReferencingFiles.Select(r => new ChunkFileRefRow
+                    {
+                        FilePath = r.FilePath,
+                        ChunkHash = e.ChunkHash,
+                        ChunkIndex = r.ChunkIndex,
+                        ReferencedAt = r.ReferencedAt,
+                    }))
+                    .ToList();
+                if (derived.Count > 0)
+                {
+                    _databaseService.BulkInsertChunkFileRefs(derived);
+                    Log($"Reverse index reconstructed from v1 backup: {derived.Count} rows");
+                }
+                else
+                {
+                    Log("Reverse index left empty after restore (no rows in backup); " +
+                        "RebuildReverseChunkIndex will repopulate it on next launch");
+                }
+            }
+
+            Log($"Index restored: {backup.Entries.Count} entries from {backup.CreatedAt} (v{backup.Version})");
             return true;
         }
         catch (Exception ex)
