@@ -275,29 +275,6 @@ public partial class AzureBlobService
     }
 
     /// <summary>
-    /// Streams metadata blob names without materializing a <see cref="List{T}"/>.
-    /// Preferred by <see cref="BlobStorageExtensions.LoadAllFileMetadataAsync"/> and
-    /// the chunk-index rebuild path, both of which feed the names into
-    /// <c>Parallel.ForEachAsync</c> without needing the full list up front.
-    /// </summary>
-    public async IAsyncEnumerable<string> StreamMetadataBlobNamesAsync(
-        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
-    {
-        EnsureConnected();
-        TotalOperations++;
-
-        await foreach (var page in _containerClient!
-            .GetBlobsAsync(prefix: "metadata/", cancellationToken: cancellationToken)
-            .AsPages(pageSizeHint: 5000))
-        {
-            foreach (var blob in page.Values)
-            {
-                yield return blob.Name;
-            }
-        }
-    }
-
-    /// <summary>
     /// Downloads and decrypts file metadata.
     /// </summary>
     public async Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default)

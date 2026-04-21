@@ -465,37 +465,52 @@ public partial class ChunkIndexService
     /// <summary>
     /// Gets summary statistics for the chunk index.
     /// </summary>
+    /// <remarks>
+    /// Single-pass aggregation over the lightweight summary map (hash +
+    /// refcount + size + tier per chunk; no <c>ReferencingFiles</c> list
+    /// materialised). Pre-fix this method called <see
+    /// cref="LocalDatabaseService.GetAllChunkIndexEntries"/> which
+    /// allocated full <c>ChunkIndexEntry</c> objects (~50–100 MB at 500K
+    /// chunks) and walked the result list 9× via LINQ. The summary-map
+    /// path is the same one already used by <see cref="ScanForOrphansAsync"/>
+    /// and is roughly an order of magnitude lighter.
+    /// </remarks>
     public ChunkIndexSummary GetIndexSummary()
     {
-        var entries = _databaseService.GetAllChunkIndexEntries();
-        
         var summary = new ChunkIndexSummary
         {
-            TotalChunks = entries.Count,
-            TotalSizeBytes = entries.Sum(e => e.SizeBytes),
-            OrphanCount = entries.Count(e => e.ReferenceCount == 0),
-            OrphanSizeBytes = entries.Where(e => e.ReferenceCount == 0).Sum(e => e.SizeBytes),
-            SharedChunks = entries.Count(e => e.ReferenceCount > 1),
             TierBreakdown = []
         };
 
-        // Calculate deduplication savings
-        foreach (var entry in entries.Where(e => e.ReferenceCount > 1))
-        {
-            summary.DeduplicationSavingsBytes += entry.SizeBytes * (entry.ReferenceCount - 1);
-        }
-
-        // Calculate tier breakdown
+        // Pre-seed every tier so callers get a stable shape even when a
+        // tier has zero chunks.
         foreach (StorageTier tier in Enum.GetValues<StorageTier>())
         {
-            var tierEntries = entries.Where(e => e.CurrentTier == tier).ToList();
-            var tierSize = tierEntries.Sum(e => e.SizeBytes);
-            
-            summary.TierBreakdown[tier] = new TierStatistics
+            summary.TierBreakdown[tier] = new TierStatistics();
+        }
+
+        var summaryMap = _databaseService.GetChunkIndexSummaryMap();
+        foreach (var (_, info) in summaryMap)
+        {
+            summary.TotalChunks++;
+            summary.TotalSizeBytes += info.SizeBytes;
+
+            if (info.ReferenceCount == 0)
             {
-                ChunkCount = tierEntries.Count,
-                TotalSizeBytes = tierSize
-            };
+                summary.OrphanCount++;
+                summary.OrphanSizeBytes += info.SizeBytes;
+            }
+            else if (info.ReferenceCount > 1)
+            {
+                summary.SharedChunks++;
+                // Dedup savings = bytes that would have been uploaded if
+                // every reference required its own copy: size × (refs - 1).
+                summary.DeduplicationSavingsBytes += info.SizeBytes * (info.ReferenceCount - 1);
+            }
+
+            var tierStats = summary.TierBreakdown[info.Tier];
+            tierStats.ChunkCount++;
+            tierStats.TotalSizeBytes += info.SizeBytes;
         }
 
         summary.LastFullRebuildAt = _databaseService.GetIndexMetadata("LastFullRebuildAt");

@@ -712,9 +712,15 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// <summary>
+    /// Adds a folder to the watched folders list and refreshes the local files tree.
     /// Called by the View after a folder is selected from the picker.
+    /// Returns a Task so callers can await completion (e.g. dialog can wait
+    /// for the refresh before closing). The View's folder-picker handler is
+    /// itself async void with a top-level try/catch, so a fire-and-forget
+    /// invocation here remains crash-safe.
     /// </summary>
-    public async void AddWatchedFolderPath(string folderPath)
+    public async Task AddWatchedFolderPathAsync(string folderPath)
     {
         try
         {

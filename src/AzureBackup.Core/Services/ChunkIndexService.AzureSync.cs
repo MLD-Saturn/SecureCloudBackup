@@ -388,52 +388,6 @@ public partial class ChunkIndexService
         await BackupIndexToAzureAsync(cancellationToken);
     }
 
-    /// <summary>
-    /// Checks if a chunk exists in a different tier than intended and logs a warning.
-    /// </summary>
-    /// <param name="chunkHash">The chunk hash</param>
-    /// <param name="intendedTier">The tier the file is configured for</param>
-    /// <param name="cancellationToken">Cancellation token</param>
-    /// <returns>The actual tier of the existing chunk, or null if chunk doesn't exist</returns>
-    public async Task<StorageTier?> CheckTierMismatchAsync(
-        string chunkHash, 
-        StorageTier intendedTier,
-        CancellationToken cancellationToken = default)
-    {
-        var entry = _databaseService.GetChunkIndexEntry(chunkHash);
-        if (entry == null) return null;
-
-        // Verify against Azure
-        try
-        {
-            var (_, actualTier) = await GetChunkInfoFromAzureAsync(chunkHash, cancellationToken);
-            
-            if (actualTier != intendedTier)
-            {
-                // Read referencing files from the canonical reverse-index;
-                // entry.ReferencingFiles is empty under the SQLite backend.
-                var refs = _databaseService.GetReferencingFilesForChunk(chunkHash);
-                Log($"WARNING: Chunk {chunkHash[..8]}... exists in {actualTier} tier, " +
-                    $"but file is configured for {intendedTier} tier. " +
-                    $"Referenced by: {string.Join(", ", refs.Select(r => r.FilePath))}");
-            }
-
-            // Update cached tier if different
-            if (entry.CurrentTier != actualTier)
-            {
-                entry.CurrentTier = actualTier;
-                entry.LastVerifiedAt = DateTime.UtcNow;
-                _databaseService.SaveChunkIndexEntry(entry);
-            }
-
-            return actualTier;
-        }
-        catch
-        {
-            return entry.CurrentTier;
-        }
-    }
-
     private async Task<List<string>> ListAzureChunksAsync(CancellationToken cancellationToken)
     {
         // Use the blob service to list all chunks from Azure

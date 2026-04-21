@@ -21,6 +21,31 @@ public partial class StorageHealthViewModel : ViewModelBase
     private readonly LocalDatabaseService _databaseService;
     private CancellationTokenSource? _operationCts;
 
+    /// <summary>
+    /// Disposes any prior <see cref="CancellationTokenSource"/> on the
+    /// _operationCts slot and replaces it with a fresh one. Returns the
+    /// new token. Each Scan/Cleanup/Rebuild/Backup/Restore command must
+    /// call this exactly once at start so we don't leak CTS instances
+    /// across consecutive runs.
+    /// </summary>
+    private CancellationToken BeginOperation()
+    {
+        var previous = Interlocked.Exchange(ref _operationCts, new CancellationTokenSource());
+        previous?.Dispose();
+        return _operationCts!.Token;
+    }
+
+    /// <summary>
+    /// Pair to <see cref="BeginOperation"/>. Disposes the active CTS and
+    /// nulls the slot so a stray <see cref="CancelOperation"/> after the
+    /// command completes is a no-op rather than a swap-with-stale-cts.
+    /// </summary>
+    private void EndOperation()
+    {
+        var current = Interlocked.Exchange(ref _operationCts, null);
+        current?.Dispose();
+    }
+
     #region Observable Properties
 
     [ObservableProperty]
@@ -116,44 +141,55 @@ public partial class StorageHealthViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Refreshes the index summary statistics.
+    /// Refreshes the index summary statistics. Runs the
+    /// <see cref="ChunkIndexService.GetIndexSummary"/> aggregation on a
+    /// worker thread so the UI thread stays responsive even at
+    /// 500K+ chunks (the SQLite scan + sum loop dominates).
     /// </summary>
     [RelayCommand]
-    private void RefreshSummary()
+    private async Task RefreshSummaryAsync()
     {
-        var summary = _chunkIndexService.GetIndexSummary();
-
-        TotalChunks = summary.TotalChunks;
-        TotalSize = FormatHelper.FormatBytes(summary.TotalSizeBytes);
-        OrphanCount = summary.OrphanCount;
-        OrphanSize = FormatHelper.FormatBytes(summary.OrphanSizeBytes);
-        SharedChunks = summary.SharedChunks;
-        DeduplicationSavings = FormatHelper.FormatBytes(summary.DeduplicationSavingsBytes);
-
-        LastRebuildTime = summary.LastFullRebuildAt?.ToString("g") ?? "Never";
-        LastAzureSyncTime = summary.LastAzureSyncAt?.ToString("g") ?? "Never";
-
-        // Tier breakdown
-        if (summary.TierBreakdown.TryGetValue(StorageTier.Hot, out var hot))
+        StatusMessage = "Refreshing summary...";
+        try
         {
-            HotTierChunks = hot.ChunkCount;
-            HotTierSize = FormatHelper.FormatBytes(hot.TotalSizeBytes);
-        }
+            var summary = await Task.Run(() => _chunkIndexService.GetIndexSummary());
 
-        if (summary.TierBreakdown.TryGetValue(StorageTier.Cool, out var cool))
+            TotalChunks = summary.TotalChunks;
+            TotalSize = FormatHelper.FormatBytes(summary.TotalSizeBytes);
+            OrphanCount = summary.OrphanCount;
+            OrphanSize = FormatHelper.FormatBytes(summary.OrphanSizeBytes);
+            SharedChunks = summary.SharedChunks;
+            DeduplicationSavings = FormatHelper.FormatBytes(summary.DeduplicationSavingsBytes);
+
+            LastRebuildTime = summary.LastFullRebuildAt?.ToString("g") ?? "Never";
+            LastAzureSyncTime = summary.LastAzureSyncAt?.ToString("g") ?? "Never";
+
+            // Tier breakdown
+            if (summary.TierBreakdown.TryGetValue(StorageTier.Hot, out var hot))
+            {
+                HotTierChunks = hot.ChunkCount;
+                HotTierSize = FormatHelper.FormatBytes(hot.TotalSizeBytes);
+            }
+
+            if (summary.TierBreakdown.TryGetValue(StorageTier.Cool, out var cool))
+            {
+                CoolTierChunks = cool.ChunkCount;
+                CoolTierSize = FormatHelper.FormatBytes(cool.TotalSizeBytes);
+            }
+
+            if (summary.TierBreakdown.TryGetValue(StorageTier.Cold, out var cold))
+            {
+                ColdTierChunks = cold.ChunkCount;
+                ColdTierSize = FormatHelper.FormatBytes(cold.TotalSizeBytes);
+            }
+
+            OnPropertyChanged(nameof(HasOrphans));
+            StatusMessage = $"Summary refreshed at {DateTime.Now:T}";
+        }
+        catch (Exception ex)
         {
-            CoolTierChunks = cool.ChunkCount;
-            CoolTierSize = FormatHelper.FormatBytes(cool.TotalSizeBytes);
+            StatusMessage = $"Refresh failed: {ex.Message}";
         }
-
-        if (summary.TierBreakdown.TryGetValue(StorageTier.Cold, out var cold))
-        {
-            ColdTierChunks = cold.ChunkCount;
-            ColdTierSize = FormatHelper.FormatBytes(cold.TotalSizeBytes);
-        }
-
-        OnPropertyChanged(nameof(HasOrphans));
-        StatusMessage = $"Summary refreshed at {DateTime.Now:T}";
     }
 
     /// <summary>
@@ -163,9 +199,9 @@ public partial class StorageHealthViewModel : ViewModelBase
     private async Task ScanForOrphansAsync()
     {
         IsOperationInProgress = true;
-        _operationCts = new CancellationTokenSource();
+        var ct = BeginOperation();
         StatusMessage = "Scanning for orphaned chunks...";
-        
+
         // Clear collection on UI thread
         await Dispatcher.UIThread.InvokeAsync(() => OrphanedChunks.Clear());
 
@@ -177,7 +213,7 @@ public partial class StorageHealthViewModel : ViewModelBase
                 ProgressText = $"Scanning: {p.scanned}/{p.total}";
             });
 
-            var result = await _chunkIndexService.ScanForOrphansAsync(progress, _operationCts.Token);
+            var result = await _chunkIndexService.ScanForOrphansAsync(progress, ct);
 
             // Update UI with results on UI thread
             await Dispatcher.UIThread.InvokeAsync(() =>
@@ -207,6 +243,7 @@ public partial class StorageHealthViewModel : ViewModelBase
         }
         finally
         {
+            EndOperation();
             IsOperationInProgress = false;
             ProgressValue = 0;
             ProgressText = string.Empty;
@@ -228,7 +265,7 @@ public partial class StorageHealthViewModel : ViewModelBase
         }
 
         IsOperationInProgress = true;
-        _operationCts = new CancellationTokenSource();
+        var ct = BeginOperation();
         StatusMessage = $"Deleting {selectedOrphans.Count} orphaned chunks...";
 
         try
@@ -239,7 +276,7 @@ public partial class StorageHealthViewModel : ViewModelBase
                 ProgressText = $"Deleting: {p.deleted}/{p.total}";
             });
 
-            var result = await _chunkIndexService.CleanupOrphansAsync(selectedOrphans, progress, _operationCts.Token);
+            var result = await _chunkIndexService.CleanupOrphansAsync(selectedOrphans, progress, ct);
 
             // Remove deleted orphans from the list on UI thread
             var deletedHashes = selectedOrphans
@@ -256,7 +293,7 @@ public partial class StorageHealthViewModel : ViewModelBase
                 }
             });
 
-            RefreshSummary();
+            await RefreshSummaryAsync();
 
             StatusMessage = $"Cleanup complete: {result.ChunksDeleted} deleted, {FormatHelper.FormatBytes(result.BytesFreed)} freed";
             
@@ -275,6 +312,7 @@ public partial class StorageHealthViewModel : ViewModelBase
         }
         finally
         {
+            EndOperation();
             IsOperationInProgress = false;
             ProgressValue = 0;
             ProgressText = string.Empty;
@@ -288,7 +326,7 @@ public partial class StorageHealthViewModel : ViewModelBase
     private async Task RebuildIndexAsync()
     {
         IsOperationInProgress = true;
-        _operationCts = new CancellationTokenSource();
+        var ct = BeginOperation();
         StatusMessage = "Rebuilding chunk index from Azure...";
 
         try
@@ -299,9 +337,9 @@ public partial class StorageHealthViewModel : ViewModelBase
                 ProgressText = $"Processing: {p.processed}/{p.total} - {p.currentFile}";
             });
 
-            await _chunkIndexService.RebuildIndexFromAzureAsync(progress, _operationCts.Token);
+            await _chunkIndexService.RebuildIndexFromAzureAsync(progress, ct);
 
-            RefreshSummary();
+            await RefreshSummaryAsync();
             StatusMessage = "Index rebuild complete";
         }
         catch (OperationCanceledException)
@@ -314,6 +352,7 @@ public partial class StorageHealthViewModel : ViewModelBase
         }
         finally
         {
+            EndOperation();
             IsOperationInProgress = false;
             ProgressValue = 0;
             ProgressText = string.Empty;
@@ -332,7 +371,7 @@ public partial class StorageHealthViewModel : ViewModelBase
         try
         {
             await _chunkIndexService.BackupIndexToAzureAsync();
-            RefreshSummary();
+            await RefreshSummaryAsync();
             StatusMessage = "Index backup complete";
         }
         catch (Exception ex)
@@ -360,7 +399,7 @@ public partial class StorageHealthViewModel : ViewModelBase
             
             if (success)
             {
-                RefreshSummary();
+                await RefreshSummaryAsync();
                 StatusMessage = "Index restored successfully";
             }
             else

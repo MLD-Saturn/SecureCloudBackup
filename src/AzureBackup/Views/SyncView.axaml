@@ -338,7 +338,7 @@
                                 <MenuItem Header="Expand All" Command="{Binding ExpandAllTreeNodesCommand}"/>
                                 <MenuItem Header="Collapse All" Command="{Binding CollapseAllTreeNodesCommand}"/>
                                 <Separator/>
-                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromAzureCommandCommand}"/>
+                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromAzureUiCommand}"/>
                             </ContextMenu>
                         </TreeView.ContextMenu>
                         <TreeView.ItemTemplate>

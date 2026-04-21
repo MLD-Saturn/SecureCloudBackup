@@ -41,7 +41,11 @@ public partial class MainWindowViewModel
             await RefreshSyncViewAsync(refreshAzure: false);
         }
         
-        // Auto-refresh when switching to Storage Health view
+        // Auto-refresh when switching to Storage Health view.
+        // The summary computation is async (offloads the chunk-index scan
+        // to a worker thread), so dispatch via the relay command which
+        // returns immediately. Exceptions surface inside the command's
+        // own try/catch.
         if (view == "StorageHealth" && IsInitialized && previousView != "StorageHealth")
         {
             StorageHealthViewModel?.RefreshSummaryCommand.Execute(null);
@@ -135,7 +139,7 @@ public partial class MainWindowViewModel
     }
 
     [RelayCommand]
-    private async Task RefreshFromAzureCommandAsync()
+    private async Task RefreshFromAzureUiAsync()
     {
         if (!IsInitialized)
         {
@@ -233,7 +237,12 @@ public partial class MainWindowViewModel
                 FileTreeRoots.Clear();
                 LocalFileTreeRoots.Clear();
                 LocalFilesFlatList.Clear();
-                
+
+                // Drop the cached Azure file-path snapshot so a subsequent
+                // reconnect to a different storage account does not filter
+                // local files against stale data.
+                _cachedAzureFilePaths = null;
+
                 // Reset migration flag (fresh database won't need migration)
                 _needsMigration = false;
                 
@@ -317,34 +326,34 @@ public partial class MainWindowViewModel
             
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                // Update RestorableFiles for the Restore tab
-                RestorableFiles.Clear();
-                foreach (var file in files.OrderByDescending(f => f.LastModified))
-                {
-                    RestorableFiles.Add(new BackedUpFileViewModel(file));
-                }
+                // Sort once on the worker output rather than twice on the UI thread
+                // (was: RestorableFiles.Add(... OrderByDescending ...) then again
+                // for BackedUpFiles). Materialise once into a local list, then
+                // populate both bound collections from the same ordered sequence.
+                var ordered = files.OrderByDescending(f => f.LastModified).ToList();
+
+                // Bulk-rebuild both bound collections via ReplaceAll so each
+                // bound view receives a single Reset event instead of N Add
+                // events. Pre-fix a 50K-file refresh pumped 100K Add+layout
+                // round-trips through Avalonia's ItemsControl.
+                RestorableFiles.ReplaceAll(ordered.Select(f => new BackedUpFileViewModel(f)));
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
                 OnPropertyChanged(nameof(ShowAzureEmptyState));
                 OnPropertyChanged(nameof(FilteredRestorableFiles)); // Update flat list view
-                
-                // Update BackedUpFiles for the Backup tab (same data, different view)
-                BackedUpFiles.Clear();
-                foreach (var file in files.OrderByDescending(f => f.LastModified))
-                {
-                    BackedUpFiles.Add(new BackedUpFileViewModel(file));
-                }
-                
+
+                BackedUpFiles.ReplaceAll(ordered.Select(f => new BackedUpFileViewModel(f)));
+
                 // Update statistics to reflect actual Azure storage
                 TotalFiles = files.Count;
                 TotalSize = AzureBackup.Core.FormatHelper.FormatBytes(files.Sum(f => f.FileSize));
-                
+
                 // Build Azure file tree for tree view mode
                 if (UseTreeView)
                 {
                     BuildFileTree();
                 }
-                
+
                 AddLog($"Loaded {files.Count} files from Azure Storage");
                 OnPropertyChanged(nameof(AzureFilesSummary));
             });
@@ -417,19 +426,11 @@ public partial class MainWindowViewModel
 
             Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
-                LocalFileTreeRoots.Clear();
-                LocalFilesFlatList.Clear();
-                
-                foreach (var root in roots)
-                {
-                    LocalFileTreeRoots.Add(root);
-                }
-                
-                foreach (var file in flatFiles)
-                {
-                    LocalFilesFlatList.Add(file);
-                }
-                
+                // Bulk-rebuild via ReplaceAll so each bound view raises one
+                // Reset event instead of N Add events. See BulkObservableCollection.
+                LocalFileTreeRoots.ReplaceAll(roots);
+                LocalFilesFlatList.ReplaceAll(flatFiles);
+
                 OnPropertyChanged(nameof(LocalFilesSummary));
                 AddLog($"Found {LocalFileTreeRoots.Sum(r => r.TotalFileCount)} local files");
             });

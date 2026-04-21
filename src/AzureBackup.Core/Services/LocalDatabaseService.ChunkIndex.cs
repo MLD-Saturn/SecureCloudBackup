@@ -167,8 +167,10 @@ public partial class LocalDatabaseService
     /// Legacy full-scan variant retained for the one-time reverse-index rebuild
     /// path and for performance comparison in <c>AzureBackup.Benchmarks</c>.
     /// Do not call from new application code - use <see cref="GetChunkEntriesForFile"/>.
+    /// Internal so accidental consumers cannot reach the slow path; benchmarks
+    /// see it via <c>InternalsVisibleTo("AzureBackup.Benchmarks")</c>.
     /// </summary>
-    public List<ChunkIndexEntry> GetChunkEntriesForFile_LegacyScan(string filePath)
+    internal List<ChunkIndexEntry> GetChunkEntriesForFile_LegacyScan(string filePath)
     {
         EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);

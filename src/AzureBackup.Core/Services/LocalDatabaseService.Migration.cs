@@ -221,4 +221,189 @@ public partial class LocalDatabaseService
             CryptographicOperations.ZeroMemory(derivedKey);
         }
     }
+
+    /// <summary>
+    /// Crash-safe atomic swap of a freshly migrated database into place.
+    /// Performs the four-step rename
+    /// (<c>db -&gt; .bak</c>, <c>tmp -&gt; db</c>, <c>tmp.salt -&gt; db.salt</c>,
+    /// <c>delete .bak</c>) under cover of a sentinel file so a process crash
+    /// at any step is recoverable from disk state alone.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Pre-fix the legacy unencrypted-to-encrypted and legacy-encrypted-to-Argon2id
+    /// upgrade paths used three bare <see cref="File.Move"/> calls. A crash
+    /// between the first and second move left the original database renamed
+    /// to <c>.bak</c> with no encrypted file in place — the user would launch
+    /// the app, see "no database found", and lose access to all backed-up
+    /// state. There was no on-disk hint that a migration had been in flight.
+    /// </para>
+    /// <para>
+    /// Sentinel layout: a JSON file at
+    /// <c>{databasePath}.upgrade-pending</c> capturing the source / temp /
+    /// backup paths. Created BEFORE the first rename, deleted AFTER the
+    /// final cleanup. <see cref="RecoverInterruptedUpgrade"/> consumes it
+    /// on next startup.
+    /// </para>
+    /// </remarks>
+    /// <param name="databasePath">Final destination path (e.g. <c>backup.db</c>).</param>
+    /// <param name="tempPath">Path of the freshly migrated file
+    /// (e.g. <c>backup.db.encrypted</c> or <c>.upgraded</c>). Must exist.</param>
+    /// <param name="backupSuffix">Suffix to give the original file while it is
+    /// preserved as a fallback (e.g. <c>.unencrypted.bak</c> or <c>.legacy.bak</c>).</param>
+    public static void CommitDatabaseUpgrade(string databasePath, string tempPath, string backupSuffix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(tempPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(backupSuffix);
+        if (!File.Exists(tempPath))
+            throw new FileNotFoundException("Temp database file does not exist.", tempPath);
+
+        var backupPath = databasePath + backupSuffix;
+        var tempSaltPath = tempPath + ".salt";
+        var finalSaltPath = databasePath + ".salt";
+        var sentinelPath = databasePath + ".upgrade-pending";
+
+        // Write the sentinel BEFORE any rename so a crash mid-rename can be
+        // diagnosed. JSON is intentionally simple so RecoverInterruptedUpgrade
+        // can parse without a JSON deserializer dependency.
+        File.WriteAllText(sentinelPath,
+            $"{{\"databasePath\":\"{Escape(databasePath)}\",\"tempPath\":\"{Escape(tempPath)}\",\"backupPath\":\"{Escape(backupPath)}\"}}");
+
+        try
+        {
+            // Step 1: original -> .bak (preserve fallback).
+            if (File.Exists(databasePath))
+            {
+                if (File.Exists(backupPath)) File.Delete(backupPath);
+                File.Move(databasePath, backupPath);
+            }
+
+            // Step 2: temp -> final.
+            File.Move(tempPath, databasePath);
+
+            // Step 3: salt move (best-effort; salt may not exist for some
+            // migration variants).
+            if (File.Exists(tempSaltPath))
+            {
+                if (File.Exists(finalSaltPath)) File.Delete(finalSaltPath);
+                File.Move(tempSaltPath, finalSaltPath);
+            }
+
+            // Step 4: cleanup .bak. Only after everything else committed.
+            if (File.Exists(backupPath))
+                File.Delete(backupPath);
+        }
+        finally
+        {
+            // Always remove the sentinel last. If we got here via exception
+            // mid-rename, the sentinel STAYS so RecoverInterruptedUpgrade
+            // can finish the job on next launch. Only delete on the happy
+            // path where every step above succeeded.
+            if (File.Exists(databasePath) && !File.Exists(tempPath) && !File.Exists(backupPath))
+            {
+                try { File.Delete(sentinelPath); } catch { /* best effort */ }
+            }
+        }
+
+        static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    }
+
+    /// <summary>
+    /// Completes a previously-interrupted <see cref="CommitDatabaseUpgrade"/>
+    /// by examining the sentinel file at <c>{databasePath}.upgrade-pending</c>.
+    /// Idempotent and safe to call on every startup before the database is opened.
+    /// Returns <c>true</c> if recovery work was performed.
+    /// </summary>
+    /// <remarks>
+    /// Recovery logic mirrors the four crash points of <see cref="CommitDatabaseUpgrade"/>:
+    /// <list type="bullet">
+    ///   <item>Crash before step 1 — temp + original both present, sentinel
+    ///     present. Rerun the swap from step 1.</item>
+    ///   <item>Crash between steps 1 and 2 — original is gone (renamed to
+    ///     .bak), temp present. Rerun from step 2.</item>
+    ///   <item>Crash between steps 2 and 4 — final present, .bak still
+    ///     present. Rerun salt + cleanup.</item>
+    ///   <item>Sentinel orphaned (final + no temp + no .bak) — just delete
+    ///     it.</item>
+    /// </list>
+    /// </remarks>
+    public static bool RecoverInterruptedUpgrade(string databasePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        var sentinelPath = databasePath + ".upgrade-pending";
+        if (!File.Exists(sentinelPath)) return false;
+
+        // Parse the sentinel JSON without bringing in a deserializer. The
+        // file is written by CommitDatabaseUpgrade with a fixed shape.
+        var raw = File.ReadAllText(sentinelPath);
+        var tempPath = ExtractField(raw, "tempPath") ?? throw new InvalidDataException(
+            $"Upgrade sentinel at {sentinelPath} is missing tempPath.");
+        var backupPath = ExtractField(raw, "backupPath") ?? throw new InvalidDataException(
+            $"Upgrade sentinel at {sentinelPath} is missing backupPath.");
+
+        var tempSaltPath = tempPath + ".salt";
+        var finalSaltPath = databasePath + ".salt";
+
+        try
+        {
+            // Case A: temp file is still present — finish the swap.
+            if (File.Exists(tempPath))
+            {
+                // Make room for the temp -> final move.
+                if (File.Exists(databasePath))
+                {
+                    // Database wasn't renamed to .bak yet; do it now (preserves the
+                    // pre-upgrade copy as the fallback).
+                    if (File.Exists(backupPath)) File.Delete(backupPath);
+                    File.Move(databasePath, backupPath);
+                }
+                File.Move(tempPath, databasePath);
+
+                if (File.Exists(tempSaltPath))
+                {
+                    if (File.Exists(finalSaltPath)) File.Delete(finalSaltPath);
+                    File.Move(tempSaltPath, finalSaltPath);
+                }
+            }
+
+            // Case B: cleanup leftover .bak now that the new file is in place.
+            if (File.Exists(databasePath) && File.Exists(backupPath))
+            {
+                File.Delete(backupPath);
+            }
+
+            return true;
+        }
+        finally
+        {
+            // Sentinel cleared only when every artifact is in its final state.
+            if (File.Exists(databasePath) && !File.Exists(tempPath) && !File.Exists(backupPath))
+            {
+                try { File.Delete(sentinelPath); } catch { /* best effort */ }
+            }
+        }
+
+        static string? ExtractField(string json, string key)
+        {
+            // Minimal scanner: find "key":"value" with simple backslash unescape.
+            var needle = "\"" + key + "\":\"";
+            var i = json.IndexOf(needle, StringComparison.Ordinal);
+            if (i < 0) return null;
+            i += needle.Length;
+            var sb = new System.Text.StringBuilder();
+            for (; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (c == '\\' && i + 1 < json.Length)
+                {
+                    sb.Append(json[++i]);
+                    continue;
+                }
+                if (c == '"') break;
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+    }
 }

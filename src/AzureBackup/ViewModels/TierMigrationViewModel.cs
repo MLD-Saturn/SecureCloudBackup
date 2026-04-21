@@ -44,22 +44,22 @@ public partial class TierMigrationViewModel : ViewModelBase
     /// <summary>
     /// Files currently stored in the Hot tier.
     /// </summary>
-    public ObservableCollection<BackedUpFileViewModel> HotFiles { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> HotFiles { get; } = [];
 
     /// <summary>
     /// Files currently stored in the Cool tier.
     /// </summary>
-    public ObservableCollection<BackedUpFileViewModel> CoolFiles { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> CoolFiles { get; } = [];
 
     /// <summary>
     /// Files currently stored in the Cold tier.
     /// </summary>
-    public ObservableCollection<BackedUpFileViewModel> ColdFiles { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> ColdFiles { get; } = [];
 
     /// <summary>
     /// Files currently stored in the Archive tier.
     /// </summary>
-    public ObservableCollection<BackedUpFileViewModel> ArchiveFiles { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> ArchiveFiles { get; } = [];
 
     public bool CanRunOperations => !IsOperationInProgress;
 
@@ -131,21 +131,35 @@ public partial class TierMigrationViewModel : ViewModelBase
             var files = await _blobService.LoadAllFileMetadataAsync(progress, cancellationToken: ct);
             Log($"LoadFilesAsync: Downloaded {files.Count} metadata entries");
 
+            // Sort + bucket on the worker thread (the OrderBy alone is
+            // ~50 ms at 50K paths; doing it inside the dispatcher post
+            // would block the UI). Then push four ReplaceAll calls,
+            // each a single Reset event, instead of N per-tier Adds.
+            var ordered = files.OrderBy(f => f.LocalPath, StringComparer.OrdinalIgnoreCase).ToList();
+            var hot = new List<BackedUpFileViewModel>();
+            var cool = new List<BackedUpFileViewModel>();
+            var cold = new List<BackedUpFileViewModel>();
+            var archive = new List<BackedUpFileViewModel>();
+            foreach (var file in ordered)
+            {
+                var vm = new BackedUpFileViewModel(file);
+                var tier = file.CurrentStorageTier ?? StorageTier.Hot;
+                switch (tier)
+                {
+                    case StorageTier.Hot: hot.Add(vm); break;
+                    case StorageTier.Cool: cool.Add(vm); break;
+                    case StorageTier.Cold: cold.Add(vm); break;
+                    case StorageTier.Archive: archive.Add(vm); break;
+                    default: hot.Add(vm); break;
+                }
+            }
+
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
-                HotFiles.Clear();
-                CoolFiles.Clear();
-                ColdFiles.Clear();
-                ArchiveFiles.Clear();
-
-                foreach (var file in files.OrderBy(f => f.LocalPath))
-                {
-                    var vm = new BackedUpFileViewModel(file);
-                    var tier = file.CurrentStorageTier ?? StorageTier.Hot;
-                    var collection = GetCollectionForTier(tier);
-                    collection.Add(vm);
-                }
-
+                HotFiles.ReplaceAll(hot);
+                CoolFiles.ReplaceAll(cool);
+                ColdFiles.ReplaceAll(cold);
+                ArchiveFiles.ReplaceAll(archive);
                 UpdateSummaries();
             });
 
@@ -194,6 +208,13 @@ public partial class TierMigrationViewModel : ViewModelBase
         IsOperationInProgress = true;
         StatusMessage = $"Migrating {selected.Count} file(s) from {sourceTier} to {targetTier}...";
 
+        // Tracks files that finished all chunks + metadata commit. Only these
+        // get moved between collections; partially-migrated files stay in the
+        // source pane so a re-run picks them up. SetBlobTier is idempotent for
+        // chunks already in the target tier, so re-running is safe.
+        var migrated = new List<BackedUpFileViewModel>(selected.Count);
+        var failed = 0;
+
         try
         {
             _operationCts?.Cancel();
@@ -204,49 +225,94 @@ public partial class TierMigrationViewModel : ViewModelBase
             var targetCollection = GetCollectionForTier(targetTier);
             var completed = 0;
 
+            // Parallelism budget for per-chunk tier changes within a single
+            // file. Conservative — Azure throttles SetBlobTier per account
+            // beyond a few hundred RPS. Matches the order of magnitude used
+            // by the upload path's concurrency knobs.
+            const int ChunkConcurrency = 8;
+
             foreach (var fileVm in selected)
             {
                 ct.ThrowIfCancellationRequested();
                 Log($"MigrateSelectedAsync: [{completed + 1}/{selected.Count}] Processing '{fileVm.LocalPath}' ({fileVm.Model.Chunks.Count} chunks)");
 
-                // Change tier on each chunk blob
-                for (var i = 0; i < fileVm.Model.Chunks.Count; i++)
+                var fileFailed = false;
+                try
                 {
-                    var chunk = fileVm.Model.Chunks[i];
-                    var blobName = string.IsNullOrEmpty(chunk.BlobName) ? $"chunks/{chunk.Hash}" : chunk.BlobName;
-                    Log($"MigrateSelectedAsync: Setting chunk [{i + 1}/{fileVm.Model.Chunks.Count}] '{blobName}' to {targetTier}");
-                    await _blobService.SetBlobTierAsync(blobName, targetTier, ct);
+                    // Parallel per-chunk tier changes. SetBlobTierAsync is
+                    // idempotent so a re-run after partial failure converges.
+                    await Parallel.ForEachAsync(
+                        fileVm.Model.Chunks,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = ChunkConcurrency,
+                            CancellationToken = ct
+                        },
+                        async (chunk, chunkCt) =>
+                        {
+                            var blobName = string.IsNullOrEmpty(chunk.BlobName)
+                                ? $"chunks/{chunk.Hash}"
+                                : chunk.BlobName;
+                            await _blobService.SetBlobTierAsync(blobName, targetTier, chunkCt);
+                        });
+
+                    // Re-upload metadata at the new tier ONLY after every
+                    // chunk succeeded. This is the per-file commit point —
+                    // the metadata blob's tier is what RestoreService /
+                    // GetIndexSummary read back, so updating it last keeps
+                    // the user-visible state consistent with what's actually
+                    // in storage.
+                    Log($"MigrateSelectedAsync: Re-uploading metadata for '{fileVm.LocalPath}' at {targetTier} tier");
+                    await _blobService.UploadFileMetadataAsync(fileVm.Model, targetTier, ct);
+
+                    // Update the in-memory model only on full success.
+                    fileVm.Model.CurrentStorageTier = targetTier;
+                    migrated.Add(fileVm);
                 }
-
-                // Re-upload metadata at new tier (overwrites existing blob)
-                Log($"MigrateSelectedAsync: Re-uploading metadata for '{fileVm.LocalPath}' at {targetTier} tier");
-                await _blobService.UploadFileMetadataAsync(fileVm.Model, targetTier, ct);
-
-                // Update the in-memory model
-                fileVm.Model.CurrentStorageTier = targetTier;
+                catch (OperationCanceledException)
+                {
+                    // Bubble cancellation up to the outer handler so the
+                    // status message reads "Migration cancelled" rather
+                    // than "1 file failed".
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    fileFailed = true;
+                    failed++;
+                    Log($"MigrateSelectedAsync: FAILED '{fileVm.LocalPath}' — {ex.GetType().Name}: {ex.Message}. " +
+                        "File left in source tier; chunks may be split between tiers until you retry.");
+                }
 
                 completed++;
                 ProgressValue = (double)completed / selected.Count * 100;
-                ProgressText = $"{completed}/{selected.Count}";
-                StatusMessage = $"Migrated {completed}/{selected.Count} files to {targetTier}...";
+                ProgressText = $"{completed}/{selected.Count}" + (fileFailed ? $" ({failed} failed)" : "");
+                StatusMessage = $"Migrated {migrated.Count}/{selected.Count} files to {targetTier}" +
+                    (failed > 0 ? $" ({failed} failed)" : "") + "...";
             }
 
-            // Move items between collections on the UI thread
-            Log($"MigrateSelectedAsync: Moving {selected.Count} items from {sourceTier} to {targetTier} collection");
-            await Dispatcher.UIThread.InvokeAsync(() =>
+            // Move successfully-migrated items between collections on the UI thread.
+            // Failed items stay in the source pane.
+            if (migrated.Count > 0)
             {
-                foreach (var fileVm in selected)
+                Log($"MigrateSelectedAsync: Moving {migrated.Count} item(s) from {sourceTier} to {targetTier} collection");
+                await Dispatcher.UIThread.InvokeAsync(() =>
                 {
-                    fileVm.IsSelected = false;
-                    sourceCollection.Remove(fileVm);
-                    targetCollection.Add(fileVm);
-                }
+                    foreach (var fileVm in migrated)
+                    {
+                        fileVm.IsSelected = false;
+                        sourceCollection.Remove(fileVm);
+                        targetCollection.Add(fileVm);
+                    }
 
-                UpdateSummaries();
-            });
+                    UpdateSummaries();
+                });
+            }
 
-            Log($"MigrateSelectedAsync: Completed — {completed} file(s) migrated from {sourceTier} to {targetTier}");
-            StatusMessage = $"Migrated {completed} file(s) from {sourceTier} to {targetTier}.";
+            Log($"MigrateSelectedAsync: Completed — {migrated.Count} file(s) migrated, {failed} failed");
+            StatusMessage = failed == 0
+                ? $"Migrated {migrated.Count} file(s) from {sourceTier} to {targetTier}."
+                : $"Migrated {migrated.Count} file(s); {failed} failed (see log).";
         }
         catch (OperationCanceledException)
         {
@@ -312,7 +378,7 @@ public partial class TierMigrationViewModel : ViewModelBase
     /// <summary>
     /// Returns the observable collection for the given tier.
     /// </summary>
-    public ObservableCollection<BackedUpFileViewModel> GetCollectionForTier(StorageTier tier) => tier switch
+    public BulkObservableCollection<BackedUpFileViewModel> GetCollectionForTier(StorageTier tier) => tier switch
     {
         StorageTier.Hot => HotFiles,
         StorageTier.Cool => CoolFiles,
@@ -329,7 +395,7 @@ public partial class TierMigrationViewModel : ViewModelBase
         ArchiveSummary = FormatSummary(ArchiveFiles);
     }
 
-    private static string FormatSummary(ObservableCollection<BackedUpFileViewModel> files)
+    private static string FormatSummary(BulkObservableCollection<BackedUpFileViewModel> files)
     {
         var totalBytes = files.Sum(f => f.Model.FileSize);
         return $"{files.Count} file(s), {FormatHelper.FormatBytes(totalBytes)}";

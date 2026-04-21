@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AzureBackup.Core.Models;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
@@ -107,28 +108,39 @@ public partial class MainWindowViewModel
         List<BackedUpFileViewModel> filesToDelete;
         if (UseTreeView)
         {
+            // Build a lookup table once. Pre-fix this code did a linear
+            // RestorableFiles.FirstOrDefault per selected node, turning
+            // the delete into O(N x M) - 10K total files x 1K selected
+            // = 10M comparisons on the UI thread.
+            var byModel = new Dictionary<BackedUpFile, BackedUpFileViewModel>(RestorableFiles.Count);
+            foreach (var rf in RestorableFiles)
+            {
+                if (rf.Model != null)
+                    byModel[rf.Model] = rf;
+            }
+
             // In tree view mode, first check for checked (checkbox) files
             var selectedTreeFiles = FileTreeRoots
                 .SelectMany(r => r.GetSelectedFiles())
                 .Where(f => f.File != null)
-                .Select(f => RestorableFiles.FirstOrDefault(rf => rf.Model == f.File))
+                .Select(f => byModel.TryGetValue(f.File!, out var vm) ? vm : null)
                 .Where(f => f != null)
                 .Cast<BackedUpFileViewModel>()
                 .ToList();
-            
+
             // If no checked files, use the right-clicked/selected tree node
             if (selectedTreeFiles.Count == 0 && SelectedTreeNode != null)
             {
                 // Get all files from the selected node (works for both files and folders)
                 var filesFromNode = SelectedTreeNode.GetAllDescendants()
                     .Where(n => n.IsFile && n.File != null)
-                    .Select(n => RestorableFiles.FirstOrDefault(rf => rf.Model == n.File))
+                    .Select(n => byModel.TryGetValue(n.File!, out var vm) ? vm : null)
                     .Where(f => f != null)
                     .Cast<BackedUpFileViewModel>()
                     .ToList();
                 selectedTreeFiles = filesFromNode;
             }
-            
+
             filesToDelete = selectedTreeFiles;
         }
         else

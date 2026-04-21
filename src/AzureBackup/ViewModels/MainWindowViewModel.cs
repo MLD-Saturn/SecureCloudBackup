@@ -402,9 +402,9 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     // Collections
     public ObservableCollection<WatchedFolderViewModel> WatchedFolders { get; } = [];
-    public ObservableCollection<BackedUpFileViewModel> BackedUpFiles { get; } = [];
-    public ObservableCollection<BackedUpFileViewModel> RestorableFiles { get; } = [];
-    public ObservableCollection<string> LogMessages { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> BackedUpFiles { get; } = [];
+    public BulkObservableCollection<BackedUpFileViewModel> RestorableFiles { get; } = [];
+    public BulkObservableCollection<string> LogMessages { get; } = [];
 
     // Buffered log queue — ensures messages appear in chronological order regardless
     // of which thread calls AddLog. Without this, concurrent Dispatcher.Post calls
@@ -528,17 +528,17 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <summary>
     /// Root nodes for the file tree view (Azure backup files).
     /// </summary>
-    public ObservableCollection<FileTreeNodeViewModel> FileTreeRoots { get; } = [];
+    public BulkObservableCollection<FileTreeNodeViewModel> FileTreeRoots { get; } = [];
 
     /// <summary>
     /// Root nodes for the local file tree view.
     /// </summary>
-    public ObservableCollection<LocalFileTreeNodeViewModel> LocalFileTreeRoots { get; } = [];
+    public BulkObservableCollection<LocalFileTreeNodeViewModel> LocalFileTreeRoots { get; } = [];
 
     /// <summary>
     /// Flat list of all local files for list view mode.
     /// </summary>
-    public ObservableCollection<LocalFileTreeNodeViewModel> LocalFilesFlatList { get; } = [];
+    public BulkObservableCollection<LocalFileTreeNodeViewModel> LocalFilesFlatList { get; } = [];
 
 
     /// <summary>
@@ -790,6 +790,24 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
         // Check database state for returning vs new user
         var dbPath = AppMode.DatabasePath;
+
+        // Crash-safety: if a previous launch died mid-encryption-upgrade,
+        // finish the rename chain before we probe for database existence
+        // or migration state. The recovery is a no-op when no sentinel
+        // file is present, so this is cheap on the happy path.
+        try
+        {
+            if (LocalDatabaseService.RecoverInterruptedUpgrade(dbPath))
+            {
+                AddLog("Recovered an interrupted encryption upgrade from a prior session.");
+            }
+        }
+        catch (System.Exception ex)
+        {
+            AddLog($"Could not recover prior upgrade state: {ex.Message}. " +
+                "Inspect the database directory before continuing.");
+        }
+
         HasExistingConfig = LocalDatabaseService.DatabaseExists(dbPath);
         
         // Check what type of migration is needed (if any)
@@ -968,15 +986,59 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         {
             Volatile.Write(ref _logDrainScheduled, 0);
 
-            // Drain all buffered messages in FIFO order.
-            // Insert each at position 0 so the last dequeued (newest) ends up at the top.
+            // Drain into a local list so we can compute the prepend + trim
+            // off-collection. Insert(0, x) per item is O(N) on the underlying
+            // List<T>, so a 200-message drain into a 1000-line buffer was
+            // ~200 * (1000 + Add+Layout) before this change. A bulk Reset is
+            // one notification regardless of size.
+            List<string>? drained = null;
             while (_pendingLogMessages.TryDequeue(out var entry))
             {
-                LogMessages.Insert(0, entry);
+                drained ??= new List<string>();
+                drained.Add(entry);
             }
 
-            while (LogMessages.Count > 1000)
-                LogMessages.RemoveAt(LogMessages.Count - 1);
+            if (drained != null && drained.Count > 0)
+            {
+                const int Cap = 1000;
+
+                // Newest at top: drained is in enqueue order (oldest first),
+                // so reverse it before prepending.
+                var newCount = drained.Count + LogMessages.Count;
+                if (newCount <= Cap)
+                {
+                    // Build a fresh list: newest drained items first (reverse
+                    // order), then existing items, then trim to cap.
+                    var rebuilt = new List<string>(newCount);
+                    for (var i = drained.Count - 1; i >= 0; i--)
+                        rebuilt.Add(drained[i]);
+                    foreach (var existing in LogMessages)
+                        rebuilt.Add(existing);
+                    LogMessages.ReplaceAll(rebuilt);
+                }
+                else
+                {
+                    // Over cap: keep at most Cap items. If the drain itself
+                    // exceeds Cap (~rare; would mean >1000 messages between
+                    // dispatcher pumps) we take only the most recent Cap.
+                    var rebuilt = new List<string>(Cap);
+                    var fromDrained = System.Math.Min(drained.Count, Cap);
+                    for (var i = drained.Count - 1; i >= drained.Count - fromDrained; i--)
+                        rebuilt.Add(drained[i]);
+                    if (fromDrained < Cap)
+                    {
+                        var fromExisting = Cap - fromDrained;
+                        var taken = 0;
+                        foreach (var existing in LogMessages)
+                        {
+                            if (taken >= fromExisting) break;
+                            rebuilt.Add(existing);
+                            taken++;
+                        }
+                    }
+                    LogMessages.ReplaceAll(rebuilt);
+                }
+            }
 
             var status = Interlocked.Exchange(ref _latestStatusMessage, null);
             if (status != null)

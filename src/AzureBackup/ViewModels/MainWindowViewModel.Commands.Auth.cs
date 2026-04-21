@@ -141,7 +141,7 @@ public partial class MainWindowViewModel
             else
             {
                 // Connection String authentication
-                if (string.IsNullOrWhiteSpace(ConnectionString) || ConnectionString.StartsWith("[Encrypted"))
+                if (string.IsNullOrWhiteSpace(ConnectionString) || ConnectionString.StartsWith("[Encrypted", StringComparison.Ordinal))
                 {
                     AddLog("Please enter a connection string");
                     return;
@@ -167,6 +167,22 @@ public partial class MainWindowViewModel
         IsOperationInProgress = true;
         try
         {
+            // Persist WatchedFolders + budget FIRST so the orchestrator's
+            // subsequent SaveStorageAccountAsync / SaveConnectionStringAsync
+            // (each of which does GetConfiguration -> mutate -> SaveConfiguration)
+            // sees and preserves them. Pre-fix the order was reversed: auth
+            // saved first, then folders. If the folders write threw, the
+            // auth side was already committed and the folder list was lost.
+            // Doing watched-folders first means a failure in the second
+            // (auth) step at worst leaves the folders updated without the
+            // new credential — recoverable, no data loss.
+            if (IsInitialized)
+            {
+                var folderConfig = _databaseService.GetConfiguration();
+                folderConfig.WatchedFolders = WatchedFolders.Select(f => f.ToModel()).ToList();
+                _databaseService.SaveConfiguration(folderConfig);
+            }
+
             if (UseEntraIdAuth)
             {
                 // Entra ID authentication
@@ -188,7 +204,7 @@ public partial class MainWindowViewModel
             else
             {
                 // Connection String authentication
-                if (string.IsNullOrWhiteSpace(ConnectionString) || ConnectionString.StartsWith("[Encrypted"))
+                if (string.IsNullOrWhiteSpace(ConnectionString) || ConnectionString.StartsWith("[Encrypted", StringComparison.Ordinal))
                 {
                     AddLog("Please enter a connection string");
                     return;
@@ -205,11 +221,6 @@ public partial class MainWindowViewModel
                 IsEditingConnectionString = false;
                 AddLog("Connection string saved (encrypted) and connected!");
             }
-            
-            // Save watched folders and budget settings
-            var config = _databaseService.GetConfiguration();
-            config.WatchedFolders = WatchedFolders.Select(f => f.ToModel()).ToList();
-            _databaseService.SaveConfiguration(config);
         }
         catch (System.Exception ex)
         {
@@ -325,15 +336,8 @@ public partial class MainWindowViewModel
                     LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
 
-                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
-                    File.Move(AppMode.DatabasePath, backupPath);
-                    File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".legacy.bak");
 
                     AddLog("Database encryption upgraded to Argon2id successfully");
                     _needsLegacyMigration = false;
@@ -507,7 +511,7 @@ public partial class MainWindowViewModel
                 }
                 else
                 {
-                    if (string.IsNullOrWhiteSpace(userConnectionString) || userConnectionString.StartsWith("[Encrypted"))
+                    if (string.IsNullOrWhiteSpace(userConnectionString) || userConnectionString.StartsWith("[Encrypted", StringComparison.Ordinal))
                     {
                         AddLog("Please enter a connection string");
                         return;
@@ -533,17 +537,14 @@ public partial class MainWindowViewModel
                 {
                     LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
-                    
-                    var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
-                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
-                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
-                    
+
+                    // Crash-safe atomic swap. Sentinel at
+                    // {DatabasePath}.upgrade-pending guards every rename so
+                    // a process crash mid-rename is recoverable on next
+                    // launch via LocalDatabaseService.RecoverInterruptedUpgrade.
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".unencrypted.bak");
+
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
                 }
@@ -569,17 +570,10 @@ public partial class MainWindowViewModel
                 {
                     LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordChars);
                     _databaseService.Close();
-                    
-                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
-                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
-                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
-                    
+
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".legacy.bak");
+
                     AddLog("Database encryption upgraded to Argon2id successfully");
                     _needsLegacyMigration = false;
                 }
@@ -764,15 +758,8 @@ public partial class MainWindowViewModel
                     LocalDatabaseService.MigrateToEncrypted(AppMode.DatabasePath, tempPath, passwordMemory.Span);
                     _databaseService.Close();
 
-                    var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
-                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
-                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".unencrypted.bak");
 
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
@@ -800,15 +787,8 @@ public partial class MainWindowViewModel
                     LocalDatabaseService.MigrateLegacyEncrypted(AppMode.DatabasePath, tempPath, passwordMemory.Span);
                     _databaseService.Close();
 
-                    var backupPath = AppMode.DatabasePath + ".legacy.bak";
-                    System.IO.File.Move(AppMode.DatabasePath, backupPath);
-                    System.IO.File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".legacy.bak");
 
                     AddLog("Database encryption upgraded to Argon2id successfully");
                     _needsLegacyMigration = false;

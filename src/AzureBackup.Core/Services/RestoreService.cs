@@ -172,6 +172,10 @@ public partial class RestoreService
         IProgress<(int completed, int total)>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        // Bail before raising StatusChanged so a cancelled call doesn't
+        // emit a misleading "Retrieving..." right before the OperationCanceledException.
+        cancellationToken.ThrowIfCancellationRequested();
+
         Log("ListRestorableFilesAsync: Starting to list restorable files");
 
         StatusChanged?.Invoke(this, "Retrieving file list from Azure...");

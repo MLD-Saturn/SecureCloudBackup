@@ -31,8 +31,25 @@ public partial class MainWindow : Window
     {
         if (_startupCompleted) return;
         _startupCompleted = true;
-        
-        await HandleStartupFlowAsync();
+
+        // async void crash guard - HandleStartupFlowAsync awaits dialog
+        // construction and async unlock; an uncaught exception here
+        // would tear down the process before the user can see what
+        // happened. Catch and surface via the log panel; the View
+        // ends up showing the Settings tab so the user can recover.
+        try
+        {
+            await HandleStartupFlowAsync();
+        }
+        catch (Exception ex)
+        {
+            (DataContext as MainWindowViewModel)?.AddLogMessage(
+                $"Startup error: {ex.Message}");
+            if (DataContext is MainWindowViewModel vm)
+            {
+                vm.CurrentView = "Settings";
+            }
+        }
     }
 
     private async Task HandleStartupFlowAsync()
@@ -271,7 +288,7 @@ public partial class MainWindow : Window
                 // Handle both local paths and URI paths
                 var folder = folders[0];
                 var folderPath = folder.TryGetLocalPath() ?? folder.Path.ToString();
-                vm.AddWatchedFolderPath(folderPath);
+                await vm.AddWatchedFolderPathAsync(folderPath);
             }
         }
         catch (Exception ex)

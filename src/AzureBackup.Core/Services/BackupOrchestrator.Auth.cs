@@ -190,19 +190,35 @@ public partial class BackupOrchestrator
         Log($"SaveConnectionStringAsync: Saving connection string config for container {containerName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-        
+
         if (!_encryptionService.IsInitialized)
             throw new InvalidOperationException("Encryption service must be initialized before saving connection string.");
-        
+
+        // Connection strings often contain AccountKey=... credentials. Hold the
+        // plaintext UTF-8 bytes only as long as Encrypt needs them, then zero
+        // the buffer so a subsequent heap dump (or GC compaction copy) cannot
+        // recover the secret. We can't zero the inbound `string` parameter
+        // itself (C# strings are immutable in managed memory), but we can at
+        // least keep our own copy of the secret out of the reachable heap.
+        var plaintext = System.Text.Encoding.UTF8.GetBytes(connectionString);
+        byte[] encrypted;
+        try
+        {
+            encrypted = _encryptionService.Encrypt(plaintext);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(plaintext);
+        }
+
         var config = _databaseService.GetConfiguration();
-        config.EncryptedConnectionString = _encryptionService.Encrypt(
-            System.Text.Encoding.UTF8.GetBytes(connectionString));
+        config.EncryptedConnectionString = encrypted;
         config.ContainerName = containerName;
         config.AuthMethod = AzureAuthMethod.ConnectionString;
         config.IsEntraIdAuthenticated = false;
         _databaseService.SaveConfiguration(config);
         Log("SaveConnectionStringAsync: Encrypted connection string saved");
-        
+
         // Connect immediately
         await _blobService.ConnectAsync(connectionString, containerName);
         Log("SaveConnectionStringAsync: Connected to Azure storage");

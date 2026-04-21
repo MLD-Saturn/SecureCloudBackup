@@ -74,22 +74,33 @@ public partial class SyncView : UserControl
     
     private async void OnRemapFolderPickerRequested(object? sender, EventArgs e)
     {
-        if (DataContext is not MainWindowViewModel vm) return;
-        
-        var topLevel = TopLevel.GetTopLevel(this);
-        if (topLevel == null) return;
-        
-        var folders = await topLevel.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        // async void event handler: any unhandled exception would crash the
+        // process via SynchronizationContext.UnhandledException, so we have
+        // to swallow + report. Same wrapper pattern as the matching handlers
+        // in MainWindow.axaml.cs.
+        try
         {
-            Title = "Select Target Folder for Path Remapping",
-            AllowMultiple = false
-        });
-        
-        if (folders.Count > 0)
+            if (DataContext is not MainWindowViewModel vm) return;
+
+            var topLevel = TopLevel.GetTopLevel(this);
+            if (topLevel == null) return;
+
+            var folders = await topLevel.StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+            {
+                Title = "Select Target Folder for Path Remapping",
+                AllowMultiple = false
+            });
+
+            if (folders.Count > 0)
+            {
+                var uri = folders[0].Path;
+                var folderPath = uri.IsAbsoluteUri ? uri.LocalPath : uri.ToString();
+                vm.SetRemapFolderPath(folderPath);
+            }
+        }
+        catch (Exception ex)
         {
-            var uri = folders[0].Path;
-            var folderPath = uri.IsAbsoluteUri ? uri.LocalPath : uri.ToString();
-            vm.SetRemapFolderPath(folderPath);
+            (DataContext as MainWindowViewModel)?.AddLogMessage($"Folder picker error: {ex.Message}");
         }
     }
     
@@ -350,14 +361,27 @@ public partial class SyncView : UserControl
     
     private async void StartLocalFileDrag(PointerEventArgs e)
     {
+        // async void crash guard - see OnRemapFolderPickerRequested.
+        try
+        {
+            await StartLocalFileDragCoreAsync(e);
+        }
+        catch (Exception ex)
+        {
+            (DataContext as MainWindowViewModel)?.AddLogMessage($"Drag start failed: {ex.Message}");
+        }
+    }
+
+    private async Task StartLocalFileDragCoreAsync(PointerEventArgs e)
+    {
         if (DataContext is not MainWindowViewModel vm) return;
-        
+
         // Only start drag on left mouse button with some movement
         if (!e.GetCurrentPoint(this).Properties.IsLeftButtonPressed) return;
-        
+
         // Find the LocalFileTreeNodeViewModel under the pointer
         var draggedItem = FindLocalFileNodeFromSource(e.Source as Control);
-        
+
         if (draggedItem == null || !draggedItem.IsFile)
         {
             // Can't determine what's being dragged, or it's a folder - use existing selection
@@ -366,7 +390,7 @@ public partial class SyncView : UserControl
             await PerformLocalFileDrag(e, vm, selectedFiles);
             return;
         }
-        
+
         // Check if the dragged item is already selected
         if (draggedItem.IsSelected)
         {
@@ -380,7 +404,7 @@ public partial class SyncView : UserControl
             // Dragging an unselected item - deselect all others and select just this one
             vm.DeselectAllLocalFiles();
             draggedItem.IsSelected = true;
-            
+
             List<string> filesToDrag = new() { draggedItem.FullPath };
             await PerformLocalFileDrag(e, vm, filesToDrag);
         }
@@ -434,11 +458,24 @@ public partial class SyncView : UserControl
 
     private async void StartAzureFileDrag(PointerEventArgs e)
     {
+        // async void crash guard - see OnRemapFolderPickerRequested.
+        try
+        {
+            await StartAzureFileDragCoreAsync(e);
+        }
+        catch (Exception ex)
+        {
+            (DataContext as MainWindowViewModel)?.AddLogMessage($"Drag start failed: {ex.Message}");
+        }
+    }
+
+    private async Task StartAzureFileDragCoreAsync(PointerEventArgs e)
+    {
         if (DataContext is not MainWindowViewModel vm) return;
-        
+
         // Find the FileTreeNodeViewModel under the pointer
         var draggedItem = FindAzureFileNodeFromSource(e.Source as Control);
-        
+
         if (draggedItem == null || !draggedItem.IsFile)
         {
             // Can't determine what's being dragged, or it's a folder - use existing selection
@@ -447,7 +484,7 @@ public partial class SyncView : UserControl
             await PerformAzureFileDrag(e, vm, selectedFiles);
             return;
         }
-        
+
         // Check if the dragged item is already selected
         if (draggedItem.IsSelected)
         {
@@ -461,7 +498,7 @@ public partial class SyncView : UserControl
             // Dragging an unselected item - deselect all others and select just this one
             vm.DeselectAllAzureFiles();
             draggedItem.IsSelected = true;
-            
+
             List<string> filesToDrag = new() { draggedItem.File!.LocalPath };
             await PerformAzureFileDrag(e, vm, filesToDrag);
         }

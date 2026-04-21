@@ -225,21 +225,29 @@ public partial class MainWindowViewModel
         }
     }
 
+    // Cached selection counts. Pre-fix HasSelectedLocalFiles and
+    // SelectedLocalFilesCount each walked the full local tree on every
+    // binding evaluation (button enable-state + label text re-read on
+    // every property change). At thousands of files that turns
+    // background activity into O(N) per UI tick. Recomputed lazily in
+    // NotifyLocalSelectionChanged when the selection actually moves.
+    private int _cachedSelectedLocalFilesCount;
+
     /// <summary>
     /// Returns true if any local files are selected.
     /// </summary>
-    public bool HasSelectedLocalFiles => GetSelectedLocalFiles().Any();
+    public bool HasSelectedLocalFiles => _cachedSelectedLocalFilesCount > 0;
 
     /// <summary>
     /// Count of selected local files.
     /// </summary>
-    public int SelectedLocalFilesCount => GetSelectedLocalFiles().Count();
+    public int SelectedLocalFilesCount => _cachedSelectedLocalFilesCount;
 
     /// <summary>
     /// Display text for selected local files.
     /// </summary>
-    public string SelectedLocalFilesText => SelectedLocalFilesCount == 0 
-        ? "" 
+    public string SelectedLocalFilesText => SelectedLocalFilesCount == 0
+        ? ""
         : $"{SelectedLocalFilesCount} local file(s) selected";
 
     /// <summary>
@@ -275,10 +283,28 @@ public partial class MainWindowViewModel
     /// Returns true when a single root watched folder is selected on the left pane,
     /// enabling the Mirror Sync to Azure operation.
     /// </summary>
-    public bool CanMirrorSyncToAzure =>
-        IsInitialized && _blobService.IsConnected &&
-        LocalFileTreeRoots.Count(r => r.IsSelected) == 1 &&
-        LocalFileTreeRoots.First(r => r.IsSelected).IsFolder;
+    /// <remarks>
+    /// Single-pass over the roots: avoids the previous Count==1 + First race
+    /// where another thread could clear the selection between the two LINQ
+    /// evaluations and make First throw. Take(2) bounds the walk so very
+    /// large root lists still short-circuit on the second selected entry.
+    /// </remarks>
+    public bool CanMirrorSyncToAzure
+    {
+        get
+        {
+            if (!IsInitialized || !_blobService.IsConnected) return false;
+
+            LocalFileTreeNodeViewModel? candidate = null;
+            foreach (var root in LocalFileTreeRoots)
+            {
+                if (!root.IsSelected) continue;
+                if (candidate != null) return false; // more than one selected
+                candidate = root;
+            }
+            return candidate != null && candidate.IsFolder;
+        }
+    }
 
     /// <summary>
     /// Performs a mirror sync from the selected local watched folder to Azure:
@@ -362,9 +388,16 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// Notifies that selection-related properties may have changed.
+    /// Recomputes the cached selection count up-front so the public
+    /// HasSelectedLocalFiles / SelectedLocalFilesCount bindings are
+    /// O(1) reads thereafter.
     /// </summary>
     private void NotifyLocalSelectionChanged()
     {
+        // Single tree walk per selection change instead of one walk per
+        // binding read. GetSelectedLocalFiles is yield-based so a Count()
+        // here enumerates exactly once.
+        _cachedSelectedLocalFilesCount = GetSelectedLocalFiles().Count();
         OnPropertyChanged(nameof(HasSelectedLocalFiles));
         OnPropertyChanged(nameof(SelectedLocalFilesCount));
         OnPropertyChanged(nameof(SelectedLocalFilesText));
