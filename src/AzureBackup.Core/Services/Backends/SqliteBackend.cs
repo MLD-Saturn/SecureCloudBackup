@@ -2061,22 +2061,22 @@ internal sealed class SqliteBackend : IDatabaseBackend
         if (string.IsNullOrEmpty(path))
             return;
 
-        // Delete every artefact SQLite (and our salt-file convention)
-        // might have written. Missing files are fine; File.Delete on a
-        // non-existent path is a silent no-op.
-        TryDelete(path);
-        TryDelete(path + "-wal");
-        TryDelete(path + "-shm");
-        TryDelete(path + "-journal");
-        TryDelete(GetSaltFilePath(path));
+        // Securely delete every artefact SQLite (and our salt-file
+        // convention) might have written. The DB file + salt carry
+        // key material so we route through TrySecureDelete (single
+        // random-bytes pass + Flush(true) + unlink). The WAL/SHM/journal
+        // are also derived from encrypted page content; if SQLCipher is
+        // active they're already ciphertext, but we still overwrite for
+        // defence in depth on hosts that may have run with a fallback
+        // unencrypted SQLite build. Same helper used by
+        // LocalDatabaseService.SecureReset on the LiteDB side.
+        FileSystemHelper.TrySecureDelete(path);
+        FileSystemHelper.TrySecureDelete(path + "-wal");
+        FileSystemHelper.TrySecureDelete(path + "-shm");
+        FileSystemHelper.TrySecureDelete(path + "-journal");
+        FileSystemHelper.TrySecureDelete(GetSaltFilePath(path));
 
         _databasePath = null;
-
-        static void TryDelete(string filePath)
-        {
-            try { if (File.Exists(filePath)) File.Delete(filePath); }
-            catch { /* best effort */ }
-        }
     }
 
     /// <summary>

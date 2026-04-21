@@ -157,8 +157,8 @@ public partial class LocalDatabaseService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         var paths = new MigrationPaths(databasePath);
-        DeleteIfExists(paths.LiteDbBackup);
-        DeleteIfExists(paths.LiteDbBackupSalt);
+        FileSystemHelper.TrySecureDelete(paths.LiteDbBackup);
+        FileSystemHelper.TrySecureDelete(paths.LiteDbBackupSalt);
     }
 
     /// <summary>
@@ -247,10 +247,10 @@ public partial class LocalDatabaseService
         // Defensive: if a prior migration left stale temp artefacts
         // behind, clear them before starting. Otherwise SqliteBackend
         // would open the partial file and misread its state.
-        DeleteIfExists(tempSqlitePath);
-        DeleteIfExists(tempSqlitePath + "-wal");
-        DeleteIfExists(tempSqlitePath + "-shm");
-        DeleteIfExists(tempSqliteSaltPath);
+        FileSystemHelper.TrySecureDelete(tempSqlitePath);
+        FileSystemHelper.TrySecureDelete(tempSqlitePath + "-wal");
+        FileSystemHelper.TrySecureDelete(tempSqlitePath + "-shm");
+        FileSystemHelper.TrySecureDelete(tempSqliteSaltPath);
 
         // Use a temporary LocalDatabaseService that opens the file as
         // LiteDB regardless of feature-flag state. InitializeLiteDbOnly
@@ -331,10 +331,10 @@ public partial class LocalDatabaseService
             // Clean up the partial temp file before propagating.
             try { sqlite.Close(); } catch { /* best effort */ }
             try { liteDb.Close(); } catch { /* best effort */ }
-            DeleteIfExists(tempSqlitePath);
-            DeleteIfExists(tempSqlitePath + "-wal");
-            DeleteIfExists(tempSqlitePath + "-shm");
-            DeleteIfExists(tempSqliteSaltPath);
+            FileSystemHelper.TrySecureDelete(tempSqlitePath);
+            FileSystemHelper.TrySecureDelete(tempSqlitePath + "-wal");
+            FileSystemHelper.TrySecureDelete(tempSqlitePath + "-shm");
+            FileSystemHelper.TrySecureDelete(tempSqliteSaltPath);
             throw;
         }
 
@@ -372,14 +372,8 @@ public partial class LocalDatabaseService
             File.Move(originalSaltPath, litedbBackupSaltPath);
         File.Move(tempSqlitePath, databasePath);
         File.Move(tempSqliteSaltPath, databasePath + ".salt");
-        DeleteIfExists(litedbBackupPath);
-        DeleteIfExists(litedbBackupSaltPath);
-    }
-
-    private static void DeleteIfExists(string path)
-    {
-        try { if (File.Exists(path)) File.Delete(path); }
-        catch { /* best effort */ }
+        FileSystemHelper.TrySecureDelete(litedbBackupPath);
+        FileSystemHelper.TrySecureDelete(litedbBackupSaltPath);
     }
 
     /// <summary>
@@ -525,14 +519,16 @@ public partial class LocalDatabaseService
                     // Step 1 fired but step 1b did not, AND somehow a
                     // backup salt also exists (e.g. from an even earlier
                     // failed attempt). Discard the backup-salt copy;
-                    // the in-place salt is the source of truth.
-                    File.Delete(paths.LiteDbBackupSalt);
+                    // the in-place salt is the source of truth. Salt
+                    // material is secret-bearing so we route through
+                    // TrySecureDelete (single random pass + Flush).
+                    FileSystemHelper.TrySecureDelete(paths.LiteDbBackupSalt);
                 }
             }
-            DeleteIfExists(paths.TempSqlite);
-            DeleteIfExists(paths.TempSqlite + "-wal");
-            DeleteIfExists(paths.TempSqlite + "-shm");
-            DeleteIfExists(paths.TempSqliteSalt);
+            FileSystemHelper.TrySecureDelete(paths.TempSqlite);
+            FileSystemHelper.TrySecureDelete(paths.TempSqlite + "-wal");
+            FileSystemHelper.TrySecureDelete(paths.TempSqlite + "-shm");
+            FileSystemHelper.TrySecureDelete(paths.TempSqliteSalt);
             return InterruptedMigrationOutcome.RecoveredAsLiteDb;
         }
 
@@ -547,10 +543,10 @@ public partial class LocalDatabaseService
             // (move salt) and step 4 (delete backup).
             File.Move(paths.TempSqliteSalt, paths.OriginalSalt);
             // Tidy any stale wal/shm sidecars from the temp path.
-            DeleteIfExists(paths.TempSqlite + "-wal");
-            DeleteIfExists(paths.TempSqlite + "-shm");
-            DeleteIfExists(paths.LiteDbBackup);
-            DeleteIfExists(paths.LiteDbBackupSalt);
+            FileSystemHelper.TrySecureDelete(paths.TempSqlite + "-wal");
+            FileSystemHelper.TrySecureDelete(paths.TempSqlite + "-shm");
+            FileSystemHelper.TrySecureDelete(paths.LiteDbBackup);
+            FileSystemHelper.TrySecureDelete(paths.LiteDbBackupSalt);
             return InterruptedMigrationOutcome.RecoveredAsSqlite;
         }
 
@@ -566,8 +562,8 @@ public partial class LocalDatabaseService
             // the steady state (.litedb-backup retained for manual
             // rollback). With C-5's delete-on-success policy this is
             // now an interrupted-after-step-3 state and we clean up.
-            DeleteIfExists(paths.LiteDbBackup);
-            DeleteIfExists(paths.LiteDbBackupSalt);
+            FileSystemHelper.TrySecureDelete(paths.LiteDbBackup);
+            FileSystemHelper.TrySecureDelete(paths.LiteDbBackupSalt);
             return InterruptedMigrationOutcome.RecoveredAsSqlite;
         }
 

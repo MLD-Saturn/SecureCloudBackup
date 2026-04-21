@@ -630,29 +630,17 @@ public partial class LocalDatabaseService
             _indexMetadataCollection = null;
             _chunkFileRefsCollection = null;
 
-            // Securely delete the database file
-            SecureDeleteFile(_databasePath);
-
-            // Also delete the journal file if it exists
-            var journalPath = _databasePath + "-journal";
-            if (File.Exists(journalPath))
-            {
-                SecureDeleteFile(journalPath);
-            }
-
-            // Also delete the log file if it exists (LiteDB WAL)
-            var logPath = _databasePath + "-log";
-            if (File.Exists(logPath))
-            {
-                SecureDeleteFile(logPath);
-            }
-
-            // Also delete the salt file
-            var saltPath = GetSaltFilePath(_databasePath);
-            if (File.Exists(saltPath))
-            {
-                SecureDeleteFile(saltPath);
-            }
+            // Securely delete the database file and all sibling artefacts
+            // (journal, WAL log, salt). All four route through the shared
+            // FileSystemHelper.TrySecureDelete (single random-bytes pass +
+            // Flush(true) + unlink) so the cleanup contract matches every
+            // other secret-bearing delete in the codebase. The lambda
+            // wrapper is necessary because Log is [Conditional] and so
+            // can't be assigned to an Action<string> directly.
+            FileSystemHelper.TrySecureDelete(_databasePath, msg => Log(msg));
+            FileSystemHelper.TrySecureDelete(_databasePath + "-journal", msg => Log(msg));
+            FileSystemHelper.TrySecureDelete(_databasePath + "-log", msg => Log(msg));
+            FileSystemHelper.TrySecureDelete(GetSaltFilePath(_databasePath), msg => Log(msg));
 
             Log("SecureReset: Database and salt file have been securely deleted. Application restart required.");
         });
@@ -680,7 +668,7 @@ public partial class LocalDatabaseService
                 RandomNumberGenerator.Fill(config.PasswordVerificationHash);
                 config.PasswordVerificationHash = null;
             }
-            
+
             // Overwrite encrypted connection string
             if (config.EncryptedConnectionString != null)
             {
@@ -710,50 +698,6 @@ public partial class LocalDatabaseService
         _chunkIndexCollection?.DeleteAll();
         _indexMetadataCollection?.DeleteAll();
         _chunkFileRefsCollection?.DeleteAll();
-    }
-
-    /// <summary>
-    /// Securely deletes a file by overwriting with random data before deletion.
-    /// </summary>
-    private static void SecureDeleteFile(string filePath)
-    {
-        if (!File.Exists(filePath)) return;
-
-        try
-        {
-            FileInfo fileInfo = new(filePath);
-            var fileSize = fileInfo.Length;
-
-            // Overwrite file with random data (3 passes for extra security)
-            using (FileStream stream = new(filePath, FileMode.Open, FileAccess.Write, FileShare.None))
-            {
-                byte[] buffer = new byte[4096];
-                
-                for (var pass = 0; pass < 3; pass++)
-                {
-                    stream.Position = 0;
-                    var remaining = fileSize;
-                    
-                    while (remaining > 0)
-                    {
-                        var toWrite = (int)Math.Min(buffer.Length, remaining);
-                        RandomNumberGenerator.Fill(buffer.AsSpan(0, toWrite));
-                        stream.Write(buffer, 0, toWrite);
-                        remaining -= toWrite;
-                    }
-                    
-                    stream.Flush();
-                }
-            }
-
-            // Now delete the file
-            File.Delete(filePath);
-        }
-        catch (IOException)
-        {
-            // If secure delete fails, try regular delete
-            try { File.Delete(filePath); } catch { /* Best effort */ }
-        }
     }
 
     #endregion
