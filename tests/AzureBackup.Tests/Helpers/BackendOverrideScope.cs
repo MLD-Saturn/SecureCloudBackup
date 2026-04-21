@@ -25,13 +25,21 @@ namespace AzureBackup.Tests;
 /// </summary>
 internal sealed class BackendOverrideScope : IDisposable
 {
+    private readonly bool? _previous;
+
     public BackendOverrideScope(bool useSqlite)
     {
+        // Snapshot the previous value so dispose can restore it. This
+        // makes nesting safe: an inner scope's dispose un-shadows the
+        // outer scope's value rather than clearing the override
+        // entirely. Current callers never nest, but the snapshot is
+        // free and removes the latent footgun.
+        _previous = DatabaseBackendFactory.GetAsyncLocalOverride();
         DatabaseBackendFactory.SetAsyncLocalOverride(useSqlite);
     }
 
     public void Dispose()
     {
-        DatabaseBackendFactory.SetAsyncLocalOverride(null);
+        DatabaseBackendFactory.SetAsyncLocalOverride(_previous);
     }
 }

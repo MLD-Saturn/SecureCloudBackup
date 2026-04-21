@@ -80,6 +80,15 @@ internal static class DatabaseBackendFactory
     }
 
     /// <summary>
+    /// Test hook: returns the current value of the AsyncLocal override
+    /// (or <c>null</c> if unset). Used by <c>BackendOverrideScope</c> to
+    /// snapshot the previous value on construction so its dispose can
+    /// restore the previous value rather than blindly clearing - which
+    /// matters if a future test ever nests two scopes.
+    /// </summary>
+    internal static bool? GetAsyncLocalOverride() => _asyncLocalOverride.Value;
+
+    /// <summary>
     /// Returns <c>true</c> if the current process environment is
     /// configured to use the SQLite backend. The
     /// <see cref="AsyncLocal{T}"/> override (if set) takes precedence

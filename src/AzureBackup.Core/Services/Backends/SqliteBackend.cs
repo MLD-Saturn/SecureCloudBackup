@@ -1473,7 +1473,8 @@ internal sealed class SqliteBackend : IDatabaseBackend
     private void RebuildReverseChunkIndexCore(
         IProgress<(int processed, int total)>? progress,
         CancellationToken cancellationToken)
-    {        // Snapshot the work list ONCE up front so the IProgress<>
+    {
+        // Snapshot the work list ONCE up front so the IProgress<>
         // contract has a real total to report against. The actual
         // rebuild then fires as a single INSERT...SELECT - the engine
         // does the JOIN, filtering, and bulk write entirely inside
