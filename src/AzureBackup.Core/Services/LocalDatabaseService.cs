@@ -177,21 +177,16 @@ public partial class LocalDatabaseService : IDisposable
         // its top and delegates if present.
         if (DatabaseBackendFactory.ShouldUseSqlite())
         {
-            // C-2: if a database file exists at the target path and it
-            // is NOT already a SQLite database, run migration. The
-            // probe uses an InvalidPasswordException to distinguish
-            // "this file is a LiteDB database" from "this file is a
-            // SQLite database with a wrong password". The probe opens
-            // and immediately disposes, which is cheap (~500 ms
-            // SQLCipher open) - acceptable as a per-launch cost.
-            if (File.Exists(databasePath)
-                && !TryProbeAsSqlite(databasePath, password))
-            {
-                Log("Initialize: Existing non-SQLite database detected; running LiteDB->SQLite migration");
-                MigrateFromLiteDb(databasePath, password);
-                Log("Initialize: Migration complete");
-            }
-
+            // C-2: the UI layer is responsible for detecting an existing
+            // LiteDB database (via IsExistingSqliteDatabase returning
+            // false) and calling MigrateFromLiteDb BEFORE us. We do not
+            // auto-migrate here because migration on a real-size DB
+            // takes 10-15 s and the UI wants to surface a progress
+            // indicator. Calling Initialize on a LiteDB file with the
+            // SQLite flag on will throw InvalidPasswordException from
+            // SqliteBackend's open - the contract is "migrate first,
+            // open second". See MigrateFromLiteDb's xmldoc and the
+            // EnsureMigratedToSqliteAsync helper in MainWindowViewModel.
             Log($"Initialize: AZBK_USE_SQLITE flag is set; routing to SqliteBackend");
             _databasePath = databasePath;
             _sqliteBackend = DatabaseBackendFactory.CreateAndInitializeSqlite(databasePath, password);

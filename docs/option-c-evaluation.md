@@ -435,26 +435,31 @@ Immediate next work, in order:
    uses one connection per LocalDatabaseService instance, matching
    the C-3 (5b) measured topology. Pool lands as a separate commit
    if/when it becomes necessary.
-2. **C-2** — the migration code path with blocking-modal progress UI.
-   **Status: code path landed (`9fda662` + `f319782`).** The migration logic is
-   complete and tested (4 integration tests covering full round-trip,
-   idempotency, wrong-password safety, and a regression test for the
-   AsyncLocal-recursion bug below). Detection happens in
-   `LocalDatabaseService.Initialize`: when the flag is on AND the
-   target file is not a SQLite database (probed via SqliteBackend
-   open + InvalidPasswordException catch), we read every collection
-   from LiteDB and write it into a fresh SqliteBackend at
-   `<path>.sqlite-tmp`, then rename the four files into place. The
-   original LiteDB is preserved at `<path>.litedb-backup`. The
-   blocking-modal progress UI is **NOT** wired - migration runs
-   synchronously on the calling thread. The `IProgress<>` parameter
-   on `MigrateFromLiteDb` is plumbed but no caller builds a
-   reporter; that lands when MainWindow grows the modal.
-   Concurrent-write safety (the `SqliteBackend` write lock) was
-   discovered as a prerequisite while landing this and is part of
-   the same commit.
+2. **C-2** — the migration code path with progress UI.
+   **Status: complete.** Lands across four commits: `9fda662`
+   (initial code, contained recursion bug), `f319782` (recursion fix
+   + re-entry guard), `4e81b1f` (`InitializeLiteDbCore` extraction +
+   tightening), `d2a2554` (direct unit tests), and the present
+   commit (UI wiring + forced detection moved to UI layer).
 
-   **Why two commits:** `9fda662` shipped the migration code with a
+   The migration logic copies every collection (config, chunk_index,
+   files + chunks, pending changes, all index metadata) from LiteDB
+   into a fresh SQLite database, then atomically renames four files
+   into place. The original LiteDB is preserved as
+   `<path>.litedb-backup`. The detection-and-dispatch logic now lives
+   in the UI's `EnsureMigratedToSqliteAsync` helper (next to the
+   existing `MigrateLegacyEncrypted` / `MigrateToEncrypted` paths in
+   `MainWindowViewModel.Commands.Auth`); `LocalDatabaseService.Initialize`
+   no longer auto-migrates because the UI needs to surface progress.
+
+   Progress is shown via the existing logs panel using the same
+   throttled-AddLog pattern as `EnsureReverseChunkIndexBuiltAsync`
+   (Phase 5 / P3 reverse index rebuild). One in roughly every 5% of
+   total rows is reported. Migration is non-cancellable from the UI
+   by design (forced migration; user complaints about a 10-30 s
+   freeze are preferable to a half-migrated state on cancel).
+
+   **Why four commits:** `9fda662` shipped the migration code with a
    recursion bug — `InitializeLiteDbOnly` cleared only the env var,
    not the AsyncLocal override added in the same commit, so the
    inner `Initialize` re-evaluated `ShouldUseSqlite()` to true,
@@ -465,8 +470,11 @@ Immediate next work, in order:
    per-instance `_initializeInProgress` re-entry guard that converts
    any future regression into a fast `InvalidOperationException`
    instead of a stack overflow.
-3. **C-6** — one release in main behind the preview flag before
-   forced migration.
+3. **C-6 / preview soak** — **dropped per product direction.** The
+   migration is forced rather than gated by a preview flag. The
+   `AZBK_USE_SQLITE` env var remains as the single switch the UI
+   reads to choose backend; the long-term plan (C-5) flips its
+   default and removes the LiteDB code path.
 4. **Post-ship calibration re-run** (optional) — scenarios 1, 3, 4
    with the new `cache_size = 64 MB` setting active, for a fully
    symmetric decision record. Gate clears without this; not a

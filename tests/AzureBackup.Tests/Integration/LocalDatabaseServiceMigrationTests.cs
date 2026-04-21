@@ -103,12 +103,15 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
         Assert.True(File.Exists(_dbPath), "LiteDB seed did not produce a database file");
         Assert.True(File.Exists(_dbPath + ".salt"), "LiteDB seed did not produce a salt file");
 
-        // Act: flip the flag and open the database. Initialize should
-        // detect the LiteDB file, run migration, and leave us with a
-        // working SQLite database at _dbPath.
+        // Act: flip the flag and open the database. The new C-2 UI
+        // contract requires the caller (here the test, in production
+        // the auth ViewModel) to probe + migrate before Initialize.
         using (var _flagOn = new BackendOverrideScope(useSqlite: true))
         using (var migrated = new LocalDatabaseService())
         {
+            Assert.False(LocalDatabaseService.IsExistingSqliteDatabase(_dbPath, Password.AsSpan()),
+                "Pre-migration the file must NOT already be SQLite");
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
             migrated.Initialize(_dbPath, Password.AsSpan());
 
             // Assert: the LiteDB database was renamed out of the way.
@@ -169,6 +172,9 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
         using (var _flagOn = new BackendOverrideScope(useSqlite: true))
         using (var first = new LocalDatabaseService())
         {
+            // First open: file is LiteDB, so probe is false and migration runs.
+            Assert.False(LocalDatabaseService.IsExistingSqliteDatabase(_dbPath, Password.AsSpan()));
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
             first.Initialize(_dbPath, Password.AsSpan());
         }
 
@@ -213,12 +219,20 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
 
         var litedbMtime = File.GetLastWriteTimeUtc(_dbPath);
 
-        // Act: flip the flag and attempt to open with a WRONG password.
+        // Act: flip the flag and attempt to migrate with a WRONG
+        // password. Under the new C-2 UI contract the caller probes
+        // first (false, file is LiteDB), then calls MigrateFromLiteDb,
+        // which is what propagates the InvalidPasswordException from
+        // the LiteDB open inside the migration's source-side reader.
         using var _flagOn = new BackendOverrideScope(useSqlite: true);
-        using var attempt = new LocalDatabaseService();
+
+        Assert.False(LocalDatabaseService.IsExistingSqliteDatabase(
+            _dbPath, "WrongPassword42!".AsSpan()),
+            "LiteDB file with any password is not a SQLite database; probe must return false");
 
         Assert.Throws<InvalidPasswordException>(() =>
-            attempt.Initialize(_dbPath, "WrongPassword42!".AsSpan()));
+            LocalDatabaseService.MigrateFromLiteDb(
+                _dbPath, "WrongPassword42!".AsSpan()));
 
         // Assert: the LiteDB file was NOT renamed (migration did not run
         // because the probe never saw a usable password for LiteDB open).
@@ -232,6 +246,8 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
         // Next attempt with the right password should still be able to
         // migrate (the DB is unchanged).
         using var retry = new LocalDatabaseService();
+        Assert.False(LocalDatabaseService.IsExistingSqliteDatabase(_dbPath, Password.AsSpan()));
+        LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
         retry.Initialize(_dbPath, Password.AsSpan());
         Assert.True(File.Exists(_dbPath + ".litedb-backup"),
             "Retry with correct password should have migrated");
@@ -280,6 +296,8 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
         // The defence-in-depth guard converts that into a fast-failing
         // InvalidOperationException; either way the test catches the
         // regression.
+        Assert.False(LocalDatabaseService.IsExistingSqliteDatabase(_dbPath, Password.AsSpan()));
+        LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
         migrated.Initialize(_dbPath, Password.AsSpan());
 
         // Assert: migration completed normally.
@@ -329,5 +347,90 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
 
         // Assert: the seeded data is still there.
         Assert.NotNull(reopen.GetIndexMetadata("DirectSqliteSeed"));
+    }
+
+    /// <summary>
+    /// Verifies that <see cref="LocalDatabaseService.MigrateFromLiteDb"/>
+    /// emits progress reports in the shape the C-2 UI throttler expects:
+    /// at least one report is produced, the <c>processed</c> component
+    /// is monotonically non-decreasing, and the final report has
+    /// <c>processed == total</c>. The UI's throttled AddLog progress
+    /// reporter (<c>EnsureMigratedToSqliteAsync</c>) relies on these
+    /// invariants - this test pins them so a future engine change that
+    /// breaks them fails here instead of as a confusing silent UI
+    /// (no progress text or stuck-at-50% bar).
+    /// </summary>
+    [Fact]
+    public void MigrateFromLiteDb_EmitsMonotonicProgressEndingAtTotal()
+    {
+        // Arrange: seed a LiteDB with enough rows to produce more than
+        // one progress tick. 10 files + 30 chunks comfortably crosses
+        // the per-phase boundaries.
+        using (var _flagOff = new BackendOverrideScope(useSqlite: false))
+        using (var seed = new LocalDatabaseService())
+        {
+            seed.Initialize(_dbPath, Password.AsSpan());
+            for (var i = 0; i < 30; i++)
+            {
+                seed.SaveChunkIndexEntry(new ChunkIndexEntry
+                {
+                    ChunkHash = $"HASH-{i:D3}",
+                    FirstUploadedAt = new DateTime(2026, 4, 18, 9, 0, 0, DateTimeKind.Utc),
+                    SizeBytes = 1024,
+                    ReferenceCount = 1,
+                    LastVerifiedAt = new DateTime(2026, 4, 18, 9, 0, 0, DateTimeKind.Utc),
+                });
+            }
+            for (var i = 0; i < 10; i++)
+            {
+                seed.SaveBackedUpFile(new BackedUpFile
+                {
+                    LocalPath = $@"C:\seed\f{i:D2}.bin",
+                    FileHash = $"FILEHASH-{i:D2}",
+                    LastModified = new DateTime(2026, 4, 18, 9, 30, 0, DateTimeKind.Utc),
+                    FileSize = 4096,
+                    Status = BackupStatus.Completed,
+                });
+            }
+        }
+
+        var reports = new List<(int processed, int total)>();
+        var progress = new Progress<(int processed, int total)>(t =>
+        {
+            // Progress<T> dispatches on the captured SynchronizationContext;
+            // in xUnit there is none so callbacks run inline on the engine
+            // thread which is what we want for deterministic assertion.
+            reports.Add(t);
+        });
+
+        // Act: run migration with the progress reporter.
+        using var _flagOn = new BackendOverrideScope(useSqlite: true);
+        LocalDatabaseService.MigrateFromLiteDb(
+            _dbPath, Password.AsSpan(), progress);
+
+        // Wait for any queued Progress<T> callbacks. Without a
+        // SynchronizationContext they were enqueued on the thread pool
+        // synchronously, but a small spin gives any straggler a chance.
+        var deadline = DateTime.UtcNow.AddSeconds(2);
+        while (reports.Count == 0 && DateTime.UtcNow < deadline)
+        {
+            Thread.Sleep(10);
+        }
+
+        // Assert: at least one report.
+        Assert.NotEmpty(reports);
+
+        // Assert: monotonic processed.
+        for (var i = 1; i < reports.Count; i++)
+        {
+            Assert.True(reports[i].processed >= reports[i - 1].processed,
+                $"Progress regressed at index {i}: " +
+                $"{reports[i - 1].processed} -> {reports[i].processed}");
+        }
+
+        // Assert: final report reaches total.
+        var last = reports[^1];
+        Assert.Equal(last.total, last.processed);
+        Assert.True(last.total > 0, "Total must be positive when there is data to migrate");
     }
 }

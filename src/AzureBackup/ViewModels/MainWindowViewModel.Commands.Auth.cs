@@ -355,6 +355,15 @@ public partial class MainWindowViewModel
                 }
             }
 
+            // C-2: detect existing LiteDB database and migrate to
+            // SQLite under the AZBK_USE_SQLITE flag, with progress
+            // surfaced via AddLog. No-op when flag is off, file is new,
+            // or file is already SQLite.
+            if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
+            {
+                return;
+            }
+
             // Step 3: Initialize the encrypted database with password
             try
             {
@@ -590,6 +599,12 @@ public partial class MainWindowViewModel
                 }
             }
 
+            // C-2: detect existing LiteDB database and migrate to SQLite.
+            if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
+            {
+                return;
+            }
+
             // Step 2: Initialize the encrypted database with password
             try
             {
@@ -812,6 +827,12 @@ public partial class MainWindowViewModel
                 }
             }
 
+            // C-2: detect existing LiteDB database and migrate to SQLite.
+            if (!await EnsureMigratedToSqliteAsync(passwordMemory))
+            {
+                return (false, "Migration to SQLite failed - see log for details");
+            }
+
             // Step 2: Initialize the encrypted database with password
             try
             {
@@ -897,6 +918,115 @@ public partial class MainWindowViewModel
         finally
         {
             System.Array.Clear(buffer);
+        }
+    }
+
+    #endregion
+
+    #region SQLite migration (Option C / C-2)
+
+    /// <summary>
+    /// Probes the database file at <see cref="AppMode.DatabasePath"/>
+    /// and runs the LiteDB-to-SQLite migration if needed. Called from
+    /// each of the three login flows BEFORE
+    /// <c>_databaseService.Initialize</c>.
+    /// </summary>
+    /// <param name="passwordMemory">Caller-owned password buffer.
+    /// Used to open both the LiteDB source and the SQLite destination.
+    /// Accepts <see cref="ReadOnlyMemory{T}"/> rather than
+    /// <see cref="ReadOnlySpan{T}"/> because the engine call must run
+    /// on a worker thread (where spans cannot be captured); the two
+    /// existing in-process callers already hold the password as
+    /// either <c>char[]</c> or <see cref="ReadOnlyMemory{T}"/> and
+    /// trivially adapt.</param>
+    /// <returns>
+    /// True if Initialize should proceed normally. False if migration
+    /// failed (caller should bail out without calling Initialize).
+    /// </returns>
+    /// <remarks>
+    /// <para>
+    /// Decision tree:
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>SQLite flag OFF -- no migration needed; return true.</item>
+    ///   <item>Flag ON, no file at path -- new database; return true.</item>
+    ///   <item>Flag ON, file IS already SQLite (probe true) -- nothing to migrate; return true.</item>
+    ///   <item>Flag ON, file is LiteDB (probe false) -- run migration with throttled progress, return true on success.</item>
+    /// </list>
+    ///
+    /// <para>
+    /// Mirrors the shape of <see cref="EnsureReverseChunkIndexBuiltAsync"/>:
+    /// <c>Task.Run</c> wraps the synchronous engine call so the UI
+    /// thread stays responsive, and progress reports are throttled to
+    /// roughly every 5% so the log panel does not flood. Migration is
+    /// non-cancellable from the UI by design (eval doc says forced
+    /// migration; user complaints about a 10-15 s freeze are
+    /// preferable to a half-migrated state on cancel).
+    /// </para>
+    /// </remarks>
+    private async Task<bool> EnsureMigratedToSqliteAsync(ReadOnlyMemory<char> passwordMemory)
+    {
+        if (!LocalDatabaseService.IsSqliteBackendSelected())
+        {
+            // LiteDB mode: nothing to migrate.
+            return true;
+        }
+
+        if (!File.Exists(AppMode.DatabasePath))
+        {
+            // New database: SqliteBackend will create one fresh on Initialize.
+            return true;
+        }
+
+        if (LocalDatabaseService.IsExistingSqliteDatabase(
+                AppMode.DatabasePath, passwordMemory.Span))
+        {
+            // Already SQLite. Initialize will open it directly.
+            return true;
+        }
+
+        // The file at the target path opens cleanly as LiteDB but not
+        // SQLite. Run migration.
+        AddLog("Migrating local database to SQLite (one-time upgrade)...");
+        AddLog("  This typically takes 10-30 seconds. Please do not close the app.");
+
+        // Throttle progress reports so we do not spam AddLog at every row.
+        var lastReportedPct = -5;
+        var progress = new Progress<(int processed, int total)>(tuple =>
+        {
+            var (processed, total) = tuple;
+            if (total <= 0) return;
+            var pct = (int)((long)processed * 100 / total);
+            if (pct - lastReportedPct >= 5 || processed == total)
+            {
+                lastReportedPct = pct;
+                AddLog($"  Migration progress: {processed:N0} / {total:N0} rows ({pct}%)");
+            }
+        });
+
+        try
+        {
+            // Engine call is synchronous; offload to a worker thread so
+            // the dispatcher can pump the AddLog progress reports.
+            // Capture passwordMemory by value into the lambda; the
+            // caller owns the underlying buffer and zeros it.
+            await Task.Run(() => LocalDatabaseService.MigrateFromLiteDb(
+                AppMode.DatabasePath, passwordMemory.Span, progress));
+            AddLog("Migration to SQLite complete. Original LiteDB preserved as .litedb-backup.");
+            return true;
+        }
+        catch (AzureBackup.Core.InvalidPasswordException)
+        {
+            // Same surface as the LiteDB-side InvalidPasswordException
+            // each call site already handles below.
+            AddLog("Invalid password - please try again");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Migration to SQLite failed: {ex.Message}");
+            AddLog("  Your data is unchanged; the LiteDB database is still authoritative.");
+            return false;
         }
     }
 

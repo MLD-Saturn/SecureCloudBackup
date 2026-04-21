@@ -180,24 +180,25 @@ docs/
 - [User Guide](docs/USER_GUIDE.md) -- daily usage, restore, sync, and troubleshooting
 - [Option C Evaluation](docs/option-c-evaluation.md) -- LiteDB → SQLite + SQLCipher decision, head-to-head benchmark results, and ship recommendation
 
-## Experimental: SQLite backend preview
+## SQLite backend
 
-As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. As of commits `9fda662` + `f319782` (C-2), turning the flag on against an existing LiteDB database **automatically migrates** every collection (config, chunk_index, files + chunks, pending changes, all index metadata) into a fresh SQLite database, then atomically swaps the files. Your LiteDB database is preserved as `<path>.litedb-backup` so you can roll back manually by deleting the new SQLite file and renaming `.litedb-backup` back into place.
+As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. As of C-2, turning the flag on against an existing LiteDB database **automatically migrates** every collection (config, chunk_index, files + chunks, pending changes, all index metadata) into a fresh SQLite database, then atomically swaps the files. Migration progress streams into the existing logs panel during sign-in. Your LiteDB database is preserved as `<path>.litedb-backup` so you can roll back manually by deleting the new SQLite file and renaming `.litedb-backup` back into place.
 
-This is still a preview gate — see `docs/option-c-evaluation.md` §11.8 for the C-6 soak step before SQLite becomes the default.
+The `AZBK_USE_SQLITE` env var is the single switch that selects the backend; the long-term plan (C-5) flips its default and removes the LiteDB code path. There is no separate preview gate.
 
 ### How migration works
 
-1. On `Initialize` with `AZBK_USE_SQLITE=1` set, the app probes the existing database file. If it opens cleanly as SQLCipher, no migration runs.
-2. If the probe fails with an invalid-password exception (the file is LiteDB, not SQLite), the app opens it as LiteDB and copies every row into a fresh SQLite database written to `<path>.sqlite-tmp`.
-3. On success the rename dance runs: original LiteDB → `.litedb-backup`, original salt → `.litedb-backup.salt`, temp SQLite → target path, temp salt → `<path>.salt`.
-4. On failure the temp SQLite is deleted and the LiteDB database remains authoritative; the next launch retries from scratch.
+1. The user signs in by entering their password in MainWindow's auth UI.
+2. Before opening the database, the auth flow calls `LocalDatabaseService.IsExistingSqliteDatabase(path, password)` to probe the file. If it opens cleanly as SQLCipher, no migration runs.
+3. If the probe returns false (the file is LiteDB, not SQLite), the auth flow calls `LocalDatabaseService.MigrateFromLiteDb` on a worker thread and streams progress into the logs panel using the same throttled-AddLog pattern as the existing reverse-chunk-index rebuild.
+4. On success the rename dance runs: original LiteDB → `.litedb-backup`, original salt → `.litedb-backup.salt`, temp SQLite → target path, temp salt → `<path>.salt`. Then `LocalDatabaseService.Initialize` opens the new SQLite database normally.
+5. On failure the temp SQLite is deleted, the LiteDB database remains authoritative, and the auth flow shows an error in the logs panel; the next sign-in retries from scratch.
 
-For a backup with ~5000 files and ~500K chunks the migration takes 10–15 seconds based on the C-3 head-to-head numbers. **The migration runs synchronously on the calling thread — there is no progress UI yet.** Be patient on first flag-on launch.
+For a backup with ~5000 files and ~500K chunks the migration takes 10–30 seconds based on the C-3 head-to-head numbers. The auth flow is blocked during migration but the UI thread stays responsive (migration runs on the thread pool).
 
 ### Wrong-password safety
 
-If you flip the flag and enter the wrong password, the app throws `InvalidPasswordException` BEFORE running migration. Your LiteDB database file is not touched. You can re-enter the correct password and migration runs normally.
+If you flip the flag and enter the wrong password, the migration's source-side LiteDB open throws `InvalidPasswordException` and the auth flow bails out with the same "Invalid password - please try again" message used for any other wrong-password attempt. Your LiteDB database file is not touched. Re-enter the correct password and migration runs normally.
 
 ### How to enable
 

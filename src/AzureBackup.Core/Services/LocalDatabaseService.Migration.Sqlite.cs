@@ -81,20 +81,40 @@ public partial class LocalDatabaseService
     internal const string LiteDbBackupSuffix = ".litedb-backup";
 
     /// <summary>
-    /// Attempts to open the file at <paramref name="databasePath"/> as
+    /// Returns true if the SQLite backend is currently selected by the
+    /// process (env var or AsyncLocal override). Public mirror of the
+    /// internal <c>DatabaseBackendFactory.ShouldUseSqlite</c> so the
+    /// UI layer (which has no <c>InternalsVisibleTo</c> on
+    /// AzureBackup.Core) can gate its migration logic on the same
+    /// switch the engine itself reads.
+    /// </summary>
+    public static bool IsSqliteBackendSelected() =>
+        DatabaseBackendFactory.ShouldUseSqlite();
+
+    /// <summary>
+    /// Probes whether <paramref name="databasePath"/> can be opened as
     /// a SQLCipher-encrypted SQLite database with the given password.
     /// Returns true if successful. Returns false if the open fails with
     /// <see cref="InvalidPasswordException"/> (strong signal that the
     /// file is NOT a SQLite database in that password's encryption
-    /// scheme - most likely a LiteDB file instead).
+    /// scheme - most likely a LiteDB file instead). Returns false if
+    /// no file exists at the path.
     /// </summary>
     /// <remarks>
+    /// Public so the UI layer can decide whether to show a migration
+    /// progress modal BEFORE calling
+    /// <see cref="Initialize(string, ReadOnlySpan{char})"/>.
     /// Any exception other than <see cref="InvalidPasswordException"/>
     /// propagates - the file is genuinely unreadable and migration
     /// would not help.
     /// </remarks>
-    private static bool TryProbeAsSqlite(string databasePath, ReadOnlySpan<char> password)
+    public static bool IsExistingSqliteDatabase(string databasePath, ReadOnlySpan<char> password)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+        if (!File.Exists(databasePath)) return false;
+
         try
         {
             using var probe = new SqliteBackend();
@@ -137,7 +157,7 @@ public partial class LocalDatabaseService
     /// <param name="cancellationToken">Cooperative cancellation. Checked
     /// between per-table phases. On cancellation the temp SQLite file is
     /// deleted and the LiteDB file is left untouched.</param>
-    internal static void MigrateFromLiteDb(
+    public static void MigrateFromLiteDb(
         string databasePath,
         ReadOnlySpan<char> password,
         IProgress<(int processed, int total)>? progress = null,
