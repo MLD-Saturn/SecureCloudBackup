@@ -115,6 +115,24 @@ public partial class LocalDatabaseService
             throw new ArgumentException("Password cannot be empty", nameof(password));
         if (!File.Exists(databasePath)) return false;
 
+        // Short-circuit BEFORE opening the file as SQLite if there is
+        // no salt next door. The SqliteBackend.Initialize path would
+        // otherwise call LoadOrCreateSalt and write a fresh random
+        // salt to <path>.salt - a side-effect that competes with the
+        // C-2 migration recovery code (a crash between rename steps
+        // 2 and 3 leaves a SQLite DB at <path> with its salt at
+        // <path>.sqlite-tmp.salt; if the probe runs first and writes
+        // a random salt to <path>.salt the recovery completion would
+        // overwrite that random salt but the side-effect window is
+        // hostile to manual recovery).
+        //
+        // Returning false here is the correct answer: a SQLite DB
+        // with no companion salt cannot be opened with the supplied
+        // password; downstream migration code will detect either a
+        // recoverable interrupted-migration state or a fresh
+        // database situation.
+        if (!File.Exists(databasePath + ".salt")) return false;
+
         try
         {
             using var probe = new SqliteBackend();
@@ -167,11 +185,53 @@ public partial class LocalDatabaseService
         if (password.IsEmpty)
             throw new ArgumentException("Password cannot be empty", nameof(password));
 
-        var tempSqlitePath = databasePath + SqliteMigrationTempSuffix;
-        var tempSqliteSaltPath = tempSqlitePath + ".salt";
-        var litedbBackupPath = databasePath + LiteDbBackupSuffix;
-        var litedbBackupSaltPath = litedbBackupPath + ".salt";
-        var originalSaltPath = databasePath + ".salt";
+        var paths = new MigrationPaths(databasePath);
+
+        // C-2 crash-recovery: if a prior migration on this path was
+        // interrupted (the .litedb-backup is present), reverse or
+        // resume the rename dance BEFORE doing anything else. This
+        // turns a previously-data-losing crash window between the
+        // four File.Move calls into a transparent recovery that
+        // either (a) restores the LiteDB database and retries
+        // migration from scratch or (b) finishes the SQLite-side
+        // commit. See TryRecoverFromInterruptedMigration for the
+        // state-by-state decision table.
+        var recovery = TryRecoverFromInterruptedMigration(paths);
+        if (recovery == InterruptedMigrationOutcome.RecoveredAsSqlite)
+        {
+            // Step 3 was the only thing missing; we just renamed
+            // tmpsalt into place. The target path is now a fully
+            // formed SQLite DB. Caller should NOT proceed with
+            // migration.
+            return;
+        }
+        // RecoveredAsLiteDb and NoInterruption both fall through to
+        // the regular migration code below.
+
+        // Guard: refuse to migrate a non-existent source file. This
+        // would otherwise cause LiteDB to silently CREATE an empty
+        // database at databasePath (its constructor's default
+        // behaviour) and we would migrate that empty database into
+        // SQLite - which is exactly the data-loss path the recovery
+        // logic above is designed to prevent. Belt-and-braces: even
+        // with recovery, a user running MigrateFromLiteDb against a
+        // fresh path with no LiteDB backup nearby gets a clean error
+        // instead of a silent empty migration.
+        if (!File.Exists(databasePath))
+        {
+            throw new FileNotFoundException(
+                "Cannot migrate: no database file exists at the source path. " +
+                "If a previous migration was interrupted, the LiteDB database " +
+                "should be at <path>.litedb-backup; rename it back manually " +
+                "before retrying.",
+                databasePath);
+        }
+
+        var tempSqlitePath = paths.TempSqlite;
+        var tempSqliteSaltPath = paths.TempSqliteSalt;
+        var litedbBackupPath = paths.LiteDbBackup;
+        var litedbBackupSaltPath = paths.LiteDbBackupSalt;
+        var originalSaltPath = paths.OriginalSalt;
 
         // Defensive: if a prior migration left stale temp artefacts
         // behind, clear them before starting. Otherwise SqliteBackend
@@ -181,17 +241,12 @@ public partial class LocalDatabaseService
         DeleteIfExists(tempSqlitePath + "-shm");
         DeleteIfExists(tempSqliteSaltPath);
 
-        // Use a temporary LocalDatabaseService with NO feature flag
-        // effect (we pass false through a private-field backdoor) so it
-        // opens the file as LiteDB regardless of the env var. The
-        // ambient env var is still set (that's how we got here) so we
-        // cannot rely on the flag-off code path naturally.
+        // Use a temporary LocalDatabaseService that opens the file as
+        // LiteDB regardless of feature-flag state. InitializeLiteDbOnly
+        // calls InitializeLiteDbCore directly so we never bounce
+        // through Initialize and never need to read the env var or
+        // AsyncLocal override.
         using var liteDb = new LocalDatabaseService();
-        // The _sqliteBackend field stays null because we do NOT call
-        // DatabaseBackendFactory; we call the LiteDB internals directly.
-        // InitializeLiteDbOnly is a new internal helper that does the
-        // same work as the LiteDB branch of Initialize but never checks
-        // the flag.
         liteDb.InitializeLiteDbOnly(databasePath, password);
 
         // Create the destination SQLite backend at the TEMP path so
@@ -272,24 +327,29 @@ public partial class LocalDatabaseService
             throw;
         }
 
-        // Atomic(ish) rename dance. Order matters:
-        //   1. Move original LiteDB out of the way. Frees databasePath.
-        //   2. Move temp SQLite into databasePath.
-        //   3. Move temp SQLite salt into databasePath.salt.
+        // Atomic(ish) four-step rename dance. Each File.Move on the
+        // same volume is atomic at the FS level; the only cross-step
+        // hazard is a process crash or power loss BETWEEN moves. The
+        // recovery code at the top of this method
+        // (TryRecoverFromInterruptedMigration) detects each
+        // intermediate state by inspecting the on-disk files and
+        // either reverses (steps 1, 1b) or completes (steps 2, 3) the
+        // dance on the next launch. Crash states:
         //
-        // File.Move on the same volume is atomic at the FS level; the
-        // only cross-step hazard is a crash BETWEEN moves. We do moves
-        // in order of irreversibility:
-        //   - After step 1: DB at databasePath is gone. Recoverable by
-        //     renaming .litedb-backup back.
-        //   - After step 2: SQLite at databasePath. LiteDB at .litedb-backup.
-        //     Both files intact, we're just missing the SQLite salt.
-        //   - After step 3: fully migrated.
+        //   After step 1 (LiteDB DB moved out, salt still in place):
+        //     Recovery reverses the move -> next attempt restarts.
+        //   After step 1b (LiteDB DB AND salt moved out):
+        //     Recovery reverses both moves -> next attempt restarts.
+        //   After step 2 (SQLite DB at target, no SQLite salt yet):
+        //     Recovery completes step 3 -> opens cleanly. Note that
+        //     the next-launch probe must NOT auto-create a salt at
+        //     this point - that is enforced by IsExistingSqliteDatabase
+        //     skipping the probe when no .salt is present.
+        //   After step 3: fully migrated.
         //
-        // So a crash AFTER step 2 + BEFORE step 3 leaves a usable
-        // SQLite DB without its salt - which is unreadable. If this
-        // happens the user can manually rename the .sqlite-tmp.salt
-        // into place (the log line tells them how).
+        // The litedb-backup file (and its salt) are RETAINED so the
+        // user has a manual rollback path. They can be deleted once
+        // confidence in the SQLite database is established.
         File.Move(databasePath, litedbBackupPath);
         if (File.Exists(originalSaltPath))
             File.Move(originalSaltPath, litedbBackupSaltPath);
@@ -323,5 +383,158 @@ public partial class LocalDatabaseService
     private void InitializeLiteDbOnly(string databasePath, ReadOnlySpan<char> password)
     {
         InitializeLiteDbCore(databasePath, password);
+    }
+
+    /// <summary>
+    /// Centralises the five derived paths used by the migration code
+    /// so the recovery logic and the rename dance read from the same
+    /// definitions. <c>readonly record struct</c> so the compiler
+    /// inlines field access without producing a heap allocation.
+    /// </summary>
+    private readonly record struct MigrationPaths(string Original)
+    {
+        public string OriginalSalt => Original + ".salt";
+        public string TempSqlite => Original + SqliteMigrationTempSuffix;
+        public string TempSqliteSalt => TempSqlite + ".salt";
+        public string LiteDbBackup => Original + LiteDbBackupSuffix;
+        public string LiteDbBackupSalt => LiteDbBackup + ".salt";
+    }
+
+    /// <summary>
+    /// Outcome of <see cref="TryRecoverFromInterruptedMigration"/>.
+    /// </summary>
+    private enum InterruptedMigrationOutcome
+    {
+        /// <summary>
+        /// No <c>.litedb-backup</c> present, or the on-disk state is
+        /// already a fully-migrated SQLite DB; no recovery action
+        /// taken and the caller should proceed normally.
+        /// </summary>
+        NoInterruption,
+
+        /// <summary>
+        /// An interrupted migration was detected and reversed. The
+        /// LiteDB database has been restored to the original path;
+        /// the caller can now run a fresh migration.
+        /// </summary>
+        RecoveredAsLiteDb,
+
+        /// <summary>
+        /// An interrupted migration was detected and completed. The
+        /// SQLite database (with its salt) is now at the original
+        /// path; the caller should NOT run migration.
+        /// </summary>
+        RecoveredAsSqlite,
+    }
+
+    /// <summary>
+    /// Detects and repairs partial-migration on-disk state caused by a
+    /// process crash or power loss between the four File.Move calls
+    /// in the migration's rename dance. Without this method, certain
+    /// crash windows resulted in silent data loss because LiteDB's
+    /// constructor will create a fresh empty database file at any
+    /// missing path - the next launch would migrate that empty
+    /// database into SQLite and orphan the user's real data at
+    /// <c>.litedb-backup</c>.
+    /// </summary>
+    /// <remarks>
+    /// State machine keyed on the presence/absence of
+    /// <c>databasePath</c> and <c>databasePath.litedb-backup</c>:
+    /// <list type="table">
+    ///   <listheader>
+    ///     <term>db / bk / tmp state</term>
+    ///     <description>Diagnosis and action</description>
+    ///   </listheader>
+    ///   <item>
+    ///     <term>bk absent</term>
+    ///     <description>Steady state (never migrated, OR migration completed and user deleted the backup). NoInterruption.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term>db absent, bk present</term>
+    ///     <description>Crash after step 1 or step 1b. Reverse the moves; restore LiteDB to the original path. RecoveredAsLiteDb.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term>db present + db.salt absent + tmpsalt present + bk present</term>
+    ///     <description>Crash after step 2 (SQLite DB moved in, salt rename pending). Complete step 3. RecoveredAsSqlite.</description>
+    ///   </item>
+    ///   <item>
+    ///     <term>db present + db.salt present + bk present</term>
+    ///     <description>Successful prior migration with stale backup. NoInterruption (the user just hasn't deleted the backup yet).</description>
+    ///   </item>
+    /// </list>
+    ///
+    /// <para>
+    /// The method touches files only via <see cref="File.Move(string, string)"/>
+    /// and <see cref="File.Delete(string)"/>; it does NOT open
+    /// either database to verify identity, because doing so would
+    /// require the password and recovery must work without one (the
+    /// caller's password may be wrong; recovery is purely structural).
+    /// </para>
+    /// </remarks>
+    private static InterruptedMigrationOutcome TryRecoverFromInterruptedMigration(
+        MigrationPaths paths)
+    {
+        var dbExists = File.Exists(paths.Original);
+        var bkExists = File.Exists(paths.LiteDbBackup);
+
+        if (!bkExists)
+        {
+            // No prior migration ever touched this path, or the user
+            // deleted the .litedb-backup. Nothing to recover.
+            return InterruptedMigrationOutcome.NoInterruption;
+        }
+
+        if (!dbExists)
+        {
+            // Crash after step 1 (or step 1b). The LiteDB DB is at
+            // .litedb-backup; restore it. Then drop any temp SQLite
+            // artefacts so the fresh migration starts clean.
+            File.Move(paths.LiteDbBackup, paths.Original);
+            if (File.Exists(paths.LiteDbBackupSalt))
+            {
+                // Step 1b had also fired. Restore the LiteDB salt.
+                // OK to overwrite paths.OriginalSalt only if it does
+                // NOT already exist - if it does exist that means we
+                // crashed BETWEEN step 1 and step 1b and the original
+                // salt is still in place. Defer to the original.
+                if (!File.Exists(paths.OriginalSalt))
+                {
+                    File.Move(paths.LiteDbBackupSalt, paths.OriginalSalt);
+                }
+                else
+                {
+                    // Step 1 fired but step 1b did not, AND somehow a
+                    // backup salt also exists (e.g. from an even earlier
+                    // failed attempt). Discard the backup-salt copy;
+                    // the in-place salt is the source of truth.
+                    File.Delete(paths.LiteDbBackupSalt);
+                }
+            }
+            DeleteIfExists(paths.TempSqlite);
+            DeleteIfExists(paths.TempSqlite + "-wal");
+            DeleteIfExists(paths.TempSqlite + "-shm");
+            DeleteIfExists(paths.TempSqliteSalt);
+            return InterruptedMigrationOutcome.RecoveredAsLiteDb;
+        }
+
+        // db AND bk both exist. Two sub-cases.
+        var dbSaltExists = File.Exists(paths.OriginalSalt);
+        var tmpSaltExists = File.Exists(paths.TempSqliteSalt);
+
+        if (!dbSaltExists && tmpSaltExists)
+        {
+            // Crash after step 2: SQLite DB is at databasePath but its
+            // salt is still at .sqlite-tmp.salt. Complete step 3.
+            File.Move(paths.TempSqliteSalt, paths.OriginalSalt);
+            // Tidy any stale wal/shm sidecars from the temp path.
+            DeleteIfExists(paths.TempSqlite + "-wal");
+            DeleteIfExists(paths.TempSqlite + "-shm");
+            return InterruptedMigrationOutcome.RecoveredAsSqlite;
+        }
+
+        // db + db.salt + bk all present: successful prior migration,
+        // user just has not deleted the backup yet. The caller will
+        // re-probe the SQLite DB and short-circuit with no migration.
+        return InterruptedMigrationOutcome.NoInterruption;
     }
 }

@@ -433,4 +433,189 @@ public class LocalDatabaseServiceMigrationTests : IDisposable
         Assert.Equal(last.total, last.processed);
         Assert.True(last.total > 0, "Total must be positive when there is data to migrate");
     }
+
+    /// <summary>
+    /// Guard test: <see cref="LocalDatabaseService.MigrateFromLiteDb"/>
+    /// must refuse to run against a path that has no source file AND no
+    /// .litedb-backup nearby. Without this guard LiteDB's constructor
+    /// would silently CREATE an empty database file at the missing
+    /// path and migrate that empty database into SQLite - exactly the
+    /// data-loss path the recovery code is designed to prevent. We
+    /// pin the throw here so a future refactor that drops the guard
+    /// fails loudly.
+    /// </summary>
+    [Fact]
+    public void MigrateFromLiteDb_OnMissingFileWithNoBackup_ThrowsFileNotFound()
+    {
+        // Arrange: path does not exist, no .litedb-backup either.
+        Assert.False(File.Exists(_dbPath));
+        Assert.False(File.Exists(_dbPath + ".litedb-backup"));
+
+        // Act + Assert
+        var ex = Assert.Throws<FileNotFoundException>(() =>
+            LocalDatabaseService.MigrateFromLiteDb(
+                _dbPath, "AnyPassword42!".AsSpan()));
+
+        // Verify the missing path is identified in the exception.
+        Assert.Equal(_dbPath, ex.FileName);
+
+        // Verify no empty file was created as a side-effect.
+        Assert.False(File.Exists(_dbPath),
+            "Migration must NOT have created an empty file at the missing path");
+    }
+
+    /// <summary>
+    /// Recovery scenario A: a crash between rename steps 1 and 1b.
+    /// On disk: <c>databasePath</c> missing, <c>databasePath.salt</c>
+    /// is the LiteDB salt, <c>databasePath.litedb-backup</c> is the
+    /// LiteDB DB. Recovery must move the LiteDB DB back to the
+    /// original path (its salt is already in place) and then a fresh
+    /// migration completes normally.
+    /// </summary>
+    [Fact]
+    public void Migration_AfterStep1Crash_RecoversAndCompletes()
+    {
+        SeedLiteDbWithIndexMetadata("Step1CrashProbe");
+
+        // Simulate the crash: move the LiteDB DB to .litedb-backup.
+        // Leave the salt in place (step 1b never fired).
+        File.Move(_dbPath, _dbPath + ".litedb-backup");
+        Assert.False(File.Exists(_dbPath));
+        Assert.True(File.Exists(_dbPath + ".salt"));
+        Assert.True(File.Exists(_dbPath + ".litedb-backup"));
+        Assert.False(File.Exists(_dbPath + ".litedb-backup.salt"));
+
+        // Act: run migration. Recovery should restore the LiteDB DB
+        // first, then fresh-migration runs from there.
+        using (var _flagOn = new BackendOverrideScope(useSqlite: true))
+        {
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
+        }
+
+        // Assert: SQLite at original path with seeded data preserved.
+        AssertMigratedSqliteHasIndexMetadata("Step1CrashProbe");
+    }
+
+    /// <summary>
+    /// Recovery scenario B: a crash between rename steps 1b and 2.
+    /// On disk: <c>databasePath</c> missing, <c>databasePath.salt</c>
+    /// missing, <c>databasePath.litedb-backup</c> + .salt both
+    /// present. Recovery must move BOTH back into place.
+    /// </summary>
+    [Fact]
+    public void Migration_AfterStep1bCrash_RecoversAndCompletes()
+    {
+        SeedLiteDbWithIndexMetadata("Step1bCrashProbe");
+
+        // Simulate the crash: move BOTH the LiteDB DB and its salt
+        // out of the way.
+        File.Move(_dbPath, _dbPath + ".litedb-backup");
+        File.Move(_dbPath + ".salt", _dbPath + ".litedb-backup.salt");
+        Assert.False(File.Exists(_dbPath));
+        Assert.False(File.Exists(_dbPath + ".salt"));
+        Assert.True(File.Exists(_dbPath + ".litedb-backup"));
+        Assert.True(File.Exists(_dbPath + ".litedb-backup.salt"));
+
+        using (var _flagOn = new BackendOverrideScope(useSqlite: true))
+        {
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
+        }
+
+        AssertMigratedSqliteHasIndexMetadata("Step1bCrashProbe");
+    }
+
+    /// <summary>
+    /// Recovery scenario C: a crash between rename steps 2 and 3.
+    /// On disk: <c>databasePath</c> is a SQLite DB,
+    /// <c>databasePath.salt</c> missing, <c>databasePath.sqlite-tmp.salt</c>
+    /// is the SQLite salt, <c>databasePath.litedb-backup</c> + .salt
+    /// both present. Recovery must complete step 3 by renaming the
+    /// temp salt into place. After recovery the SQLite DB is fully
+    /// readable.
+    /// </summary>
+    [Fact]
+    public void Migration_AfterStep2Crash_CompletesStep3()
+    {
+        // Arrange: do a full migration, then simulate a crash by
+        // un-doing step 3 (move .salt back to .sqlite-tmp.salt).
+        SeedLiteDbWithIndexMetadata("Step2CrashProbe");
+        using (var _flagOn = new BackendOverrideScope(useSqlite: true))
+        {
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
+        }
+        // Now <_dbPath> is SQLite, <_dbPath>.salt is its salt,
+        // <_dbPath>.litedb-backup + .salt are the originals.
+        Assert.True(File.Exists(_dbPath + ".salt"));
+        File.Move(_dbPath + ".salt", _dbPath + ".sqlite-tmp.salt");
+        Assert.False(File.Exists(_dbPath + ".salt"));
+        Assert.True(File.Exists(_dbPath + ".sqlite-tmp.salt"));
+
+        // Act: run migration again. Recovery should detect the
+        // step-2 crash state and complete step 3.
+        using (var _flagOn = new BackendOverrideScope(useSqlite: true))
+        {
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
+        }
+
+        // Assert: salt is back at <_dbPath>.salt and the SQLite DB
+        // opens cleanly with the seeded data.
+        Assert.True(File.Exists(_dbPath + ".salt"),
+            "Recovery should have completed step 3 (moved .sqlite-tmp.salt back to .salt)");
+        Assert.False(File.Exists(_dbPath + ".sqlite-tmp.salt"),
+            "Temp salt should have been moved, not copied");
+        AssertMigratedSqliteHasIndexMetadata("Step2CrashProbe");
+    }
+
+    /// <summary>
+    /// Probe correctness: <see cref="LocalDatabaseService.IsExistingSqliteDatabase"/>
+    /// must NOT write a fresh random salt as a side effect when no
+    /// salt file exists at the probed path. Without this guarantee,
+    /// the probe runs first on next launch (after a step-2 crash),
+    /// writes a wrong salt to <c>.salt</c>, and the manual recovery
+    /// path described in the migration's doc-comment becomes
+    /// impossible to follow correctly.
+    /// </summary>
+    [Fact]
+    public void IsExistingSqliteDatabase_NoSaltFile_ReturnsFalseAndDoesNotWriteSalt()
+    {
+        // Arrange: a SQLite DB with NO accompanying salt file. The
+        // most direct way to produce one is to do a normal migration
+        // then delete the salt manually.
+        SeedLiteDbWithIndexMetadata("ProbeNoSaltProbe");
+        using (var _flagOn = new BackendOverrideScope(useSqlite: true))
+        {
+            LocalDatabaseService.MigrateFromLiteDb(_dbPath, Password.AsSpan());
+        }
+        File.Delete(_dbPath + ".salt");
+        Assert.True(File.Exists(_dbPath));
+        Assert.False(File.Exists(_dbPath + ".salt"));
+
+        // Act
+        var result = LocalDatabaseService.IsExistingSqliteDatabase(
+            _dbPath, Password.AsSpan());
+
+        // Assert: returns false (cannot open without a salt) AND does
+        // NOT write a fresh random salt as a side effect.
+        Assert.False(result, "Probe must return false when no salt file exists");
+        Assert.False(File.Exists(_dbPath + ".salt"),
+            "Probe must NOT write a salt file as a side effect");
+    }
+
+    private void SeedLiteDbWithIndexMetadata(string probeKey)
+    {
+        using var _flagOff = new BackendOverrideScope(useSqlite: false);
+        using var seed = new LocalDatabaseService();
+        seed.Initialize(_dbPath, Password.AsSpan());
+        seed.SetIndexMetadata(probeKey, new DateTime(2026, 4, 18, 12, 0, 0, DateTimeKind.Utc));
+    }
+
+    private void AssertMigratedSqliteHasIndexMetadata(string probeKey)
+    {
+        Assert.True(File.Exists(_dbPath + ".litedb-backup"),
+            "Migration should have produced a .litedb-backup");
+        using var _flagOn = new BackendOverrideScope(useSqlite: true);
+        using var verify = new LocalDatabaseService();
+        verify.Initialize(_dbPath, Password.AsSpan());
+        Assert.NotNull(verify.GetIndexMetadata(probeKey));
+    }
 }
