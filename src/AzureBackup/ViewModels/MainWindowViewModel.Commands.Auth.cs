@@ -300,18 +300,15 @@ public partial class MainWindowViewModel
                     // Close any existing connections and swap files
                     _databaseService.Close();
 
-                    // Backup old database and replace with encrypted one
-                    var backupPath = AppMode.DatabasePath + ".unencrypted.bak";
-                    File.Move(AppMode.DatabasePath, backupPath);
-                    File.Move(tempPath, AppMode.DatabasePath);
-                    // Move the salt file too
-                    var tempSaltPath = tempPath + ".salt";
-                    var finalSaltPath = AppMode.DatabasePath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Move(tempSaltPath, finalSaltPath);
-                    // .bak holds the user's pre-migration plaintext database; route through
-                    // TrySecureDelete so an attacker with raw-disk access can't recover it.
-                    FileSystemHelper.TrySecureDelete(backupPath);
+                    // Crash-safe atomic swap. Sentinel at
+                    // {DatabasePath}.upgrade-pending guards every rename so
+                    // a process crash mid-rename is recoverable on next
+                    // launch via LocalDatabaseService.RecoverInterruptedUpgrade.
+                    // Matches the pattern already used by the same migration
+                    // step in UnlockAndConnectAsync and TryUnlockWithPasswordAsync;
+                    // this site was missed in commit 9902ac1.
+                    LocalDatabaseService.CommitDatabaseUpgrade(
+                        AppMode.DatabasePath, tempPath, ".unencrypted.bak");
 
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
