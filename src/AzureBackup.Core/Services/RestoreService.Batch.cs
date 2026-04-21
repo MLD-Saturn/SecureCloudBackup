@@ -326,6 +326,10 @@ public partial class RestoreService
                     try
                     {
                         progress?.Report((fileList.Count, fileList.Count, Path.GetFileName(localFile), "Deleting"));
+                        // Plain File.Delete (not via FileSystemHelper.TryDelete)
+                        // because this site has its own per-file error reporting
+                        // into result.Errors -- swallowing into the helper's log
+                        // would lose that contract.
                         File.Delete(localFile);
                         result.FilesDeleted++;
                         Log($"MirrorSyncToLocalAsync: Deleted {localFile}");
@@ -468,6 +472,9 @@ public partial class RestoreService
 
                     try
                     {
+                        // Pre-Move conflict delete: kept as plain File.Delete
+                        // because the immediately-following Move would itself
+                        // throw if this fails; the outer try/catch handles both.
                         if (File.Exists(targetPath))
                             File.Delete(targetPath);
                         File.Move(recoveredPath, targetPath);
@@ -651,7 +658,7 @@ public partial class RestoreService
                 {
                     Log($"AttemptCorruptedRecoveryAsync: Aborting — first {totalAttempted} chunks all unrecoverable");
                     try { await outputStream.DisposeAsync(); } catch { /* closing stream */ }
-                    try { File.Delete(corruptedPath); } catch { /* best effort */ }
+                    FileSystemHelper.TryDelete(corruptedPath);
                     return null;
                 }
             }
@@ -671,7 +678,7 @@ public partial class RestoreService
             Log($"AttemptCorruptedRecoveryAsync: Recovery failed entirely: {ex.Message}");
 
             // Clean up partial file
-            try { File.Delete(corruptedPath); } catch { /* best effort */ }
+            FileSystemHelper.TryDelete(corruptedPath);
 
             return null;
         }

@@ -141,7 +141,7 @@ public sealed class CrashSafeLogger : IDisposable
             {
                 if (File.GetLastWriteTime(file) < cutoff)
                 {
-                    File.Delete(file);
+                    AzureBackup.Core.FileSystemHelper.TryDelete(file);
                 }
             }
         }

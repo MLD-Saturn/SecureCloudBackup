@@ -141,7 +141,7 @@ public sealed class ThroughputMetrics : IDisposable
             {
                 if (File.GetCreationTimeUtc(file) < cutoff)
                 {
-                    try { File.Delete(file); } catch { /* best-effort */ }
+                    FileSystemHelper.TryDelete(file);
                 }
             }
         }

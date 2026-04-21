@@ -376,14 +376,17 @@ public partial class RestoreService
                 diag.Record($"[HASH MISMATCH] expected={file.FileHash}, computed={restoredHash}, " +
                     $"chunks={file.Chunks.Count}, fileSize={file.FileSize:N0}");
                 // Delete corrupted temp file
-                try { File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
+                FileSystemHelper.TryDelete(tempPath);
 
                 throw new DataIntegrityException(
                     $"File hash mismatch after restore: expected {file.FileHash}, got {restoredHash}",
                     file.LocalPath);
             }
             
-            // Move temp file to final destination (atomic on same filesystem)
+            // Move temp file to final destination (atomic on same filesystem).
+            // Pre-Move conflict delete kept as raw File.Delete: the immediately-
+            // following Move would itself throw if this fails, so a swallow here
+            // would just defer the same error.
             Log($"RestoreFileAsync: Moving temp file to final destination: {targetPath}");
             if (File.Exists(targetPath))
             {
@@ -433,13 +436,13 @@ public partial class RestoreService
             }
             // Clean up temp file before re-throwing so callers (e.g., corrupted recovery)
             // don't leave orphaned .tmp files on disk
-            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore cleanup errors */ }
+            FileSystemHelper.TryDelete(tempPath);
             throw; // Re-throw integrity exceptions
         }
         catch (OperationCanceledException)
         {
             Log("RestoreFileAsync: Operation cancelled");
-            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore */ }
+            FileSystemHelper.TryDelete(tempPath);
             throw;
         }
         catch (Exception ex)
@@ -461,7 +464,7 @@ public partial class RestoreService
                 Log($"RestoreFileAsync: Diagnostics written to {diagPath}");
             }
             // Clean up temp file on error
-            try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* ignore */ }
+            FileSystemHelper.TryDelete(tempPath);
 
             ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
             return false;

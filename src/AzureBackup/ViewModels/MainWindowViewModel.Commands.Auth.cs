@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using AzureBackup.Core;
 using AzureBackup.Core.Services;
 using CommunityToolkit.Mvvm.Input;
 
@@ -308,7 +309,9 @@ public partial class MainWindowViewModel
                     var finalSaltPath = AppMode.DatabasePath + ".salt";
                     if (File.Exists(tempSaltPath))
                         File.Move(tempSaltPath, finalSaltPath);
-                    File.Delete(backupPath);
+                    // .bak holds the user's pre-migration plaintext database; route through
+                    // TrySecureDelete so an attacker with raw-disk access can't recover it.
+                    FileSystemHelper.TrySecureDelete(backupPath);
 
                     AddLog("Database migration completed successfully");
                     _needsMigration = false;
@@ -316,11 +319,9 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Migration failed: {ex.Message}");
-                    if (File.Exists(tempPath))
-                        File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return;
                 }
             }
@@ -350,11 +351,9 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Encryption upgrade failed: {ex.Message}");
-                    if (File.Exists(tempPath))
-                        File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write Argon2id-encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return;
                 }
             }
@@ -551,15 +550,13 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Migration failed: {ex.Message}");
-                    if (System.IO.File.Exists(tempPath))
-                        System.IO.File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return;
                 }
             }
-            
+
             // Step 1b: Handle migration from legacy encrypted database to Argon2id
             if (_needsLegacyMigration)
             {
@@ -585,11 +582,9 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Encryption upgrade failed: {ex.Message}");
-                    if (System.IO.File.Exists(tempPath))
-                        System.IO.File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write Argon2id-encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return;
                 }
             }
@@ -767,11 +762,9 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Migration failed: {ex.Message}");
-                    if (System.IO.File.Exists(tempPath))
-                        System.IO.File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return (false, $"Migration failed: {ex.Message}");
                 }
             }
@@ -800,11 +793,9 @@ public partial class MainWindowViewModel
                 catch (System.Exception ex)
                 {
                     AddLog($"Encryption upgrade failed: {ex.Message}");
-                    if (System.IO.File.Exists(tempPath))
-                        System.IO.File.Delete(tempPath);
-                    var tempSaltPath = tempPath + ".salt";
-                    if (File.Exists(tempSaltPath))
-                        File.Delete(tempSaltPath);
+                    // Failed-mid-write Argon2id-encrypted DB + its salt -- secret-bearing.
+                    FileSystemHelper.TrySecureDelete(tempPath);
+                    FileSystemHelper.TrySecureDelete(tempPath + ".salt");
                     return (false, $"Encryption upgrade failed: {ex.Message}");
                 }
             }

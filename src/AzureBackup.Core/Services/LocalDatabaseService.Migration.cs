@@ -291,18 +291,20 @@ public partial class LocalDatabaseService
             }
 
             // Step 4: cleanup .bak. Only after everything else committed.
-            if (File.Exists(backupPath))
-                File.Delete(backupPath);
+            // .bak holds the previous-encryption (or unencrypted) database
+            // contents -- secret-bearing, so route through TrySecureDelete.
+            FileSystemHelper.TrySecureDelete(backupPath);
         }
         finally
         {
             // Always remove the sentinel last. If we got here via exception
             // mid-rename, the sentinel STAYS so RecoverInterruptedUpgrade
             // can finish the job on next launch. Only delete on the happy
-            // path where every step above succeeded.
+            // path where every step above succeeded. Sentinel is a tiny
+            // JSON path list -- non-secret, so plain TryDelete.
             if (File.Exists(databasePath) && !File.Exists(tempPath) && !File.Exists(backupPath))
             {
-                try { File.Delete(sentinelPath); } catch { /* best effort */ }
+                FileSystemHelper.TryDelete(sentinelPath);
             }
         }
 
@@ -368,9 +370,11 @@ public partial class LocalDatabaseService
             }
 
             // Case B: cleanup leftover .bak now that the new file is in place.
+            // .bak holds the previous-encryption (or unencrypted) database
+            // contents -- secret-bearing, so route through TrySecureDelete.
             if (File.Exists(databasePath) && File.Exists(backupPath))
             {
-                File.Delete(backupPath);
+                FileSystemHelper.TrySecureDelete(backupPath);
             }
 
             return true;
@@ -380,7 +384,7 @@ public partial class LocalDatabaseService
             // Sentinel cleared only when every artifact is in its final state.
             if (File.Exists(databasePath) && !File.Exists(tempPath) && !File.Exists(backupPath))
             {
-                try { File.Delete(sentinelPath); } catch { /* best effort */ }
+                FileSystemHelper.TryDelete(sentinelPath);
             }
         }
 
