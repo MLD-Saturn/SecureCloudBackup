@@ -5,23 +5,22 @@ using Xunit;
 namespace AzureBackup.Tests;
 
 /// <summary>
-/// Option C / C-1 final step b: end-to-end proof that
-/// <see cref="DatabaseBackendFactory"/> routes
-/// <see cref="LocalDatabaseService"/> through the SQLite backend instead
-/// of LiteDB when configured to do so.
+/// Option C / C-1 (routing seam) and C-5 (SQLite-by-default): end-to-end
+/// proof that <see cref="DatabaseBackendFactory"/> sends
+/// <see cref="LocalDatabaseService"/> calls through the SQLite backend
+/// when no override is in scope, and through LiteDB when an override
+/// pins the legacy path.
 ///
 /// <para>
 /// We do NOT re-test SQLite correctness here - that's covered by the
 /// contract tests + direct-SqliteBackend tests from C-1 and C-3. This
-/// file verifies ONLY the routing: that with the override set every
-/// call hits the backend and the LiteDB collections stay null.
+/// file verifies ONLY the routing.
 /// </para>
 ///
 /// <para>
 /// Uses <see cref="BackendOverrideScope"/> (an <see cref="AsyncLocal{T}"/>
-/// override) instead of an <c>AZBK_USE_SQLITE</c> env-var flip so
-/// xUnit's parallel test execution does not cross-contaminate sibling
-/// tests in other classes.
+/// override) so xUnit's parallel test execution cannot
+/// cross-contaminate sibling tests in other classes.
 /// </para>
 /// </summary>
 public class LocalDatabaseServiceSqliteRoutingTests : IDisposable
@@ -67,8 +66,13 @@ public class LocalDatabaseServiceSqliteRoutingTests : IDisposable
     }
 
     [Fact]
-    public void Initialize_WithoutOverride_UsesLiteDbPath()
+    public void Initialize_WithLiteDbOverride_UsesLiteDbPath()
     {
+        // C-5: SQLite is the production default; the legacy LiteDB
+        // path is reachable only via an explicit AsyncLocal override.
+        // This test pins that the override still routes correctly so
+        // the migration tests (which seed LiteDB data via this path)
+        // keep working.
         using var _flag = new BackendOverrideScope(useSqlite: false);
 
         using var service = new LocalDatabaseService();

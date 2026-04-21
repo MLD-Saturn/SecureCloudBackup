@@ -233,9 +233,19 @@ public class BackupOrchestratorTests : IAsyncLifetime
         await _orchestrator.BackupFileAsync(filePath);
         var initialHash = _databaseService.GetBackedUpFile(filePath)?.FileHash;
 
-        // Modify the file
+        // Modify the file. Bump LastWriteTimeUtc by > 2 s so the
+        // orchestrator's metadata-skip short-circuit (size + mtime
+        // match within 2 seconds = treat as unchanged) does not fire.
+        // Without this, two writes a few ms apart trip the
+        // optimisation and the second backup is skipped, leaving the
+        // stored hash equal to the first backup's hash. Pre-C-5 this
+        // test passed by accident under LiteDB because BSON DateTime
+        // round-tripped to DateTimeKind.Local, so the orchestrator's
+        // (Local - Utc) subtraction produced an absurd ~4-hour delta
+        // that bypassed the skip.
         var newContent = CreateRandomContent(100 * 1024);
         await File.WriteAllBytesAsync(filePath, newContent);
+        File.SetLastWriteTimeUtc(filePath, DateTime.UtcNow.AddSeconds(5));
 
         // Act - Backup modified file
         var result = await _orchestrator.BackupFileAsync(filePath);
@@ -529,9 +539,12 @@ public class BackupOrchestratorTests : IAsyncLifetime
         // Reset counters
         trackingBlobService.ResetCounters();
         
-        // Modify the file
+        // Modify the file. See BackupFileAsync_ModifiedFile_UploadsNewChunks
+        // for the rationale - the orchestrator's metadata-skip
+        // optimisation requires a > 2 s mtime delta to be bypassed.
         var content2 = CreateRandomContent(100 * 1024);
         await File.WriteAllBytesAsync(filePath, content2);
+        File.SetLastWriteTimeUtc(filePath, DateTime.UtcNow.AddSeconds(5));
 
         // Act - Backup modified file
         await trackingOrchestrator.BackupFileAsync(filePath);
@@ -573,9 +586,12 @@ public class BackupOrchestratorTests : IAsyncLifetime
         // Reset and create second file (will be treated as "modified" if we fake existing backup)
         trackingBlobService.ResetCounters();
         
-        // For comparison, modify the first file
+        // For comparison, modify the first file. Bump mtime so the
+        // metadata-skip does not short-circuit the second backup.
+        // See BackupFileAsync_ModifiedFile_UploadsNewChunks for context.
         var content2 = CreateRandomContent(200 * 1024);
         await File.WriteAllBytesAsync(file1, content2);
+        File.SetLastWriteTimeUtc(file1, DateTime.UtcNow.AddSeconds(5));
         
         await trackingOrchestrator.BackupFileAsync(file1);
         var modifiedFileOperations = trackingBlobService.TotalOperations;

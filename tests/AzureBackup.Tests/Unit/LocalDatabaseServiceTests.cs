@@ -228,10 +228,17 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
         // Assert - verify upgraded database has the data and uses Argon2id
         Assert.True(LocalDatabaseService.HasArgon2idSalt(upgradedPath));
         Assert.False(LocalDatabaseService.IsLegacyEncryptedDatabase(upgradedPath));
-        
+
+        // C-5: SQLite is the production default but the upgraded database
+        // is still LiteDB-shaped (MigrateLegacyEncrypted is an in-place
+        // raw-key -> Argon2id LiteDB upgrade, not a backend migration).
+        // Pin the override to LiteDB so Initialize routes correctly.
+        // The full LiteDB -> SQLite migration is a separate code path
+        // tested by LocalDatabaseServiceMigrationTests.
+        using var _flagOff = new BackendOverrideScope(useSqlite: false);
         using var upgradedService = new LocalDatabaseService();
         upgradedService.Initialize(upgradedPath, testPassword);
-        
+
         var migratedConfig = upgradedService.GetConfiguration();
         Assert.Equal("legacy-container", migratedConfig.ContainerName);
         Assert.Equal("legacyaccount", migratedConfig.StorageAccountName);
@@ -733,6 +740,21 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
     [Fact]
     public void RebuildReverseChunkIndex_PopulatesFromLegacyReferencingFiles()
     {
+        // C-5: this test exercises the LiteDB-side reverse-index
+        // rebuild that derives chunk_file_refs from the legacy
+        // ReferencingFiles list on ChunkIndexEntry. SQLite's
+        // RebuildReverseChunkIndex derives from the file_chunks table
+        // instead (no ReferencingFiles dependency). Pin to LiteDB so
+        // the seeded shape (ReferencingFiles populated, file_chunks
+        // empty) is what the rebuild reads. Use a private
+        // LocalDatabaseService rather than the fixture's
+        // _databaseService because the fixture is SQLite-by-default
+        // post-C-5.
+        using var _flagOff = new BackendOverrideScope(useSqlite: false);
+        using var liteDb = new LocalDatabaseService();
+        var legacyDbPath = Path.Combine(_testDirectory, "legacy_rebuild.db");
+        liteDb.Initialize(legacyDbPath, TestPassword);
+
         // Arrange - seed two chunks referenced by two overlapping files using the
         // legacy shape (ReferencingFiles list on ChunkIndexEntry) without the
         // reverse-index hookup. Mimics an upgraded database.
@@ -758,15 +780,15 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
                 new ChunkFileReference { FilePath = "C:\\alpha.bin", ChunkIndex = 1, ReferencedAt = now }
             ]
         };
-        _databaseService.SaveChunkIndexEntry(entry1);
-        _databaseService.SaveChunkIndexEntry(entry2);
+        liteDb.SaveChunkIndexEntry(entry1);
+        liteDb.SaveChunkIndexEntry(entry2);
 
         // Act
-        _databaseService.RebuildReverseChunkIndex();
+        liteDb.RebuildReverseChunkIndex();
 
         // Assert - indexed file lookups return the correct sets.
-        var alpha = _databaseService.GetChunkEntriesForFile("C:\\alpha.bin");
-        var beta = _databaseService.GetChunkEntriesForFile("C:\\beta.bin");
+        var alpha = liteDb.GetChunkEntriesForFile("C:\\alpha.bin");
+        var beta = liteDb.GetChunkEntriesForFile("C:\\beta.bin");
 
         Assert.Equal(2, alpha.Count);
         Assert.Contains(alpha, e => e.ChunkHash == entry1.ChunkHash);

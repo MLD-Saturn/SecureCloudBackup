@@ -360,9 +360,12 @@ public partial class ChunkIndexService
             
             if (actualTier != intendedTier)
             {
+                // Read referencing files from the canonical reverse-index;
+                // entry.ReferencingFiles is empty under the SQLite backend.
+                var refs = _databaseService.GetReferencingFilesForChunk(chunkHash);
                 Log($"WARNING: Chunk {chunkHash[..8]}... exists in {actualTier} tier, " +
                     $"but file is configured for {intendedTier} tier. " +
-                    $"Referenced by: {string.Join(", ", entry.ReferencingFiles.Select(r => r.FilePath))}");
+                    $"Referenced by: {string.Join(", ", refs.Select(r => r.FilePath))}");
             }
 
             // Update cached tier if different

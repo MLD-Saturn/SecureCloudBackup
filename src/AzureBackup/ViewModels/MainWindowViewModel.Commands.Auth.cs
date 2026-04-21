@@ -966,15 +966,16 @@ public partial class MainWindowViewModel
     /// </remarks>
     private async Task<bool> EnsureMigratedToSqliteAsync(ReadOnlyMemory<char> passwordMemory)
     {
-        if (!LocalDatabaseService.IsSqliteBackendSelected())
-        {
-            // LiteDB mode: nothing to migrate.
-            return true;
-        }
-
+        // C-5: SQLite is the production default. There is no longer a
+        // backend-choice gate to honour - if there is data on disk and
+        // it is not yet SQLite, we migrate.
         if (!File.Exists(AppMode.DatabasePath))
         {
-            // New database: SqliteBackend will create one fresh on Initialize.
+            // New database: SqliteBackend will create one fresh on
+            // Initialize. Defensive: also tidy any stale .litedb-backup
+            // (edge case - user deleted the live DB but left the
+            // backup behind from a previous install).
+            LocalDatabaseService.CleanupStaleLegacyBackup(AppMode.DatabasePath);
             return true;
         }
 
@@ -982,6 +983,11 @@ public partial class MainWindowViewModel
                 AppMode.DatabasePath, passwordMemory.Span))
         {
             // Already SQLite. Initialize will open it directly.
+            // C-5 cleanup: a user who migrated under the prior
+            // retention policy still has a .litedb-backup on disk.
+            // Delete it now so the data directory ends up containing
+            // only SQLite files.
+            LocalDatabaseService.CleanupStaleLegacyBackup(AppMode.DatabasePath);
             return true;
         }
 

@@ -674,6 +674,13 @@ internal sealed class SqliteBackend : IDatabaseBackend
         // ReferencingFiles list on each ChunkIndexEntry, which we dropped
         // per eval doc \u00a74). Keeping both writes inside the same
         // transaction means readers never see a divergent state.
+        //
+        // C-5 note: ChunkIndexService.AddReference / RemoveFileReferencesAsync /
+        // UpdateFileChunksAsync ALSO write chunk_file_refs (via
+        // UpsertChunkFileRef and the Delete* primitives). Those mutations
+        // are idempotent on the (file_path, chunk_hash, chunk_index) triple,
+        // so the orchestrator's pattern of SaveBackedUpFile followed by
+        // UpdateFileChunksAsync is safe even though both touch this table.
         using (var clear = _connection.CreateCommand())
         {
             clear.Transaction = tx;
@@ -1346,6 +1353,60 @@ internal sealed class SqliteBackend : IDatabaseBackend
         while (reader.Read())
         {
             result.Add(ReadChunkEntry(reader));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Authoritative reference count for <paramref name="chunkHash"/>:
+    /// <c>SELECT COUNT(*) FROM chunk_file_refs WHERE chunk_hash = ?</c>.
+    /// Used by <c>ChunkIndexService</c> to maintain
+    /// <see cref="ChunkIndexEntry.ReferenceCount"/> without depending on
+    /// the in-memory <see cref="ChunkIndexEntry.ReferencingFiles"/> list
+    /// (which the SQLite GetChunkIndexEntry leaves empty by design).
+    /// </summary>
+    public int GetReferenceCountForChunk(string chunkHash)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM chunk_file_refs WHERE chunk_hash = $chunk_hash;";
+        cmd.Parameters.AddWithValue("$chunk_hash", chunkHash);
+        return Convert.ToInt32(cmd.ExecuteScalar());
+    }
+
+    /// <summary>
+    /// Returns every (file_path, chunk_index, referenced_at) triple
+    /// for <paramref name="chunkHash"/> from the canonical
+    /// <c>chunk_file_refs</c> reverse-index table. Used by
+    /// <c>ChunkIndexService.AddReference</c> to detect duplicates
+    /// without depending on the in-memory <c>ReferencingFiles</c> list.
+    /// </summary>
+    public List<ChunkFileReference> GetReferencingFilesForChunk(string chunkHash)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var result = new List<ChunkFileReference>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT file_path, chunk_index, referenced_at
+            FROM chunk_file_refs
+            WHERE chunk_hash = $chunk_hash;
+            """;
+        cmd.Parameters.AddWithValue("$chunk_hash", chunkHash);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add(new ChunkFileReference
+            {
+                FilePath = reader.GetString(0),
+                ChunkIndex = reader.GetInt32(1),
+                ReferencedAt = ParseUtc(reader.GetString(2)),
+            });
         }
         return result;
     }

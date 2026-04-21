@@ -81,17 +81,6 @@ public partial class LocalDatabaseService
     internal const string LiteDbBackupSuffix = ".litedb-backup";
 
     /// <summary>
-    /// Returns true if the SQLite backend is currently selected by the
-    /// process (env var or AsyncLocal override). Public mirror of the
-    /// internal <c>DatabaseBackendFactory.ShouldUseSqlite</c> so the
-    /// UI layer (which has no <c>InternalsVisibleTo</c> on
-    /// AzureBackup.Core) can gate its migration logic on the same
-    /// switch the engine itself reads.
-    /// </summary>
-    public static bool IsSqliteBackendSelected() =>
-        DatabaseBackendFactory.ShouldUseSqlite();
-
-    /// <summary>
     /// Probes whether <paramref name="databasePath"/> can be opened as
     /// a SQLCipher-encrypted SQLite database with the given password.
     /// Returns true if successful. Returns false if the open fails with
@@ -148,6 +137,28 @@ public partial class LocalDatabaseService
             // appropriate next step is to try LiteDB.
             return false;
         }
+    }
+
+    /// <summary>
+    /// Deletes any leftover <c>.litedb-backup</c> + <c>.litedb-backup.salt</c>
+    /// files next to <paramref name="databasePath"/>. C-5 cleanup
+    /// helper for users who migrated under the prior retention policy
+    /// (which kept the LiteDB backup on disk indefinitely as a manual
+    /// rollback artefact). Idempotent and silent when no backup exists.
+    /// </summary>
+    /// <remarks>
+    /// Safe to call on every launch from the UI's auth flow because
+    /// the only way a <c>.litedb-backup</c> exists at all is via this
+    /// codebase's migration step 1; there is no third-party producer.
+    /// On a fresh user (no prior migration) both files are absent and
+    /// this method does nothing.
+    /// </remarks>
+    public static void CleanupStaleLegacyBackup(string databasePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+        var paths = new MigrationPaths(databasePath);
+        DeleteIfExists(paths.LiteDbBackup);
+        DeleteIfExists(paths.LiteDbBackupSalt);
     }
 
     /// <summary>
@@ -327,34 +338,42 @@ public partial class LocalDatabaseService
             throw;
         }
 
-        // Atomic(ish) four-step rename dance. Each File.Move on the
+        // Atomic(ish) five-step rename dance. Each File.Move on the
         // same volume is atomic at the FS level; the only cross-step
         // hazard is a process crash or power loss BETWEEN moves. The
         // recovery code at the top of this method
         // (TryRecoverFromInterruptedMigration) detects each
         // intermediate state by inspecting the on-disk files and
-        // either reverses (steps 1, 1b) or completes (steps 2, 3) the
-        // dance on the next launch. Crash states:
+        // either reverses (steps 1, 1b) or completes (steps 2, 3, 4)
+        // the dance on the next launch. Crash states:
         //
         //   After step 1 (LiteDB DB moved out, salt still in place):
         //     Recovery reverses the move -> next attempt restarts.
         //   After step 1b (LiteDB DB AND salt moved out):
         //     Recovery reverses both moves -> next attempt restarts.
         //   After step 2 (SQLite DB at target, no SQLite salt yet):
-        //     Recovery completes step 3 -> opens cleanly. Note that
-        //     the next-launch probe must NOT auto-create a salt at
-        //     this point - that is enforced by IsExistingSqliteDatabase
-        //     skipping the probe when no .salt is present.
-        //   After step 3: fully migrated.
+        //     Recovery completes step 3 (move salt) and step 4 (delete
+        //     backup) -> opens cleanly. Note that the next-launch probe
+        //     must NOT auto-create a salt at this point - that is
+        //     enforced by IsExistingSqliteDatabase skipping the probe
+        //     when no .salt is present.
+        //   After step 3 (SQLite DB + salt at target, backup still on disk):
+        //     Recovery completes step 4 (delete backup) -> steady state.
+        //   After step 4: fully migrated, no LiteDB residue.
         //
-        // The litedb-backup file (and its salt) are RETAINED so the
-        // user has a manual rollback path. They can be deleted once
-        // confidence in the SQLite database is established.
+        // C-5: the .litedb-backup files are DELETED at step 4 (formerly
+        // retained as a manual rollback artefact). Once SQLite is the
+        // production default the manual rollback path is no longer
+        // supported - if SQLite has a bug the user reports it and we
+        // fix forward. Keeping the backup around indefinitely was a
+        // disk-space tax with no compensating safety value.
         File.Move(databasePath, litedbBackupPath);
         if (File.Exists(originalSaltPath))
             File.Move(originalSaltPath, litedbBackupSaltPath);
         File.Move(tempSqlitePath, databasePath);
         File.Move(tempSqliteSaltPath, databasePath + ".salt");
+        DeleteIfExists(litedbBackupPath);
+        DeleteIfExists(litedbBackupSaltPath);
     }
 
     private static void DeleteIfExists(string path)
@@ -524,17 +543,41 @@ public partial class LocalDatabaseService
         if (!dbSaltExists && tmpSaltExists)
         {
             // Crash after step 2: SQLite DB is at databasePath but its
-            // salt is still at .sqlite-tmp.salt. Complete step 3.
+            // salt is still at .sqlite-tmp.salt. Complete step 3
+            // (move salt) and step 4 (delete backup).
             File.Move(paths.TempSqliteSalt, paths.OriginalSalt);
             // Tidy any stale wal/shm sidecars from the temp path.
             DeleteIfExists(paths.TempSqlite + "-wal");
             DeleteIfExists(paths.TempSqlite + "-shm");
+            DeleteIfExists(paths.LiteDbBackup);
+            DeleteIfExists(paths.LiteDbBackupSalt);
             return InterruptedMigrationOutcome.RecoveredAsSqlite;
         }
 
-        // db + db.salt + bk all present: successful prior migration,
-        // user just has not deleted the backup yet. The caller will
-        // re-probe the SQLite DB and short-circuit with no migration.
+        if (dbSaltExists)
+        {
+            // Crash after step 3: SQLite DB + salt are at the target
+            // path; only step 4 (delete backup) is missing. Complete
+            // step 4 and report recovery as SQLite so the caller skips
+            // a redundant fresh migration. The caller's downstream
+            // probe will confirm the SQLite DB opens cleanly.
+            //
+            // C-5 note: under the prior retention policy this state was
+            // the steady state (.litedb-backup retained for manual
+            // rollback). With C-5's delete-on-success policy this is
+            // now an interrupted-after-step-3 state and we clean up.
+            DeleteIfExists(paths.LiteDbBackup);
+            DeleteIfExists(paths.LiteDbBackupSalt);
+            return InterruptedMigrationOutcome.RecoveredAsSqlite;
+        }
+
+        // db present but neither db.salt nor tmpsalt: extremely odd
+        // state (SQLite DB with no companion salt anywhere). Most
+        // likely the user deleted .salt manually. Fresh migration
+        // would fail because db is SQLite-shaped and InitializeLiteDbOnly
+        // would throw. Best to surface that error rather than silently
+        // delete the backup. Leave bk in place and return NoInterruption;
+        // the caller's MigrateFromLiteDb will throw downstream.
         return InterruptedMigrationOutcome.NoInterruption;
     }
 }

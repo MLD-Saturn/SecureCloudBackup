@@ -185,6 +185,35 @@ internal interface IDatabaseBackend : IDisposable
     /// </summary>
     List<ChunkIndexEntry> GetOrphanedChunks();
 
+    /// <summary>
+    /// Returns the authoritative reference count for <paramref name="chunkHash"/>
+    /// computed from the canonical reverse-index source
+    /// (<c>chunk_file_refs</c> in SQLite; the equivalent collection in
+    /// LiteDB). Used by <c>ChunkIndexService</c> to set
+    /// <see cref="ChunkIndexEntry.ReferenceCount"/> correctly without
+    /// relying on the in-memory <see cref="ChunkIndexEntry.ReferencingFiles"/>
+    /// list, which the SQLite backend leaves empty by design.
+    /// </summary>
+    /// <remarks>
+    /// Returns 0 if no rows reference the chunk. Caller decides whether
+    /// "0 references" means "orphan, delete the chunk" or "newly created
+    /// chunk awaiting its first ref".
+    /// </remarks>
+    int GetReferenceCountForChunk(string chunkHash);
+
+    /// <summary>
+    /// Returns every <see cref="ChunkFileReference"/> for
+    /// <paramref name="chunkHash"/>, sourced from the canonical
+    /// reverse-index. Used by <c>ChunkIndexService.AddReference</c> to
+    /// detect duplicate (file_path, chunk_hash, chunk_index) triples
+    /// without depending on the in-memory <c>ReferencingFiles</c> list.
+    /// </summary>
+    /// <remarks>
+    /// Returns an empty list if no rows reference the chunk. The order
+    /// of the returned list is not specified.
+    /// </remarks>
+    List<ChunkFileReference> GetReferencingFilesForChunk(string chunkHash);
+
     // ---- Reverse chunk index (chunk_file_refs) -----------------------------
 
     /// <summary>

@@ -180,62 +180,43 @@ docs/
 - [User Guide](docs/USER_GUIDE.md) -- daily usage, restore, sync, and troubleshooting
 - [Option C Evaluation](docs/option-c-evaluation.md) -- LiteDB → SQLite + SQLCipher decision, head-to-head benchmark results, and ship recommendation
 
-## SQLite backend
+## Local database (SQLite + SQLCipher)
 
-As of commit `088d019` the local database layer can be routed to a SQLite + SQLCipher backend via a feature flag. As of C-2, turning the flag on against an existing LiteDB database **automatically migrates** every collection (config, chunk_index, files + chunks, pending changes, all index metadata) into a fresh SQLite database, then atomically swaps the files. Migration progress streams into the existing logs panel during sign-in. Your LiteDB database is preserved as `<path>.litedb-backup` so you can roll back manually by deleting the new SQLite file and renaming `.litedb-backup` back into place.
+The local index is stored in a SQLCipher-encrypted SQLite database. The original LiteDB backend was deprecated in C-5; SQLite is now the only runtime backend. Existing users on a LiteDB database from a prior install are migrated transparently the next time they sign in (see [Automatic migration from LiteDB](#automatic-migration-from-litedb) below).
 
-The `AZBK_USE_SQLITE` env var is the single switch that selects the backend; the long-term plan (C-5) flips its default and removes the LiteDB code path. There is no separate preview gate.
+### What's on disk
 
-### How migration works
+* `<DataDir>/index.db` — encrypted SQLite database
+* `<DataDir>/index.db.salt` — 16-byte random salt for Argon2id key derivation
+* `<DataDir>/index.db-wal`, `<DataDir>/index.db-shm` — SQLite write-ahead-log sidecars (transient; truncated on clean shutdown)
+
+### Performance vs the prior LiteDB backend
+
+Per the C-3 head-to-head benchmarks: 4 of 5 measured scenarios are 5× to 7000× faster on SQLite; open+decrypt is ~5× slower (one-time per launch). See [Option C Evaluation](docs/option-c-evaluation.md) §11.1 for the full scorecard.
+
+### Automatic migration from LiteDB
+
+A user upgrading from a prior release (which shipped LiteDB) sees the migration run on the next sign-in:
 
 1. The user signs in by entering their password in MainWindow's auth UI.
 2. Before opening the database, the auth flow calls `LocalDatabaseService.IsExistingSqliteDatabase(path, password)` to probe the file. If it opens cleanly as SQLCipher, no migration runs.
 3. If the probe returns false (the file is LiteDB, not SQLite), the auth flow calls `LocalDatabaseService.MigrateFromLiteDb` on a worker thread and streams progress into the logs panel using the same throttled-AddLog pattern as the existing reverse-chunk-index rebuild.
-4. On success the rename dance runs: original LiteDB → `.litedb-backup`, original salt → `.litedb-backup.salt`, temp SQLite → target path, temp salt → `<path>.salt`. Then `LocalDatabaseService.Initialize` opens the new SQLite database normally.
+4. On success the rename dance runs in five steps: original LiteDB → `.litedb-backup`, original salt → `.litedb-backup.salt`, temp SQLite → target path, temp salt → `<path>.salt`, then both `.litedb-backup` files are deleted. Then `LocalDatabaseService.Initialize` opens the new SQLite database normally.
 5. On failure the temp SQLite is deleted, the LiteDB database remains authoritative, and the auth flow shows an error in the logs panel; the next sign-in retries from scratch.
 
 For a backup with ~5000 files and ~500K chunks the migration takes 10–30 seconds based on the C-3 head-to-head numbers. The auth flow is blocked during migration but the UI thread stays responsive (migration runs on the thread pool).
 
+### Crash-safety during migration
+
+The five-step rename dance is interruptible at any point and the next launch detects the partial state, then either reverses (steps 1, 1b — restore LiteDB and try again) or completes (steps 2, 3, 4 — finish the rename and clean up). See `LocalDatabaseService.Migration.Sqlite.cs` `TryRecoverFromInterruptedMigration` for the state-by-state decision table.
+
 ### Wrong-password safety
 
-If you flip the flag and enter the wrong password, the migration's source-side LiteDB open throws `InvalidPasswordException` and the auth flow bails out with the same "Invalid password - please try again" message used for any other wrong-password attempt. Your LiteDB database file is not touched. Re-enter the correct password and migration runs normally.
+If a user enters the wrong password during migration, the source-side LiteDB open throws `InvalidPasswordException` and the auth flow bails out with the same "Invalid password - please try again" message used for any other wrong-password attempt. Their LiteDB database file is not touched. Re-enter the correct password and migration runs normally.
 
-### How to enable
+### Stale-backup cleanup (C-5)
 
-Set the environment variable `AZBK_USE_SQLITE` before launching the app:
-
-```powershell
-# PowerShell (current session only)
-$env:AZBK_USE_SQLITE = "1"
-azurebackup.exe
-```
-
-```bash
-# bash / zsh
-AZBK_USE_SQLITE=1 ./azurebackup
-```
-
-Truthy values: `1`, `true`, `yes`, `on` (case-insensitive, whitespace-trimmed). Any other value (including unset, empty, `0`, `false`) leaves the service on the original LiteDB path.
-
-The flag is read **once** per `LocalDatabaseService.Initialize` call. Flipping it mid-session has no effect.
-
-### What changes under the flag
-
-* Storage engine: SQLCipher-encrypted SQLite with WAL journaling instead of LiteDB.
-* On-disk layout: a `.db` + companion `-wal` / `-shm` files, plus the same `.salt` file convention.
-* Performance: 4 of 5 measured scenarios in C-3 are 5× to 7000× faster on SQLite; open+decrypt is ~5× slower (one-time per launch). See `docs/option-c-evaluation.md` §11.1 for the full scorecard.
-* Public API: **zero changes.** Every consumer (`BackupOrchestrator`, `ChunkIndexService`, `FileWatcherService`, `RestoreService`, the view models) sees the same `LocalDatabaseService` type with the same methods.
-
-### How to turn it off
-
-Unset the environment variable and restart the app. The original LiteDB path is always the default. **Important caveat post-C-2:** if migration has already run (the `.litedb-backup` file exists), simply unsetting the flag will make the app open the LiteDB file at the original path — but that path now hosts the SQLite database. To roll back manually:
-
-1. Stop the app.
-2. Delete the SQLite files: `<path>`, `<path>.salt`, `<path>-wal`, `<path>-shm` (the last two may not exist).
-3. Rename `<path>.litedb-backup` → `<path>` and `<path>.litedb-backup.salt` → `<path>.salt`.
-4. Unset `AZBK_USE_SQLITE` and restart.
-
-Any writes that happened against the SQLite database between migration and rollback will be lost.
+Releases between C-2 (`9fda662`) and C-5 retained the `.litedb-backup` file indefinitely as a manual rollback artefact. C-5 removed that retention policy: the backup is deleted at step 4 of the rename dance for fresh migrations, and the auth flow's `EnsureMigratedToSqliteAsync` calls `LocalDatabaseService.CleanupStaleLegacyBackup` on every launch to clean up any leftovers from those interim releases. After one sign-in on a C-5+ build the data directory contains only SQLite files.
 
 ## Benchmarks
 

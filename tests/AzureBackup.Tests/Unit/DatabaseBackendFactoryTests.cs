@@ -4,84 +4,54 @@ using Xunit;
 namespace AzureBackup.Tests;
 
 /// <summary>
-/// Option C / C-1 final step b: unit tests for the feature-flag
-/// resolver. Tests IsTruthy with a parameter matrix so we document
-/// exactly which env-var values enable SQLite.
+/// Option C / C-5: <see cref="DatabaseBackendFactory.ShouldUseSqlite"/>
+/// must return <c>true</c> by default (SQLite is the production
+/// backend) and honour the <see cref="System.Threading.AsyncLocal{T}"/>
+/// override that tests use to opt INTO the legacy LiteDB code path.
 ///
 /// <para>
-/// <see cref="DatabaseBackendFactory.ShouldUseSqlite"/> reads the
-/// process-wide environment variable; the three tests that flip that
-/// variable belong to the <c>EnvVarMutating</c> xUnit collection so
-/// they run sequentially with no other env-var-mutating test alongside.
+/// The C-1-era <c>AZBK_USE_SQLITE</c> environment variable was
+/// removed in C-5; tests that exercised it (<c>IsTruthy</c> token
+/// matrix, <c>EnvVarScope</c> helper) went with it.
 /// </para>
 /// </summary>
-[Collection("EnvVarMutating")]
 public class DatabaseBackendFactoryTests
 {
-    [Theory]
-    [InlineData("1", true)]
-    [InlineData("true", true)]
-    [InlineData("True", true)]
-    [InlineData("TRUE", true)]
-    [InlineData("yes", true)]
-    [InlineData("Yes", true)]
-    [InlineData("on", true)]
-    [InlineData("ON", true)]
-    [InlineData("  true  ", true)]   // whitespace tolerated
-    [InlineData("0", false)]
-    [InlineData("false", false)]
-    [InlineData("no", false)]
-    [InlineData("off", false)]
-    [InlineData("", false)]
-    [InlineData("   ", false)]
-    [InlineData(null, false)]
-    [InlineData("enabled", false)]    // NOT accepted - only the documented tokens
-    [InlineData("2", false)]
-    [InlineData("t", false)]
-    [InlineData("y", false)]
-    public void IsTruthy_RecognisesExpectedTokens(string? input, bool expected)
+    [Fact]
+    public void ShouldUseSqlite_NoOverride_ReturnsTrue()
     {
-        Assert.Equal(expected, DatabaseBackendFactory.IsTruthy(input));
+        // Belt-and-braces: clear the AsyncLocal override in case a
+        // sibling test left one behind (it shouldn't - every scope
+        // disposes - but the assertion is too small to be picky).
+        DatabaseBackendFactory.SetAsyncLocalOverride(null);
+
+        Assert.True(DatabaseBackendFactory.ShouldUseSqlite(),
+            "SQLite must be the production default after C-5.");
     }
 
     [Fact]
-    public void ShouldUseSqlite_UnsetEnvVar_ReturnsFalse()
+    public void ShouldUseSqlite_WithLiteDbOverride_ReturnsFalse()
     {
-        using var _ = new EnvVarScope(DatabaseBackendFactory.EnvironmentVariableName, null);
-        Assert.False(DatabaseBackendFactory.ShouldUseSqlite());
+        using var _ = new BackendOverrideScope(useSqlite: false);
+        Assert.False(DatabaseBackendFactory.ShouldUseSqlite(),
+            "Tests that opt into the legacy LiteDB path must see the override honoured.");
     }
 
     [Fact]
-    public void ShouldUseSqlite_EnvVarSetToOne_ReturnsTrue()
+    public void ShouldUseSqlite_WithSqliteOverride_ReturnsTrue()
     {
-        using var _ = new EnvVarScope(DatabaseBackendFactory.EnvironmentVariableName, "1");
+        using var _ = new BackendOverrideScope(useSqlite: true);
         Assert.True(DatabaseBackendFactory.ShouldUseSqlite());
     }
 
     [Fact]
-    public void ShouldUseSqlite_EnvVarSetToFalse_ReturnsFalse()
+    public void ShouldUseSqlite_AfterScopeDisposed_ReturnsToProductionDefault()
     {
-        using var _ = new EnvVarScope(DatabaseBackendFactory.EnvironmentVariableName, "false");
-        Assert.False(DatabaseBackendFactory.ShouldUseSqlite());
-    }
-
-    /// <summary>
-    /// Snapshot-and-restore helper so tests that touch environment
-    /// variables don't leak into each other.
-    /// </summary>
-    private sealed class EnvVarScope : IDisposable
-    {
-        private readonly string _name;
-        private readonly string? _previousValue;
-
-        public EnvVarScope(string name, string? newValue)
+        using (var _ = new BackendOverrideScope(useSqlite: false))
         {
-            _name = name;
-            _previousValue = Environment.GetEnvironmentVariable(name);
-            Environment.SetEnvironmentVariable(name, newValue);
+            Assert.False(DatabaseBackendFactory.ShouldUseSqlite());
         }
-
-        public void Dispose()
-            => Environment.SetEnvironmentVariable(_name, _previousValue);
+        Assert.True(DatabaseBackendFactory.ShouldUseSqlite(),
+            "Disposing the scope must restore the production default (true).");
     }
 }

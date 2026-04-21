@@ -110,6 +110,12 @@ internal sealed class LiteDbBackend : IDatabaseBackend
 
     public List<ChunkIndexEntry> GetOrphanedChunks() => _service.GetOrphanedChunks();
 
+    public int GetReferenceCountForChunk(string chunkHash)
+        => _service.GetReferenceCountForChunk(chunkHash);
+
+    public List<ChunkFileReference> GetReferencingFilesForChunk(string chunkHash)
+        => _service.GetReferencingFilesForChunk(chunkHash);
+
     // ---- Reverse chunk index -----------------------------------------------
 
     public List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath)

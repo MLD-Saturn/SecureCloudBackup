@@ -409,6 +409,47 @@ public partial class LocalDatabaseService
     }
 
     /// <summary>
+    /// Returns the authoritative reference count for <paramref name="chunkHash"/>
+    /// computed from the canonical <c>chunk_file_refs</c> reverse-index
+    /// collection rather than from the cached
+    /// <see cref="ChunkIndexEntry.ReferenceCount"/> column. Used by
+    /// <see cref="ChunkIndexService"/> so the count remains correct even
+    /// when the backend (e.g. SQLite) does not populate the in-memory
+    /// <see cref="ChunkIndexEntry.ReferencingFiles"/> list on read.
+    /// </summary>
+    public int GetReferenceCountForChunk(string chunkHash)
+    {
+        if (_sqliteBackend != null) return _sqliteBackend.GetReferenceCountForChunk(chunkHash);
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+
+        return InReadLock(() => _chunkFileRefsCollection!.Count(x => x.ChunkHash == chunkHash));
+    }
+
+    /// <summary>
+    /// Returns every <see cref="ChunkFileReference"/> for
+    /// <paramref name="chunkHash"/> from the canonical
+    /// <c>chunk_file_refs</c> reverse-index collection. Order is not
+    /// specified.
+    /// </summary>
+    public List<ChunkFileReference> GetReferencingFilesForChunk(string chunkHash)
+    {
+        if (_sqliteBackend != null) return _sqliteBackend.GetReferencingFilesForChunk(chunkHash);
+        EnsureInitialized();
+        ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
+
+        return InReadLock(() => _chunkFileRefsCollection!
+            .Find(x => x.ChunkHash == chunkHash)
+            .Select(r => new ChunkFileReference
+            {
+                FilePath = r.FilePath,
+                ChunkIndex = r.ChunkIndex,
+                ReferencedAt = r.ReferencedAt,
+            })
+            .ToList());
+    }
+
+    /// <summary>
     /// Clears all chunk index entries.
     /// </summary>
     public void ClearChunkIndex()

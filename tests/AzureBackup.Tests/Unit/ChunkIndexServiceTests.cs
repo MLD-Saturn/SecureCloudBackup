@@ -68,8 +68,13 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         Assert.NotNull(entry);
         Assert.Equal(chunkHash, entry.ChunkHash);
         Assert.Equal(1, entry.ReferenceCount);
-        Assert.Single(entry.ReferencingFiles);
-        Assert.Equal(filePath, entry.ReferencingFiles[0].FilePath);
+        // Reverse-index lookup via the canonical source. C-1 / C-5 note:
+        // entry.ReferencingFiles is empty under the SQLite backend by
+        // design - that field is a LiteDB-era surface; the
+        // chunk_file_refs table is the canonical reverse-index store.
+        var refs = _databaseService.GetReferencingFilesForChunk(chunkHash);
+        Assert.Single(refs);
+        Assert.Equal(filePath, refs[0].FilePath);
         Assert.Equal(1024, entry.SizeBytes);
         Assert.Equal(StorageTier.Cool, entry.CurrentTier);
     }
@@ -93,7 +98,7 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         var entry = _databaseService.GetChunkIndexEntry(chunkHash);
         Assert.NotNull(entry);
         Assert.Equal(2, entry.ReferenceCount);
-        Assert.Equal(2, entry.ReferencingFiles.Count);
+        Assert.Equal(2, _databaseService.GetReferencingFilesForChunk(chunkHash).Count);
     }
 
     [Fact]
@@ -114,7 +119,7 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         var entry = _databaseService.GetChunkIndexEntry(chunkHash);
         Assert.NotNull(entry);
         Assert.Equal(1, entry.ReferenceCount);
-        Assert.Single(entry.ReferencingFiles);
+        Assert.Single(_databaseService.GetReferencingFilesForChunk(chunkHash));
     }
 
     [Fact]
@@ -142,8 +147,9 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         var entry = _databaseService.GetChunkIndexEntry(chunkHash);
         Assert.NotNull(entry);
         Assert.Equal(1, entry.ReferenceCount);
-        Assert.Single(entry.ReferencingFiles);
-        Assert.Equal(filePath2, entry.ReferencingFiles[0].FilePath);
+        var refs = _databaseService.GetReferencingFilesForChunk(chunkHash);
+        Assert.Single(refs);
+        Assert.Equal(filePath2, refs[0].FilePath);
     }
 
     [Fact]
@@ -188,10 +194,12 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         // Chunk 2: Referenced by 1 file
         _indexService.AddReference(hash2, @"C:\file1.txt", 1, 2000, StorageTier.Cool, true);
         
-        // Chunk 3: Orphaned (0 references) - add then remove
+        // Chunk 3: Orphaned (0 references) - add then remove the
+        // canonical reverse-index row and reset the cached count.
         _indexService.AddReference(hash3, @"C:\temp.txt", 0, 500, StorageTier.Cold, true);
+        _databaseService.DeleteChunkFileRefsForChunk(hash3);
         var entry = _databaseService.GetChunkIndexEntry(hash3)!;
-        entry.ReferencingFiles.Clear();
+        entry.ReferencingFiles = [];
         entry.ReferenceCount = 0;
         _databaseService.SaveChunkIndexEntry(entry);
         
@@ -249,7 +257,9 @@ public class ChunkIndexServiceTests : IAsyncLifetime
         var newEntry = _databaseService.GetChunkIndexEntry(newHash);
         Assert.NotNull(newEntry);
         Assert.Equal(1, newEntry.ReferenceCount);
-        Assert.Equal(filePath, newEntry.ReferencingFiles[0].FilePath);
+        var refs = _databaseService.GetReferencingFilesForChunk(newHash);
+        Assert.Single(refs);
+        Assert.Equal(filePath, refs[0].FilePath);
     }
 
     #endregion

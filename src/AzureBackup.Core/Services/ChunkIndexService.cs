@@ -56,10 +56,12 @@ public partial class ChunkIndexService
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
 
         var entry = _databaseService.GetChunkIndexEntry(chunkHash);
-        
+
         if (entry == null)
         {
-            // New chunk - create entry
+            // New chunk - create entry. ReferenceCount starts at 0;
+            // the UpsertChunkFileRef + GetReferenceCountForChunk pair
+            // below sets the authoritative count.
             entry = new ChunkIndexEntry
             {
                 ChunkHash = chunkHash,
@@ -74,25 +76,29 @@ public partial class ChunkIndexService
             Log($"Created new chunk index entry for {chunkHash[..8]}...");
         }
 
-        // Check if this file already references this chunk
-        var existingRef = entry.ReferencingFiles.Find(r => 
-            r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase) && 
-            r.ChunkIndex == chunkIndex);
-
         var referencedAt = DateTime.UtcNow;
 
-        if (existingRef == null)
-        {
-            // Add new reference
-            entry.ReferencingFiles.Add(new ChunkFileReference
-            {
-                FilePath = filePath,
-                ChunkIndex = chunkIndex,
-                ReferencedAt = referencedAt
-            });
-            entry.ReferenceCount = entry.ReferencingFiles.Count;
-            Log($"Added reference: {filePath} -> chunk {chunkHash[..8]}... (ref count: {entry.ReferenceCount})");
-        }
+        // Write to the canonical reverse-index FIRST. UpsertChunkFileRef
+        // is idempotent on the (file_path, chunk_hash, chunk_index)
+        // triple - if the same triple is upserted twice the row's
+        // referenced_at is updated and no duplicate is created.
+        // This is the single source of truth for "which files reference
+        // this chunk". Pre-C-5 this code maintained a parallel in-memory
+        // list (entry.ReferencingFiles) that worked under LiteDB but not
+        // under SQLite (where GetChunkIndexEntry leaves the list empty
+        // by design); SQLite-by-default exposed the divergence and we
+        // now derive ReferenceCount from the canonical source instead.
+        _databaseService.UpsertChunkFileRef(filePath, chunkHash, chunkIndex, referencedAt);
+
+        // Read back the authoritative count + referencing files so the
+        // entry we save AND the in-memory ChunkIndexEntry surface match
+        // the on-disk reverse-index state. Tests and downstream callers
+        // that inspect entry.ReferencingFiles see consistent data
+        // regardless of which backend is in use.
+        var referencingFiles = _databaseService.GetReferencingFilesForChunk(chunkHash);
+        entry.ReferencingFiles = referencingFiles;
+        entry.ReferenceCount = referencingFiles.Count;
+        Log($"Reference for {filePath} -> chunk {chunkHash[..8]}... (ref count: {entry.ReferenceCount})");
 
         // Update tier if this was a new upload
         if (isNewChunk)
@@ -102,11 +108,6 @@ public partial class ChunkIndexService
         }
 
         _databaseService.SaveChunkIndexEntry(entry);
-
-        // Keep the reverse (file -> chunk) index in lockstep with the primary
-        // (chunk -> files) list. UpsertChunkFileRef is idempotent so repeated
-        // AddReference calls for the same triple do not create duplicates.
-        _databaseService.UpsertChunkFileRef(filePath, chunkHash, chunkIndex, referencedAt);
     }
 
     /// <summary>
@@ -124,16 +125,24 @@ public partial class ChunkIndexService
         var entries = _databaseService.GetChunkEntriesForFile(filePath);
         var deletedCount = 0;
 
+        // Mutate the canonical reverse index FIRST. Drop every row
+        // that pointed at this file path; the per-chunk loop below
+        // then reads the post-delete count back via
+        // GetReferenceCountForChunk to decide orphan-or-keep. Pre-C-5
+        // this code mutated entry.ReferencingFiles in memory which
+        // was empty under SQLite, causing every chunk reachable from
+        // this file to be incorrectly classified as an orphan.
+        _databaseService.DeleteChunkFileRefsForFile(filePath);
+
         foreach (var entry in entries)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Remove references from this file
-            entry.ReferencingFiles.RemoveAll(r => 
-                r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase));
-            entry.ReferenceCount = entry.ReferencingFiles.Count;
+            var newCount = _databaseService.GetReferenceCountForChunk(entry.ChunkHash);
+            entry.ReferenceCount = newCount;
+            entry.ReferencingFiles = _databaseService.GetReferencingFilesForChunk(entry.ChunkHash);
 
-            if (entry.ReferenceCount == 0)
+            if (newCount == 0)
             {
                 // Delete the orphaned chunk immediately
                 Log($"Chunk {entry.ChunkHash[..8]}... has no references, deleting from Azure...");
@@ -141,8 +150,9 @@ public partial class ChunkIndexService
                 {
                     await _blobService.DeleteBlobAsync($"chunks/{entry.ChunkHash}", cancellationToken);
                     _databaseService.DeleteChunkIndexEntry(entry.ChunkHash);
-                    // Clear every reverse-index row for the deleted chunk (defensive -
-                    // some may still reference other files if the graph is inconsistent).
+                    // Defensive: ensure no stragglers in the reverse index
+                    // for this chunk (e.g. if the graph was inconsistent
+                    // before this call).
                     _databaseService.DeleteChunkFileRefsForChunk(entry.ChunkHash);
                     deletedCount++;
                     Log($"Deleted orphaned chunk {entry.ChunkHash[..8]}...");
@@ -160,10 +170,6 @@ public partial class ChunkIndexService
                 Log($"Updated chunk {entry.ChunkHash[..8]}... ref count to {entry.ReferenceCount}");
             }
         }
-
-        // Remove every reverse-index row that pointed at this file path - covers
-        // both the chunks we deleted above and any that we kept (reference count > 0).
-        _databaseService.DeleteChunkFileRefsForFile(filePath);
 
         return deletedCount;
     }
@@ -195,38 +201,41 @@ public partial class ChunkIndexService
         foreach (var hash in removedHashes)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var entry = _databaseService.GetChunkIndexEntry(hash);
-            if (entry != null)
-            {
-                entry.ReferencingFiles.RemoveAll(r => 
-                    r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase));
-                entry.ReferenceCount = entry.ReferencingFiles.Count;
 
-                if (entry.ReferenceCount == 0)
+            // Drop the reverse-index rows binding this file to this
+            // chunk FIRST, then read the canonical count back to
+            // decide orphan-or-keep. Pre-C-5 this code mutated
+            // entry.ReferencingFiles in memory which was empty under
+            // SQLite (see AddReference for the wider context).
+            _databaseService.DeleteChunkFileRefsForFileAndChunk(filePath, hash);
+
+            var entry = _databaseService.GetChunkIndexEntry(hash);
+            if (entry == null) continue;
+
+            var newCount = _databaseService.GetReferenceCountForChunk(hash);
+            entry.ReferenceCount = newCount;
+            entry.ReferencingFiles = _databaseService.GetReferencingFilesForChunk(hash);
+
+            if (newCount == 0)
+            {
+                // Delete immediately
+                try
                 {
-                    // Delete immediately
-                    try
-                    {
-                        await _blobService.DeleteBlobAsync($"chunks/{hash}", cancellationToken);
-                        _databaseService.DeleteChunkIndexEntry(hash);
-                        _databaseService.DeleteChunkFileRefsForChunk(hash);
-                        Log($"Deleted orphaned chunk {hash[..8]}... (removed from modified file)");
-                    }
-                    catch (Exception ex)
-                    {
-                        Log($"Failed to delete chunk {hash[..8]}...: {ex.Message}");
-                        _databaseService.SaveChunkIndexEntry(entry);
-                    }
+                    await _blobService.DeleteBlobAsync($"chunks/{hash}", cancellationToken);
+                    _databaseService.DeleteChunkIndexEntry(hash);
+                    _databaseService.DeleteChunkFileRefsForChunk(hash);
+                    Log($"Deleted orphaned chunk {hash[..8]}... (removed from modified file)");
                 }
-                else
+                catch (Exception ex)
                 {
+                    Log($"Failed to delete chunk {hash[..8]}...: {ex.Message}");
                     _databaseService.SaveChunkIndexEntry(entry);
                 }
             }
-
-            // Drop the reverse-index rows binding this file to this chunk,
-            // even if the chunk itself still has other referrers.
-            _databaseService.DeleteChunkFileRefsForFileAndChunk(filePath, hash);
+            else
+            {
+                _databaseService.SaveChunkIndexEntry(entry);
+            }
         }
 
         // Add references to new chunks
@@ -427,15 +436,21 @@ public partial class ChunkIndexService
     public void VerifyBackupConsistency(string filePath, IList<string> chunkHashes)
     {
         Log($"Verifying backup consistency for {filePath}...");
-        
+
         foreach (var hash in chunkHashes)
         {
             var entry = _databaseService.GetChunkIndexEntry(hash);
             if (entry == null)
             {
                 Log($"WARNING: Chunk {hash[..8]}... not found in index after backup!");
+                continue;
             }
-            else if (!entry.ReferencingFiles.Any(r => 
+
+            // Canonical reverse-index lookup; do not trust
+            // entry.ReferencingFiles which the SQLite backend leaves
+            // empty by design.
+            var referencingFiles = _databaseService.GetReferencingFilesForChunk(hash);
+            if (!referencingFiles.Any(r =>
                 r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)))
             {
                 Log($"WARNING: File {filePath} not found in references for chunk {hash[..8]}...");

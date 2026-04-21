@@ -249,7 +249,7 @@ These are working-day estimates assuming the prototype goes well.
 | C-2 | Migration code path with progress UI | 1–2 d |
 | C-3 | Re-run every Phase 4/5/6 benchmark against SQLite, document results | 1 d |
 | C-4 | Decision point: ship, defer, or abandon based on C-3 numbers | — |
-| C-5 (if shipping) | Remove LiteDB code, drop `LiteDB` package, update README | 0.5 d |
+| C-5 (if shipping) | Make SQLite the production default; cleanup retained `.litedb-backup` files; keep LiteDB available for migration source-side reads | 0.5 d |
 | C-6 (if shipping) | Soak in main behind preview flag for one release before forced migration | — |
 
 **Total best case: ~7 days** of focused work spread across calendar
@@ -393,8 +393,8 @@ Working-day estimates, calibrated against C-3 actuals:
 | C-2 | Migration code path with progress UI | 1–2 d | 1–2 d (unchanged, now unblocked) |
 | C-3 | Re-run every Phase 4/5/6 benchmark against SQLite | 1 d | **~5 d actual** (scaffolding + 6 benchmarks + 2 optimisation-then-rerun passes + analysis docs) |
 | C-4 | Decision | — | **Done: SHIP** |
-| C-5 | Remove LiteDB code + package | 0.5 d | 0.5 d (unchanged) |
-| C-6 | Soak in main behind preview flag | — | — |
+| C-5 | SQLite-by-default + cleanup `.litedb-backup` retention | 0.5 d | 0.5 d done. Scope re-cut: keep LiteDB code in place for migration source-side reads; just flip the default and clean up backup files. Full removal of the LiteDB package deferred to a future C-5b once telemetry confirms no remaining users have a LiteDB DB on disk. |
+| C-6 | Soak in main behind preview flag | — | Dropped per product direction; forced migration shipped in C-2. |
 
 The C-3 overrun (1 d → 5 d) came from three things:
 
@@ -470,12 +470,29 @@ Immediate next work, in order:
    per-instance `_initializeInProgress` re-entry guard that converts
    any future regression into a fast `InvalidOperationException`
    instead of a stack overflow.
-3. **C-6 / preview soak** — **dropped per product direction.** The
-   migration is forced rather than gated by a preview flag. The
-   `AZBK_USE_SQLITE` env var remains as the single switch the UI
-   reads to choose backend; the long-term plan (C-5) flips its
-   default and removes the LiteDB code path.
-4. **Post-ship calibration re-run** (optional) — scenarios 1, 3, 4
+3. **C-5 / SQLite by default** — **complete.** SQLite is now the
+   production backend. `DatabaseBackendFactory.ShouldUseSqlite()`
+   returns `true` unconditionally except when an explicit
+   `AsyncLocal<bool?>` test override is in scope. The
+   `AZBK_USE_SQLITE` environment variable was deleted along with the
+   `IsTruthy` token-matrix helper that parsed it. The migration's
+   five-step rename dance now ends with step 4 (delete
+   `.litedb-backup` + `.litedb-backup.salt`); the auth flow's
+   `EnsureMigratedToSqliteAsync` calls
+   `LocalDatabaseService.CleanupStaleLegacyBackup` on every launch
+   so users who migrated under the C-2 retention policy get their
+   stale backup cleaned up on next sign-in. After one launch on
+   C-5+ the data directory contains only SQLite files.
+
+   **Out of scope:** removing the `LiteDB` NuGet package itself.
+   The migration source-side still reads LiteDB databases, and the
+   pre-C-2 legacy migrations (`MigrateToEncrypted`,
+   `MigrateLegacyEncrypted`) still depend on it. Full package
+   removal is queued as a future C-5b once telemetry / soak time
+   confirms no remaining users have a LiteDB database on disk.
+4. **C-6 / preview soak** — **dropped per product direction.** The
+   migration is forced rather than gated by a preview flag.
+5. **Post-ship calibration re-run** (optional) — scenarios 1, 3, 4
    with the new `cache_size = 64 MB` setting active, for a fully
    symmetric decision record. Gate clears without this; not a
    blocker.

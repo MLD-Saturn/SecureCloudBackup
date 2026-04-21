@@ -34,45 +34,26 @@ namespace AzureBackup.Core.Services;
 internal static class DatabaseBackendFactory
 {
     /// <summary>
-    /// Name of the environment variable that routes a user to the
-    /// SQLite backend. Kept as a public <c>const string</c> so tests
-    /// can set/unset it without magic-string drift.
-    /// </summary>
-    public const string EnvironmentVariableName = "AZBK_USE_SQLITE";
-
-    /// <summary>
-    /// Optional per-async-flow override that bypasses the process-wide
-    /// <see cref="EnvironmentVariableName"/> env var. <c>null</c> means
-    /// "fall back to the env var"; a non-null value pins the backend
-    /// choice for the current async context only.
-    ///
-    /// <para>
-    /// <b>Why <see cref="AsyncLocal{T}"/>:</b> the env-var path is a
-    /// process-wide global that xUnit's parallel test runner cannot
-    /// safely share. Two test classes that flip the env var in parallel
-    /// would race; one test would see the other's value mid-call. The
-    /// <see cref="AsyncLocal{T}"/> field is per-logical-thread (and
-    /// inherited by tasks spawned within), so each test that opts in
-    /// gets its own pinned choice without affecting siblings.
-    /// </para>
-    ///
-    /// <para>
-    /// Production code never sets this. Tests use the
-    /// <c>BackendOverrideScope</c> helper which sets and clears the
-    /// value via <c>using</c>.
-    /// </para>
+    /// Optional per-async-flow override that pins the backend choice
+    /// for the current async context. <c>null</c> means "use the
+    /// production default" (SQLite). Tests use this to opt INTO the
+    /// LiteDB code path when they need to seed data in the legacy
+    /// format - e.g. the migration integration tests that need a
+    /// LiteDB DB on disk before exercising MigrateFromLiteDb.
     /// </summary>
     private static readonly AsyncLocal<bool?> _asyncLocalOverride = new();
 
     /// <summary>
     /// Test hook: pins <see cref="ShouldUseSqlite"/> to a fixed value
     /// for the current async flow. Pass <c>null</c> to clear the
-    /// override and fall back to the env var.
+    /// override and fall back to the production default (SQLite).
     /// </summary>
     /// <remarks>
     /// Internal-only on purpose - production must not depend on
     /// per-async-flow backend choices. Tests reach this via
-    /// <c>InternalsVisibleTo</c> on AzureBackup.Tests.
+    /// <c>InternalsVisibleTo</c> on AzureBackup.Tests. Setting
+    /// <c>false</c> opts the test into the legacy LiteDB code path,
+    /// which is retained for migration-source-side reads.
     /// </remarks>
     internal static void SetAsyncLocalOverride(bool? value)
     {
@@ -89,18 +70,16 @@ internal static class DatabaseBackendFactory
     internal static bool? GetAsyncLocalOverride() => _asyncLocalOverride.Value;
 
     /// <summary>
-    /// Returns <c>true</c> if the current process environment is
-    /// configured to use the SQLite backend. The
-    /// <see cref="AsyncLocal{T}"/> override (if set) takes precedence
-    /// over the env var.
+    /// Returns <c>true</c> if the SQLite backend should be used.
+    /// As of C-5 SQLite is the production default; this method
+    /// returns <c>true</c> unconditionally except when an explicit
+    /// <see cref="AsyncLocal{T}"/> test override is in scope.
     /// </summary>
     public static bool ShouldUseSqlite()
     {
         var pinned = _asyncLocalOverride.Value;
         if (pinned.HasValue) return pinned.Value;
-
-        var raw = Environment.GetEnvironmentVariable(EnvironmentVariableName);
-        return IsTruthy(raw);
+        return true;
     }
 
     /// <summary>
@@ -115,21 +94,5 @@ internal static class DatabaseBackendFactory
         var backend = new SqliteBackend();
         backend.Initialize(databasePath, password);
         return backend;
-    }
-
-    /// <summary>
-    /// Env-var truthy check. Accepts <c>1</c>, <c>true</c>, <c>yes</c>,
-    /// <c>on</c> (any case) as truthy. Anything else, including
-    /// <c>null</c>, empty, and whitespace, is falsy.
-    /// </summary>
-    internal static bool IsTruthy(string? value)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return false;
-        var trimmed = value.Trim();
-        return trimmed.Equals("1", StringComparison.Ordinal)
-            || trimmed.Equals("true", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Equals("yes", StringComparison.OrdinalIgnoreCase)
-            || trimmed.Equals("on", StringComparison.OrdinalIgnoreCase);
     }
 }
