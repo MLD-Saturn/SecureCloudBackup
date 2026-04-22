@@ -44,6 +44,31 @@ public partial class AzureBlobService : IBlobStorageService
     public bool IsConnected => _containerClient != null;
     public long TotalBytesUploaded { get; private set; }
     public int TotalOperations { get; private set; }
+
+    // CRC counters intentionally use Interlocked rather than auto-property
+    // setters because they are bumped from inside Parallel.ForEachAsync chunk
+    // workers; under contention an uncoordinated ++ would lose updates.
+    // Operations code reads these as a delta around an op for OperationMetrics.
+    private long _totalCrcFailures;
+    private long _totalCrcRetries;
+
+    /// <summary>
+    /// Total CRC validation failures observed since this service was created.
+    /// Bumped by <c>EncryptAndDiagnose</c> (post-encrypt CRC check failed) and
+    /// by <c>VerifyDownloadIntegrity</c> (pre-decrypt CRC check failed).
+    /// Operations code (BackupOrchestrator / RestoreService) snapshots this
+    /// before and after each op and writes the delta into
+    /// <see cref="OperationMetrics.CrcFailCount"/>.
+    /// </summary>
+    public long TotalCrcFailures => Interlocked.Read(ref _totalCrcFailures);
+
+    /// <summary>
+    /// Total CRC-driven re-encrypt-and-retry attempts since this service was
+    /// created. Bumped each time <c>UploadWithIntegrityRetryAsync</c> re-runs
+    /// the supplied re-encrypt callback after an integrity failure on the
+    /// wire. See <see cref="OperationMetrics.CrcRetryCount"/>.
+    /// </summary>
+    public long TotalCrcRetries => Interlocked.Read(ref _totalCrcRetries);
     
     /// <summary>
     /// Event for detailed debug/diagnostic logging.
@@ -246,7 +271,7 @@ public partial class AzureBlobService : IBlobStorageService
                 {
                     // CRITICAL: Hash collision detected - we must upload this chunk with a different name
                     // to prevent data loss. This is astronomically rare for SHA-256 but we handle it.
-                    Log($"CRITICAL: Hash collision detected for chunk {chunkHash[..8]}... - " +
+                    Log($"CRITICAL: Hash collision detected for chunk {chunkHash[..Math.Min(16, chunkHash.Length)]}... - " +
                         $"will upload with collision suffix to prevent data loss. Details: {ex.Message}");
                     isCollision = true;
                 }
@@ -574,7 +599,7 @@ public partial class AzureBlobService : IBlobStorageService
             // Compare sizes first (fast rejection)
             if (storedData.Length != expectedData.Length)
             {
-                Log($"CRITICAL: Hash collision detected! Chunk {chunkHash[..8]}... has different sizes: " +
+                Log($"CRITICAL: Hash collision detected! Chunk {chunkHash[..Math.Min(16, chunkHash.Length)]}... has different sizes: " +
                     $"expected {expectedData.Length}, stored {storedData.Length}");
                 throw new HashCollisionException(chunkHash, expectedData.Length, storedData.Length);
             }
@@ -582,7 +607,7 @@ public partial class AzureBlobService : IBlobStorageService
             // Compare data byte-by-byte using constant-time comparison to prevent timing attacks
             if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(storedData, expectedData.Span))
             {
-                Log($"CRITICAL: Hash collision detected! Chunk {chunkHash[..8]}... has same hash but different content");
+                Log($"CRITICAL: Hash collision detected! Chunk {chunkHash[..Math.Min(16, chunkHash.Length)]}... has same hash but different content");
                 throw new HashCollisionException(chunkHash,
                     "Content differs despite matching hash and size. This may indicate data corruption or tampering.");
             }
@@ -786,6 +811,7 @@ public partial class AzureBlobService : IBlobStorageService
                 // corrupted bytes, so re-encrypting would be wasted CPU.
                 if (isMd5Mismatch && reEncrypt != null)
                 {
+                    Interlocked.Increment(ref _totalCrcRetries);
                     (data, dataLength) = reEncrypt();
                     Log($"{logContext}: MD5 mismatch on attempt {attempt}/{MaxUploadRetries}, re-encrypted for retry");
                 }
@@ -871,6 +897,8 @@ public partial class AzureBlobService : IBlobStorageService
 
         if (!crcValid)
         {
+            Interlocked.Increment(ref _totalCrcFailures);
+
             // Fingerprint the inputs so we can rule out buffer corruption between
             // EncryptInto and ValidateCrc. plainMd5 and the envelope head/tail
             // hex make it possible to triage encrypt-side bugs from logs alone.
@@ -921,7 +949,7 @@ public partial class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, rentedBuffer, encryptedLength, options,
-            $"{caller}({chunkHash[..8]}...)",
+            $"{caller}({chunkHash[..Math.Min(16, chunkHash.Length)]}...)",
             reEncrypt: () =>
             {
                 var len = _encryptionService.EncryptInto(originalPlaintext.Span, rentedBuffer);
@@ -971,6 +999,8 @@ public partial class AzureBlobService : IBlobStorageService
 
         if (!crcValid)
         {
+            Interlocked.Increment(ref _totalCrcFailures);
+
             var headLen = Math.Min(17, encryptedData.Length);
             var tailLen = Math.Min(20, encryptedData.Length);
             var headHex = Convert.ToHexString(encryptedData[..headLen]);

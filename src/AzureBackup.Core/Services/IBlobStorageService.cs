@@ -24,6 +24,22 @@ public interface IBlobStorageService : IAsyncDisposable
     /// </summary>
     int TotalOperations { get; }
 
+    /// <summary>
+    /// Cumulative count of CRC validation failures observed since the
+    /// service was created. Bumped on both upload (post-encrypt CRC check)
+    /// and download (pre-decrypt CRC check) paths. Operations code
+    /// snapshots this around each op for <c>OperationMetrics.CrcFailCount</c>.
+    /// </summary>
+    long TotalCrcFailures { get; }
+
+    /// <summary>
+    /// Cumulative count of upload retries triggered by an MD5/CRC mismatch
+    /// reported by the BlobClient pipeline. Distinguished from generic
+    /// transient retries so a CRC regression is observable as a clean
+    /// per-op delta.
+    /// </summary>
+    long TotalCrcRetries { get; }
+
     #region Connection Methods
 
     /// <summary>

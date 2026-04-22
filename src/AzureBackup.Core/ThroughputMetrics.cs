@@ -276,6 +276,26 @@ public sealed class OperationMetrics : MetricsRecord
 
     /// <summary>Total MemoryBudget stalls across all files.</summary>
     public int BudgetStalls { get; set; }
+
+    /// <summary>
+    /// Count of CRC validation failures observed during this operation.
+    /// Incremented by <c>AzureBlobService.EncryptAndDiagnose</c> (post-encrypt
+    /// CRC check) and <c>VerifyDownloadIntegrity</c> (pre-decrypt CRC check).
+    /// A non-zero value here is the primary signal for the suspected
+    /// CRC-in-encryption bug being investigated by the production test --
+    /// see the matching <c>[CRC FAIL]</c> entries in the per-file .diag files
+    /// (use <c>SessionId</c> to correlate).
+    /// </summary>
+    public int CrcFailCount { get; set; }
+
+    /// <summary>
+    /// Count of upload retries triggered by an integrity-check failure on
+    /// the wire (MD5 mismatch detected by the BlobClient transfer pipeline).
+    /// Distinguished from <see cref="Retries"/> (which counts transient
+    /// network/throttling retries) so a regression in CRC behaviour shows
+    /// up as a clean delta against historical runs.
+    /// </summary>
+    public int CrcRetryCount { get; set; }
 }
 
 /// <summary>

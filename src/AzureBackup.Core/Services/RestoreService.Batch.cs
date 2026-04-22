@@ -186,6 +186,8 @@ public partial class RestoreService
         MirrorSyncResult result = new();
         var fileList = backupFiles.ToList();
         var mirrorStopwatch = Stopwatch.StartNew();
+        var crcFailStart = _blobService.TotalCrcFailures;
+        var crcRetryStart = _blobService.TotalCrcRetries;
 
         // Normalize paths
         sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -375,7 +377,9 @@ public partial class RestoreService
             Bytes = mirrorBytes,
             ElapsedSeconds = mirrorElapsed,
             ThroughputMbps = mirrorElapsed > 0 ? mirrorBytes / mirrorElapsed / (1024 * 1024) : 0,
-            FileConcurrency = MaxParallelFileRestores
+            FileConcurrency = MaxParallelFileRestores,
+            CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
         });
 
         return result;
@@ -706,6 +710,8 @@ public partial class RestoreService
 
         var fileList = filesWithPaths.ToList();
         var opStopwatch = Stopwatch.StartNew();
+        var crcFailStart = _blobService.TotalCrcFailures;
+        var crcRetryStart = _blobService.TotalCrcRetries;
 
         Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping (parallel)");
         StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
@@ -738,7 +744,9 @@ public partial class RestoreService
             ThroughputMbps = opElapsed > 0 ? result.TotalBytesRestored / opElapsed / (1024 * 1024) : 0,
             FileConcurrency = MaxParallelFileRestores,
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
-            BudgetStalls = (int)memoryBudget.StallCount
+            BudgetStalls = (int)memoryBudget.StallCount,
+            CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
         });
 
         StatusChanged?.Invoke(this, BuildRestoreStatusMessage(result));

@@ -442,7 +442,7 @@ public partial class ChunkIndexService
             var entry = _databaseService.GetChunkIndexEntry(hash);
             if (entry == null)
             {
-                Log($"WARNING: Chunk {hash[..8]}... not found in index after backup!");
+                Log($"WARNING: Chunk {hash[..Math.Min(16, hash.Length)]}... not found in index after backup!");
                 continue;
             }
 
@@ -453,7 +453,7 @@ public partial class ChunkIndexService
             if (!referencingFiles.Any(r =>
                 r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)))
             {
-                Log($"WARNING: File {filePath} not found in references for chunk {hash[..8]}...");
+                Log($"WARNING: File {filePath} not found in references for chunk {hash[..Math.Min(16, hash.Length)]}...");
             }
         }
     }

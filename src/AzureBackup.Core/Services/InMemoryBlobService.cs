@@ -37,6 +37,12 @@ public class InMemoryBlobService : IBlobStorageService
 
     public long TotalBytesUploaded => Interlocked.Read(ref _totalBytesUploaded);
     public int TotalOperations => Volatile.Read(ref _totalOperations);
+
+    // The in-memory backend never produces CRC failures (no network round-trip,
+    // no real encryption layer involved in storage). These return 0 so test
+    // code that snapshots them around an op gets a clean delta of 0.
+    public long TotalCrcFailures => 0;
+    public long TotalCrcRetries => 0;
     
     /// <summary>
     /// Gets all stored blob names (for test verification).

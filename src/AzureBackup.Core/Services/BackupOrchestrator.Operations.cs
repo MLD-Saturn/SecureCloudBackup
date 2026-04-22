@@ -222,6 +222,11 @@ public partial class BackupOrchestrator
         Log($"MirrorSyncToAzureAsync: Starting mirror sync from '{localFolder.Path}' to Azure");
         MirrorSyncResult result = new();
         var mirrorAzureStopwatch = Stopwatch.StartNew();
+        // Snapshot CRC counters so we can record the per-op delta in the
+        // OperationMetrics record below. Process-cumulative counters would
+        // grow monotonically across runs and obscure regressions.
+        var crcFailStart = _blobService.TotalCrcFailures;
+        var crcRetryStart = _blobService.TotalCrcRetries;
 
         StatusChanged?.Invoke(this, $"Mirror sync: scanning {localFolder.Path}");
 
@@ -359,7 +364,9 @@ public partial class BackupOrchestrator
             ElapsedSeconds = mirrorElapsed,
             ThroughputMbps = mirrorElapsed > 0 ? result.BytesTransferred / mirrorElapsed / (1024 * 1024) : 0,
             FileConcurrency = MaxParallelFileBackups,
-            MemoryBudgetMb = filesToBackup.Count > 0 ? (int)(_databaseService.GetConfiguration().MemoryLimitMB) : 0
+            MemoryBudgetMb = filesToBackup.Count > 0 ? (int)(_databaseService.GetConfiguration().MemoryLimitMB) : 0,
+            CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
         });
 
         return result;
@@ -539,6 +546,8 @@ public partial class BackupOrchestrator
         ArgumentNullException.ThrowIfNull(filePaths);
 
         var opStopwatch = Stopwatch.StartNew();
+        var crcFailStart = _blobService.TotalCrcFailures;
+        var crcRetryStart = _blobService.TotalCrcRetries;
 
         var config = _databaseService.GetConfiguration();
         using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
@@ -577,7 +586,9 @@ public partial class BackupOrchestrator
             ElapsedSeconds = opElapsed,
             ThroughputMbps = opElapsed > 0 ? processedBytes / opElapsed / (1024 * 1024) : 0,
             FileConcurrency = MaxParallelFileBackups,
-            MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024))
+            MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
+            CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
         });
     }
 
