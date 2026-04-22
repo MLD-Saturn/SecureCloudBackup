@@ -166,6 +166,41 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// Bundles every diagnostic artefact in the data directory into a single
+    /// ZIP and writes it next to the data dir for easy hand-off when filing
+    /// a bug report. Pre-X4 the tester had to navigate to a hidden
+    /// <c>%LOCALAPPDATA%\AzureBackup</c> folder, pick the right daily log,
+    /// then dive into <c>diagnostics\</c> and <c>metrics\</c> subdirectories
+    /// separately. The bundle excludes the encrypted database, salt files,
+    /// and migration .bak artefacts so it is safe to attach to a public
+    /// issue tracker.
+    /// </summary>
+    [RelayCommand]
+    private void ExportDiagnosticBundle()
+    {
+        try
+        {
+            // Place the bundle alongside the data dir (one level up) so it's
+            // not part of the next bundle if the tester captures twice.
+            var dataDir = AppMode.DataDirectory;
+            var parentDir = System.IO.Path.GetDirectoryName(dataDir.TrimEnd(
+                System.IO.Path.DirectorySeparatorChar,
+                System.IO.Path.AltDirectorySeparatorChar)) ?? dataDir;
+
+            var bundlePath = AzureBackup.Core.DiagnosticBundleExporter.Export(
+                dataDir, parentDir, Program.Logger?.SessionId);
+
+            AddLog($"Diagnostic bundle exported: {bundlePath}");
+            StatusMessage = $"Bundle saved to {bundlePath}";
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Export failed: {ex.GetType().Name}: {ex.Message}");
+            StatusMessage = $"Export failed: {ex.Message}";
+        }
+    }
+
+    /// <summary>
     /// Initiates the reset process - requires confirmation.
     /// </summary>
     [RelayCommand]

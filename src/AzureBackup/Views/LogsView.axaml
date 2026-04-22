@@ -9,7 +9,7 @@
 
     <Border Classes="card">
         <Grid RowDefinitions="Auto,*">
-            <Grid ColumnDefinitions="*,Auto,Auto">
+            <Grid ColumnDefinitions="*,Auto,Auto,Auto">
                 <TextBlock Text="Activity Log" FontSize="18" FontWeight="SemiBold"/>
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4" Margin="0,0,12,0"
                             VerticalAlignment="Center">
@@ -23,7 +23,10 @@
                         </Panel>
                     </ToggleButton>
                 </StackPanel>
-                <Button Grid.Column="2" Content="Clear Logs" Command="{Binding ClearLogsCommand}"/>
+                <Button Grid.Column="2" Content="Export Bundle" Margin="0,0,8,0"
+                        Command="{Binding ExportDiagnosticBundleCommand}"
+                        ToolTip.Tip="Bundle all logs, .diag files, and throughput metrics into a single ZIP for sharing in a bug report. Excludes the encrypted database and salt files."/>
+                <Button Grid.Column="3" Content="Clear Logs" Command="{Binding ClearLogsCommand}"/>
             </Grid>
             <ListBox Grid.Row="1" x:Name="LogListBox"
                      ItemsSource="{Binding LogMessages}"
