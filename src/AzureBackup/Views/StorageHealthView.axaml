@@ -17,8 +17,11 @@
                         <TextBlock Text="Storage Health" FontSize="20" FontWeight="Bold" VerticalAlignment="Center"/>
                         <TextBlock Text="{Binding StatusMessage}" VerticalAlignment="Center" Opacity="0.7" Margin="16,0,0,0"/>
                     </StackPanel>
-                    
-                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+
+                    <!-- D4 fix 2.1: WrapPanel so the action buttons reflow to a
+                         second row at >100% display scaling instead of clipping
+                         when the title bar is narrower than the sum of widths. -->
+                    <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemSpacing="8" LineSpacing="6">
                         <Button Content="Refresh" Command="{Binding RefreshSummaryCommand}"
                                 ToolTip.Tip="Refresh index statistics"/>
                         <Button Content="Rebuild Index" Command="{Binding RebuildIndexCommand}"
@@ -29,7 +32,7 @@
                                 ToolTip.Tip="Open the Data Integrity tab to verify backed-up files against Azure storage. The tab persists for the rest of the session so you can return to historical results."/>
                         <Button Content="Cancel" Command="{Binding CancelOperationCommand}"
                                 IsVisible="{Binding IsOperationInProgress}"/>
-                    </StackPanel>
+                    </WrapPanel>
                 </Grid>
                 
                 <!-- Progress Bar -->

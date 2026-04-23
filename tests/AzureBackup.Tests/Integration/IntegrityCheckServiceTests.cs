@@ -202,6 +202,43 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task EnvelopeCorruption_SameSize_T1Passes_KnownLimitation()
+    {
+        // KNOWN LIMITATION (D6 follow-up): the cheap T1 (HEAD-only) tier
+        // cannot detect envelope-internal corruption when the encrypted
+        // blob length is unchanged. T1 currently fetches ContentLength
+        // and Azure-side ContentHash via GetChunkPropertiesAsync but
+        // DISCARDS the hash because the engine has nowhere to compare
+        // it against -- the upload-time MD5 is not persisted in the
+        // local DB. To catch the production CRC bug from this cheap
+        // tier we would need to persist that MD5 at backup time and add
+        // an MD5 comparison to T1. This test pins the current behaviour
+        // so a future change is loud.
+        var f = await SeedOneFileAsync("envelope-crc.bin", RandomBytes(4096));
+        var blobName = $"chunks/{f.Chunks[0].Hash}";
+        // Flip a byte deep inside the encrypted payload (past the 17-byte
+        // envelope header and inside the AES-GCM ciphertext region) so
+        // the size stays identical but the bytes are corrupt.
+        _blobService.TestOnlyCorruptByte(blobName, byteIndex: 25);
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "T2 envelope corruption",
+            AutoExportBundleOnFailure = false
+        });
+
+        // CURRENT BEHAVIOUR (the gap): T1 sees the right ContentLength
+        // and skips T2/T3, so the corrupt chunk is reported as PASSING.
+        // FilesPassed == 1 is the warning sign that the cheap tier
+        // missed real corruption. When D6 ships an MD5-aware T1, this
+        // assertion flips to expect FilesFailedT1 >= 1 (or T2 if T1
+        // escalates).
+        Assert.Equal(1, result.Run.FilesPassed);
+        Assert.Equal(0, result.Run.FilesFailedT1 + result.Run.FilesFailedT2 + result.Run.FilesFailedT3);
+    }
+
+    [Fact]
     public async Task ReCheckFailures_ProducesChildRun_WithParentLineage()
     {
         // D3 lineage: ReCheckFailuresAsync feeds the parent's failed

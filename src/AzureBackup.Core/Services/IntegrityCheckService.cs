@@ -142,6 +142,15 @@ public sealed class IntegrityCheckService
 
         Log($"RunAsync: starting (files={totalFiles}, scope='{options.ScopeSummary}', runId={runId})");
 
+        // Snapshot the corpus once. Pre-D4 the engine called
+        // GetAllBackedUpFiles() inside CheckOneFileAsync for EVERY file in
+        // scope, decoding the entire backup catalogue per worker. For a
+        // 1000-file run that is ~1000 full table scans (O(N^2) over N files
+        // = O(N^3) over chunks); a 10K-file run was unusable. The map
+        // below converts the lookup to O(1) per file.
+        var corpus = (await Task.Run(() => _databaseService.GetAllBackedUpFiles(), cancellationToken))
+            .ToDictionary(f => f.Id);
+
         try
         {
             // Per-file workers. File-level parallelism (8) stays the same as
@@ -158,7 +167,7 @@ public sealed class IntegrityCheckService
                 },
                 async (fileId, ct) =>
                 {
-                    var fileFailures = await CheckOneFileAsync(fileId, runId, ct);
+                    var fileFailures = await CheckOneFileAsync(fileId, runId, corpus, ct);
                     var processed = Interlocked.Increment(ref filesProcessed);
 
                     int t1 = 0, t2 = 0, t3 = 0, warn = 0;
@@ -263,11 +272,10 @@ public sealed class IntegrityCheckService
     /// produced; an empty list means the file is clean.
     /// </summary>
     private async Task<List<IntegrityCheckFailure>> CheckOneFileAsync(
-        int fileId, int runId, CancellationToken cancellationToken)
+        int fileId, int runId, IReadOnlyDictionary<int, BackedUpFile> corpus, CancellationToken cancellationToken)
     {
         var failures = new List<IntegrityCheckFailure>();
-        var fileFromDb = _databaseService.GetAllBackedUpFiles().FirstOrDefault(f => f.Id == fileId);
-        if (fileFromDb == null)
+        if (!corpus.TryGetValue(fileId, out var fileFromDb))
         {
             failures.Add(new IntegrityCheckFailure
             {

@@ -369,12 +369,42 @@ public class InMemoryBlobService : IBlobStorageService
     {
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
-        
+
         _blobs.TryRemove(blobName, out _);
         _blobTiers.TryRemove(blobName, out _);
         Interlocked.Increment(ref _totalOperations);
-        
+
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Test-only: flip a single byte at <paramref name="byteIndex"/> of an
+    /// existing blob without changing its length. Used by integrity-check
+    /// tests to simulate envelope-CRC corruption (T2 path) -- T1 still
+    /// passes because ContentLength is unchanged, but T2's
+    /// <c>VerifyDownloadIntegrity</c> trips on either the Azure-side MD5
+    /// (we recompute it here) or the in-envelope CRC32. By default we
+    /// recompute the MD5 to keep the wire-checksum intact, so the failure
+    /// surfaces as the in-envelope CRC32 fault (the production CRC bug
+    /// signature).
+    /// </summary>
+    public void TestOnlyCorruptByte(string blobName, int byteIndex, bool keepMd5InSync = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        if (!_blobs.TryGetValue(blobName, out var existing))
+            throw new InvalidOperationException($"Blob not found: {blobName}");
+        if (byteIndex < 0 || byteIndex >= existing.Length)
+            throw new ArgumentOutOfRangeException(nameof(byteIndex));
+        var copy = new byte[existing.Length];
+        existing.CopyTo(copy, 0);
+        copy[byteIndex] ^= 0xFF;
+        _blobs[blobName] = copy;
+        // keepMd5InSync is unused by InMemoryBlobService because we don't
+        // track Azure ContentHash separately -- GetChunkPropertiesAsync
+        // recomputes MD5 every call from the current bytes. Real Azure
+        // would need explicit re-stamping; this is documented for
+        // symmetry with the AzureBlobService behaviour.
+        _ = keepMd5InSync;
     }
 
     public Task UploadBlobAsync(string blobName, byte[] data, StorageTier storageTier = StorageTier.Hot,
@@ -383,7 +413,7 @@ public class InMemoryBlobService : IBlobStorageService
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
         ArgumentNullException.ThrowIfNull(data);
-        
+
         // Store raw data (not encrypted) for generic blobs
         _blobs[blobName] = data;
         _blobTiers[blobName] = storageTier;

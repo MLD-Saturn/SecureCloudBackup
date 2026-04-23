@@ -16,34 +16,36 @@
             </StackPanel>
         </Border>
 
-        <!-- Scope panel: dropdown + auto-export toggle + action buttons -->
+        <!-- Scope panel: dropdown + auto-export toggle + action buttons.
+             Layout uses WrapPanel so buttons reflow onto a second row at
+             >100% display scaling instead of clipping or overlapping
+             siblings (D4 review fix 2.1/2.2/2.3). -->
         <Border Grid.Row="1" Classes="card" Margin="0,0,0,8">
-            <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" RowDefinitions="Auto,Auto">
-                <TextBlock Grid.Row="0" Grid.Column="0" Text="Scope:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <ComboBox Grid.Row="0" Grid.Column="1"
-                          ItemsSource="{Binding ScopeOptions}"
-                          SelectedItem="{Binding SelectedScopePreset, Mode=TwoWay}"
-                          MinWidth="240" HorizontalAlignment="Left"/>
-                <CheckBox Grid.Row="0" Grid.Column="2"
-                          Content="Auto-export bundle on failure"
-                          IsChecked="{Binding AutoExportBundleOnFailure}"
-                          ToolTip.Tip="When any failure occurs, automatically write a diagnostic bundle ZIP next to the data directory."
-                          Margin="16,0,16,0" VerticalAlignment="Center"/>
-                <Button Grid.Row="0" Grid.Column="3" Content="Check Now"
-                        Command="{Binding CheckNowCommand}" Margin="0,0,8,0"/>
-                <Button Grid.Row="0" Grid.Column="4" Content="Cancel"
-                        Command="{Binding CancelCommand}"/>
-
-                <Button Grid.Row="1" Grid.Column="4" Content="Re-check failures"
-                        Command="{Binding ReCheckFailuresOfSelectedCommand}"
-                        Margin="0,8,0,0" HorizontalAlignment="Right"
-                        ToolTip.Tip="Run a focused integrity check against the failures of the selected History run (or the latest run if none selected). Same operation type; the new run records its lineage via ParentRunId."
-                        IsVisible="{Binding HasFailures}"/>
-
-                <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="5"
-                           Margin="0,8,0,0" Opacity="0.7" FontSize="12"
+            <StackPanel Orientation="Vertical" Spacing="6">
+                <WrapPanel Orientation="Horizontal" ItemSpacing="8" LineSpacing="6">
+                    <StackPanel Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                        <TextBlock Text="Scope:" VerticalAlignment="Center"/>
+                        <ComboBox ItemsSource="{Binding ScopeOptions}"
+                                  SelectedItem="{Binding SelectedScopePreset, Mode=TwoWay}"
+                                  MinWidth="200"/>
+                    </StackPanel>
+                    <CheckBox Content="Auto-export bundle on failure"
+                              IsChecked="{Binding AutoExportBundleOnFailure}"
+                              ToolTip.Tip="When any failure occurs, automatically write a diagnostic bundle ZIP next to the data directory. Encrypted DB, salt, and other sensitive files are redacted from the bundle."
+                              VerticalAlignment="Center"/>
+                    <Button Content="_Check Now"
+                            Command="{Binding CheckNowCommand}"/>
+                    <Button Content="Cancel"
+                            Command="{Binding CancelCommand}"
+                            IsVisible="{Binding IsOperationInProgress}"/>
+                    <Button Content="Re-check failures"
+                            Command="{Binding ReCheckFailuresOfSelectedCommand}"
+                            ToolTip.Tip="Run a focused integrity check against the failures of the selected History run (or the latest run if none selected). Same operation type; the new run records its lineage via ParentRunId."
+                            IsVisible="{Binding HasFailures}"/>
+                </WrapPanel>
+                <TextBlock Opacity="0.7" FontSize="12" TextWrapping="Wrap"
                            Text="{Binding SelectedFileCount, StringFormat='{}{0} file(s) selected. Choosing a preset auto-checks matching files; toggling files manually switches the dropdown to (Custom selection).'}"/>
-            </Grid>
+            </StackPanel>
         </Border>
 
         <!-- File tree panel -->
