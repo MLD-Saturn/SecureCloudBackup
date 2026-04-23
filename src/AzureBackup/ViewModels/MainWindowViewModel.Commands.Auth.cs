@@ -862,9 +862,33 @@ public partial class MainWindowViewModel
         {
             return (false, ex.Message);
         }
+        catch (AzureBackup.Core.InsufficientMemoryForKdfException ex)
+        {
+            // B11: NOT a wrong-password situation; do not consume an
+            // attempt counter on the user's behalf. Surface the message
+            // verbatim so the user sees the actionable hint ("close
+            // other apps / restart").
+            AddLog($"Unlock failed (memory pressure): {ex.Message}");
+            if (ex.InnerException != null)
+            {
+                AddLog($"  Underlying: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+            }
+            return (false, ex.Message);
+        }
         catch (AzureBackup.Core.InvalidPasswordException)
         {
             return (false, "Invalid password");
+        }
+        catch (System.Exception ex) when (
+            ex is OutOfMemoryException)
+        {
+            // Defensive: an OOM that escapes the SqliteBackend's typed
+            // wrapping (e.g. from EncryptionService.Initialize, which
+            // also runs Argon2id) reaches here as the raw runtime
+            // exception. Render with the same "actionable" message
+            // shape.
+            AddLog($"Unlock failed (memory pressure): {ex.GetType().Name}: {ex.Message}");
+            return (false, "Insufficient memory for key derivation. Close other applications and try again.");
         }
         catch (System.Exception ex) when (
             ex is OverflowException ||

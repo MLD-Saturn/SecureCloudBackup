@@ -89,17 +89,41 @@ public class EncryptionService : IDisposable
         var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
-            using Argon2id argon2 = new(passwordBytes)
+            // B11: same OOM-fallback ladder as SqliteBackend.DeriveKeyFromPassword.
+            // The unlock flow runs both KDFs back-to-back so a memory-
+            // constrained machine that just barely survived the SqliteBackend
+            // pass would otherwise OOM here. Halving DegreeOfParallelism
+            // preserves the deterministic key (same password+salt+memory
+            // +iterations always produces the same bytes).
+            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            Exception? lastOom = null;
+            foreach (var lanes in parallelismLadder)
             {
-                Salt = salt,
-                DegreeOfParallelism = Argon2DegreeOfParallelism,
-                MemorySize = Argon2MemorySize,
-                Iterations = Argon2Iterations
-            };
-
-            var result = await argon2.GetBytesAsync(KeySize);
-            Log("DeriveKeyAsync: Key derivation completed");
-            return result;
+                try
+                {
+                    using Argon2id argon2 = new(passwordBytes)
+                    {
+                        Salt = salt,
+                        DegreeOfParallelism = lanes,
+                        MemorySize = Argon2MemorySize,
+                        Iterations = Argon2Iterations
+                    };
+                    var result = await argon2.GetBytesAsync(KeySize);
+                    Log($"DeriveKeyAsync: Key derivation completed (lanes={lanes})");
+                    return result;
+                }
+                catch (OutOfMemoryException ex)
+                {
+                    lastOom = ex;
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+            }
+            throw new InsufficientMemoryForKdfException(
+                $"Unable to derive the encryption key: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
+                "Argon2id working memory even at parallelism=1. Close other applications and try again, " +
+                "or restart the machine to free fragmented memory.",
+                lastOom);
         }
         finally
         {
@@ -215,15 +239,33 @@ public class EncryptionService : IDisposable
         var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
-            using Argon2id argon2 = new(passwordBytes)
+            // B11: same OOM-fallback ladder as DeriveKeyAsync above.
+            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            Exception? lastOom = null;
+            foreach (var lanes in parallelismLadder)
             {
-                Salt = verificationSalt,
-                DegreeOfParallelism = Argon2DegreeOfParallelism,
-                MemorySize = Argon2MemorySize,
-                Iterations = Argon2Iterations
-            };
-
-            return await argon2.GetBytesAsync(32);
+                try
+                {
+                    using Argon2id argon2 = new(passwordBytes)
+                    {
+                        Salt = verificationSalt,
+                        DegreeOfParallelism = lanes,
+                        MemorySize = Argon2MemorySize,
+                        Iterations = Argon2Iterations
+                    };
+                    return await argon2.GetBytesAsync(32);
+                }
+                catch (OutOfMemoryException ex)
+                {
+                    lastOom = ex;
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+            }
+            throw new InsufficientMemoryForKdfException(
+                $"Unable to derive the verification hash: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
+                "Argon2id working memory even at parallelism=1.",
+                lastOom);
         }
         finally
         {

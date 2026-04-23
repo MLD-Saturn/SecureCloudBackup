@@ -2287,14 +2287,57 @@ internal sealed class SqliteBackend : IDatabaseBackend
         var passwordBytes = PasswordBytes.FromChars(password);
         try
         {
-            using var argon2 = new Argon2id(passwordBytes)
+            // B11: Argon2id allocates roughly MemorySize-KB * DegreeOfParallelism
+            // working memory in a single contiguous block. With our defaults
+            // (64 MB * 8 lanes ~= 512 MB) this fails with OutOfMemoryException
+            // on memory-constrained environments (debugger + Diagnostic
+            // Tools window + other apps). Real bug observed by tester:
+            // "Unlock failed: Insufficient memory to continue the execution
+            // of the program." - the user could not unlock the app at all.
+            //
+            // Strategy: try the secure default first; on OOM progressively
+            // halve the parallelism (8 -> 4 -> 2 -> 1). MemorySize stays
+            // constant so the security strength of the KDF is preserved
+            // (Argon2id's resistance is dominated by total memory, not lane
+            // count). DerivedKey is identical regardless of parallelism
+            // because Konscious treats DegreeOfParallelism as a parallelism
+            // hint inside a deterministic algorithm; the same (password,
+            // salt, memory, iterations) tuple always produces the same key.
+            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            Exception? lastOom = null;
+            foreach (var lanes in parallelismLadder)
             {
-                Salt = salt,
-                DegreeOfParallelism = Argon2DegreeOfParallelism,
-                MemorySize = Argon2MemorySize,
-                Iterations = Argon2Iterations,
-            };
-            return argon2.GetBytes(DerivedKeySize);
+                try
+                {
+                    using var argon2 = new Argon2id(passwordBytes)
+                    {
+                        Salt = salt,
+                        DegreeOfParallelism = lanes,
+                        MemorySize = Argon2MemorySize,
+                        Iterations = Argon2Iterations,
+                    };
+                    return argon2.GetBytes(DerivedKeySize);
+                }
+                catch (OutOfMemoryException ex)
+                {
+                    lastOom = ex;
+                    // Try the next ladder rung. GC.Collect() between attempts
+                    // reclaims any partially-allocated working buffers from
+                    // the failed Argon2id instance so the next attempt has
+                    // the maximum chance of succeeding.
+                    GC.Collect();
+                    GC.WaitForPendingFinalizers();
+                }
+            }
+            // Every rung failed. The message must NOT pretend this is a
+            // wrong-password situation -- the user cannot fix it by typing
+            // again. Re-throw a typed exception the unlock VM can render
+            // with a useful diagnostic.
+            throw new InsufficientMemoryForKdfException(
+                $"Unable to derive the database key: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
+                $"Argon2id working memory even at parallelism=1. Close other applications and try again, " +
+                $"or restart the machine to free fragmented memory.",
+                lastOom);
         }
         finally
         {

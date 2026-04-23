@@ -72,6 +72,20 @@ public class InvalidPasswordException : Exception
 }
 
 /// <summary>
+/// B11: Argon2id key derivation could not allocate its working memory
+/// even after stepping the parallelism down to 1. Distinct from
+/// <see cref="InvalidPasswordException"/> on purpose -- the user cannot
+/// fix this by retyping the password; they need to free RAM or
+/// restart. The unlock UI surfaces the inner OOM details so a tester
+/// can quote them when reporting environment-specific failures.
+/// </summary>
+public class InsufficientMemoryForKdfException : Exception
+{
+    public InsufficientMemoryForKdfException(string message, Exception? innerException = null)
+        : base(message, innerException) { }
+}
+
+/// <summary>
 /// Exception thrown when Azure rejects an operation because of authentication or
 /// authorization failure (HTTP 401 / 403, or an <c>AuthenticationFailedException</c>
 /// from the Azure SDK). Carries the original Azure error for diagnostics so callers
