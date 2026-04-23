@@ -117,13 +117,39 @@ internal sealed class SqliteBackend : IDatabaseBackend
             Directory.CreateDirectory(directory);
         }
 
+        // B10: snapshot DB existence BEFORE LoadOrCreateSalt; the salt
+        // file write is a side effect we tolerate (we wrap it in a try/
+        // catch + delete-on-failure below) but creating an empty
+        // backup.db on a wrong-password attempt is not. The previous
+        // SqliteOpenMode.ReadWriteCreate default would silently create
+        // an empty SQLite file the moment connection.Open() ran, BEFORE
+        // any key validation -- which then fooled subsequent app
+        // launches into showing the unlock prompt instead of first-run
+        // setup. Real bug observed by tester.
+        var dbExistedBeforeOpen = File.Exists(databasePath);
+        var saltExistedBeforeOpen = File.Exists(GetSaltFilePath(databasePath));
+
         var salt = LoadOrCreateSalt(databasePath);
         var derivedKey = DeriveKeyFromPassword(password, salt);
         try
         {
-            OpenAndUnlock(databasePath, derivedKey);
+            OpenAndUnlock(databasePath, derivedKey, dbExistedBeforeOpen);
             ApplyPragmas();
             CreateSchema();
+        }
+        catch
+        {
+            // B10: clean up the salt file we just wrote if (a) the DB
+            // didn't exist before AND (b) we failed to initialise. This
+            // prevents the side-effect chain where a wrong-password on a
+            // fresh install left a .salt file behind that then mis-paired
+            // with a future legitimate backup.db. Files we did NOT just
+            // write are left alone.
+            if (!saltExistedBeforeOpen)
+            {
+                try { File.Delete(GetSaltFilePath(databasePath)); } catch { /* best effort */ }
+            }
+            throw;
         }
         finally
         {
@@ -2276,13 +2302,19 @@ internal sealed class SqliteBackend : IDatabaseBackend
         }
     }
 
-    private void OpenAndUnlock(string databasePath, byte[] derivedKey)
+    private void OpenAndUnlock(string databasePath, byte[] derivedKey, bool dbExistedBeforeOpen)
     {
-        // The writer always wants a read/write connection; the pre-existence
-        // probe writes to the WAL on first open. Read-only callers (pool)
-        // get their own connections via OpenAndUnlockReadOnlyForBenchmark.
+        // B10: only allow Create when there is no DB on disk yet. A
+        // wrong-password attempt against an EXISTING database must not
+        // be able to write a fresh empty file as a side effect; using
+        // SqliteOpenMode.ReadWrite (no Create) means connection.Open()
+        // throws SqliteException(14, "unable to open database file") on
+        // a missing file rather than silently creating one.
+        var mode = dbExistedBeforeOpen
+            ? SqliteOpenMode.ReadWrite
+            : SqliteOpenMode.ReadWriteCreate;
         _connection = OpenAndUnlockCore(
-            databasePath, derivedKey, SqliteOpenMode.ReadWriteCreate, validateKey: true);
+            databasePath, derivedKey, mode, validateKey: true);
     }
 
     /// <summary>

@@ -9,14 +9,48 @@ namespace AzureBackup.Core.Services;
 public partial class LocalDatabaseService
 {
     /// <summary>
-    /// Checks if a database file exists at the given path.
-    /// Used to determine if this is a new user or returning user before password entry.
+    /// Checks if a usable encrypted database file exists at the given
+    /// path. Used to decide between first-run setup and unlock prompt.
     /// </summary>
-    /// <param name="databasePath">Path to check for database file</param>
-    /// <returns>True if database file exists</returns>
+    /// <remarks>
+    /// B10 hardening: the pre-fix implementation was just <c>File.Exists</c>,
+    /// which meant a 0-byte stub file (e.g. left behind by a partial
+    /// pre-fix unlock attempt that crashed after <c>connection.Open()</c>
+    /// but before any pages were written) would mis-route the user into
+    /// the unlock prompt forever. We now require:
+    /// <list type="number">
+    ///   <item>The .db file exists.</item>
+    ///   <item>The .salt sidecar exists (no salt = no key derivation).</item>
+    ///   <item>The .db is at least 4096 bytes (one SQLite page; an
+    ///         empty/stub file fails this).</item>
+    /// </list>
+    /// Returning false routes the user into first-run setup, where
+    /// CleanupStaleArtifacts (called from the same path) will TrySecureDelete
+    /// any stub files so the next launch starts truly fresh.
+    /// </remarks>
     public static bool DatabaseExists(string databasePath)
     {
-        return File.Exists(databasePath);
+        if (string.IsNullOrWhiteSpace(databasePath)) return false;
+        if (!File.Exists(databasePath)) return false;
+
+        // SQLite header is 100 bytes; a freshly-keyed file with one
+        // table is ~32 KB. 4096 (one page) is a defensive lower bound
+        // that catches genuine stub files without false-negative-ing
+        // a real DB.
+        try
+        {
+            var len = new FileInfo(databasePath).Length;
+            if (len < 4096) return false;
+        }
+        catch
+        {
+            return false;
+        }
+
+        // No salt = no possible decryption. Treat as not-a-database.
+        if (!File.Exists(GetSaltFilePath(databasePath))) return false;
+
+        return true;
     }
 
     /// <summary>
