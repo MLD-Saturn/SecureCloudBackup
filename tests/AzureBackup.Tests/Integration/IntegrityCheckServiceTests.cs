@@ -160,6 +160,83 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AutoExportBundle_OnAnyFailure_PopulatesDiagBundlePath()
+    {
+        // D3 invariant: when any failure occurs AND
+        // AutoExportBundleOnFailure is true (the default), the engine
+        // writes a bundle ZIP and stamps its path on the run row. The
+        // bundle is the artefact a tester attaches to a bug report.
+        var f = await SeedOneFileAsync("auto-bundle.bin", RandomBytes(2048));
+        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "Auto-bundle test",
+            AutoExportBundleOnFailure = true
+        });
+
+        Assert.True(result.Run.FilesFailedT1 > 0);
+        Assert.NotNull(result.Run.DiagBundlePath);
+        Assert.True(File.Exists(result.Run.DiagBundlePath!),
+            $"Bundle should exist at {result.Run.DiagBundlePath}");
+    }
+
+    [Fact]
+    public async Task AutoExportBundle_Disabled_DoesNotProduceBundlePath()
+    {
+        // Verifies the per-options opt-out: when AutoExportBundleOnFailure
+        // is false, no bundle is produced even on failure.
+        var f = await SeedOneFileAsync("no-bundle.bin", RandomBytes(2048));
+        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "Opt-out",
+            AutoExportBundleOnFailure = false
+        });
+
+        Assert.True(result.Run.FilesFailedT1 > 0);
+        Assert.Null(result.Run.DiagBundlePath);
+    }
+
+    [Fact]
+    public async Task ReCheckFailures_ProducesChildRun_WithParentLineage()
+    {
+        // D3 lineage: ReCheckFailuresAsync feeds the parent's failed
+        // FileIds back into a new run, with ParentRunId stamped so the
+        // History expander can show the relationship.
+        var bad = await SeedOneFileAsync("relineage.bin", RandomBytes(2048));
+        await _blobService.DeleteBlobAsync($"chunks/{bad.Chunks[0].Hash}");
+
+        var parent = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { bad.Id },
+            ScopeSummary = "Parent",
+            AutoExportBundleOnFailure = false
+        });
+
+        // Restore the chunk so the re-check can pass.
+        await _blobService.UploadBlobAsync($"chunks/{bad.Chunks[0].Hash}",
+            _encryptionService.Encrypt(RandomBytes(bad.Chunks[0].Length)));
+
+        var child = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { bad.Id },
+            ScopeSummary = "Re-check",
+            IsReCheckOfFailures = true,
+            ParentRunId = parent.Run.Id,
+            AutoExportBundleOnFailure = false
+        });
+
+        Assert.Equal(parent.Run.Id, child.Run.ParentRunId);
+        // Re-check might still fail (the restored chunk has fresh random
+        // bytes that won't match the original CRC), but the lineage is
+        // what we're asserting -- that's a clean contract.
+    }
+
+    [Fact]
     public async Task RunPersists_AndFailuresTableScopedToLatestRun()
     {
         // Two consecutive runs: the second must wipe the first's failures.

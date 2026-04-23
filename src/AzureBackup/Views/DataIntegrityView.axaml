@@ -34,6 +34,12 @@
                 <Button Grid.Row="0" Grid.Column="4" Content="Cancel"
                         Command="{Binding CancelCommand}"/>
 
+                <Button Grid.Row="1" Grid.Column="4" Content="Re-check failures"
+                        Command="{Binding ReCheckFailuresOfSelectedCommand}"
+                        Margin="0,8,0,0" HorizontalAlignment="Right"
+                        ToolTip.Tip="Run a focused integrity check against the failures of the selected History run (or the latest run if none selected). Same operation type; the new run records its lineage via ParentRunId."
+                        IsVisible="{Binding HasFailures}"/>
+
                 <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="5"
                            Margin="0,8,0,0" Opacity="0.7" FontSize="12"
                            Text="{Binding SelectedFileCount, StringFormat='{}{0} file(s) selected. Choosing a preset auto-checks matching files; toggling files manually switches the dropdown to (Custom selection).'}"/>
@@ -120,15 +126,17 @@
                     </ItemsControl>
                 </ScrollViewer>
 
-                <Expander Grid.Row="2" Header="History (last 10 runs)" Margin="0,8,0,0"
+                <Expander Grid.Row="2" Header="History (last 10 runs -- click a row to view its failures)" Margin="0,8,0,0"
                           IsVisible="{Binding HasRunHistory}">
-                    <ItemsControl ItemsSource="{Binding RunHistory}">
-                        <ItemsControl.ItemTemplate>
+                    <ListBox ItemsSource="{Binding RunHistory}"
+                             SelectedItem="{Binding SelectedRun, Mode=TwoWay}"
+                             MaxHeight="160">
+                        <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="vm:IntegrityCheckRunViewModel">
-                                <TextBlock Text="{Binding Header}" Margin="2" FontFamily="Consolas,monospace" FontSize="11"/>
+                                <TextBlock Text="{Binding Header}" FontFamily="Consolas,monospace" FontSize="11"/>
                             </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
                 </Expander>
             </Grid>
         </Border>

@@ -68,6 +68,7 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanRunCheck))]
     [NotifyPropertyChangedFor(nameof(CanCancel))]
+    [NotifyPropertyChangedFor(nameof(CanReCheckFailures))]
     private bool _isOperationInProgress;
 
     [ObservableProperty]
@@ -101,6 +102,17 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     [NotifyPropertyChangedFor(nameof(CanRunCheck))]
     private int _selectedFileCount;
 
+    /// <summary>
+    /// History row currently displayed in the failures pane. Set by the
+    /// view's row-click handler; null means "show the latest run". The
+    /// pane reloads from <see cref="LocalDatabaseService.GetIntegrityCheckFailures"/>
+    /// each time this changes so the user can browse historical results
+    /// without re-running anything.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(CanReCheckFailures))]
+    private IntegrityCheckRunViewModel? _selectedRun;
+
     public ObservableCollection<IntegrityFileTreeNodeViewModel> FileTreeRoots { get; } = [];
 
     /// <summary>Failures from the most recent run, grouped by tier for the UI.</summary>
@@ -127,6 +139,13 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     public bool CanCancel => IsOperationInProgress;
     public bool HasFailures => FailureGroups.Count > 0;
     public bool HasRunHistory => RunHistory.Count > 0;
+
+    /// <summary>
+    /// True when there is a non-empty failure list to re-check (either
+    /// the latest run or a historical run selected in the History
+    /// expander) and no operation is currently running.
+    /// </summary>
+    public bool CanReCheckFailures => !IsOperationInProgress && FailureGroups.Count > 0;
 
     #endregion
 
@@ -189,6 +208,9 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
             var group = new IntegrityFailureGroupViewModel(grouping.Key, grouping.ToList());
             FailureGroups.Add(group);
         }
+        OnPropertyChanged(nameof(HasFailures));
+        OnPropertyChanged(nameof(CanReCheckFailures));
+        ReCheckFailuresOfSelectedCommand.NotifyCanExecuteChanged();
     }
 
     partial void OnSelectedScopePresetChanged(string value)
@@ -409,6 +431,40 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
             IsOperationInProgress = false;
             ProgressText = string.Empty;
         }
+    }
+
+    /// <summary>
+    /// UI command: re-check failures of the currently-selected History row,
+    /// or the most recent run when no row is selected. Same operation type
+    /// as a fresh check; the new run's <see cref="IntegrityCheckRun.ParentRunId"/>
+    /// records the lineage so the History expander shows it as a child.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanReCheckFailures))]
+    private async Task ReCheckFailuresOfSelected()
+    {
+        var target = SelectedRun?.Run
+            ?? _databaseService.GetRecentIntegrityCheckRuns(1).FirstOrDefault();
+        if (target == null)
+        {
+            StatusMessage = "No run available to re-check.";
+            return;
+        }
+        await ReCheckFailuresAsync(target);
+    }
+
+    partial void OnSelectedRunChanged(IntegrityCheckRunViewModel? value)
+    {
+        // Repopulate the failures pane with this run's rows. Null = show
+        // the latest run (default behaviour).
+        FailureGroups.Clear();
+        var runId = value?.Run.Id ?? _databaseService.GetRecentIntegrityCheckRuns(1).FirstOrDefault()?.Id ?? 0;
+        if (runId > 0)
+        {
+            var failures = _databaseService.GetIntegrityCheckFailures(runId);
+            PopulateFailureGroups(failures);
+        }
+        OnPropertyChanged(nameof(HasFailures));
+        OnPropertyChanged(nameof(CanReCheckFailures));
     }
 
     /// <summary>
