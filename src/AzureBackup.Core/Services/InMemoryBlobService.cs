@@ -298,6 +298,25 @@ public class InMemoryBlobService : IBlobStorageService
         return Task.FromResult(metadataBlobs);
     }
 
+    /// <summary>
+    /// In-memory equivalent of the Azure HEAD request. Returns the
+    /// stored encrypted blob's length and an MD5 of its contents so the
+    /// integrity-check engine sees the same shape against both backends.
+    /// </summary>
+    public Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
+        string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        {
+            return Task.FromResult<(bool, long, byte[]?)>((false, 0, null));
+        }
+        Interlocked.Increment(ref _totalOperations);
+        var hash = System.Security.Cryptography.MD5.HashData(encryptedData);
+        return Task.FromResult<(bool, long, byte[]?)>((true, encryptedData.Length, hash));
+    }
+
     public async Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default)
     {
         EnsureConnected();

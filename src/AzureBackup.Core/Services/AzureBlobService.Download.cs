@@ -163,6 +163,39 @@ public partial class AzureBlobService
     }
 
     /// <summary>
+    /// HEAD-only chunk-properties fetch for the integrity-check engine (D1).
+    /// Returns ContentLength + ContentHash without transferring any body bytes.
+    /// Treats <c>RequestFailedException</c> with status 404 as "blob does not
+    /// exist" (returning Exists=false) -- this is the missing-blob signal
+    /// the T1 check uses to flag chunk-index-vs-storage drift.
+    /// </summary>
+    public async Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
+        string blobName, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+
+        if (!blobName.StartsWith("chunks/"))
+            throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
+
+        var blobClient = _containerClient!.GetBlobClient(blobName);
+        try
+        {
+            var response = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
+            TotalOperations++;
+            return (true, response.Value.ContentLength, response.Value.ContentHash);
+        }
+        catch (RequestFailedException ex) when (ex.Status == 404)
+        {
+            // The "blob does not exist" path is intentionally NOT logged at
+            // WARNING level here -- T1 expects this to be a normal outcome
+            // for orphan-detection scenarios. The caller (IntegrityCheckService)
+            // categorises it as a missing-blob failure with full context.
+            return (false, 0, null);
+        }
+    }
+
+    /// <summary>
     /// Downloads and decrypts a chunk using parallel range downloads for improved throughput.
     /// Uses <see cref="StorageTransferOptions"/> for 8-way parallel block downloads within each chunk.
     /// Both the download buffer and the returned plaintext buffer are rented from

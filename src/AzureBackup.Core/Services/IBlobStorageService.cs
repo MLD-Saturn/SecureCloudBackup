@@ -148,6 +148,21 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Cheap structural check on a chunk blob: returns the encrypted blob's
+    /// <c>ContentLength</c> and <c>ContentHash</c> (the MD5 we set at upload
+    /// time) without transferring any body bytes. This is the T1 primitive
+    /// for the post-backup integrity check (D1) -- one HTTP HEAD per chunk
+    /// instead of a full GET, so checking 5K unique chunks costs about
+    /// 30-90 s of wall-clock and zero egress.
+    /// </summary>
+    /// <returns>
+    /// A tuple of (Exists, ContentLength, ContentHash). When
+    /// <c>Exists</c> is false the other fields are zero/null.
+    /// </returns>
+    Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
+        string blobName, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Lists all backed up files by retrieving metadata blobs.
     /// </summary>
     Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default);

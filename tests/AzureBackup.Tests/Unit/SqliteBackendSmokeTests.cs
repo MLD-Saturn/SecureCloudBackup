@@ -67,8 +67,10 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.False(string.IsNullOrEmpty(version), "Should be able to read sqlite_version()");
 
         // Schema was created. We expect every table from CreateSchema().
+        // 10 base tables + 2 added by D1 (integrity_check_runs,
+        // integrity_check_failures) = 12.
         var tableCount = backend.CountSchemaTables();
-        Assert.Equal(10, tableCount);
+        Assert.Equal(12, tableCount);
     }
 
     [Fact]
@@ -80,7 +82,7 @@ public class SqliteBackendSmokeTests : IDisposable
         using (var first = new SqliteBackend())
         {
             first.Initialize(_dbPath, password.AsSpan());
-            Assert.Equal(10, first.CountSchemaTables());
+            Assert.Equal(12, first.CountSchemaTables());
             // first.Dispose() runs here, closing the connection.
         }
 
@@ -90,7 +92,7 @@ public class SqliteBackendSmokeTests : IDisposable
 
         // Assert: schema persisted, no exception, connection works.
         Assert.True(second.IsInitialized);
-        Assert.Equal(10, second.CountSchemaTables());
+        Assert.Equal(12, second.CountSchemaTables());
     }
 
     [Fact]

@@ -1,0 +1,506 @@
+using System.Buffers;
+using AzureBackup.Core.Models;
+
+namespace AzureBackup.Core.Services;
+
+/// <summary>
+/// Three-tier post-backup data integrity check (D1).
+/// </summary>
+/// <remarks>
+/// <para>Tiers (each escalates only on failure of the prior tier):</para>
+/// <list type="number">
+///   <item><b>T1 -- structural HEAD:</b> for each chunk, fetch
+///     <c>(Exists, ContentLength, ContentHash)</c> via
+///     <see cref="IBlobStorageService.GetChunkPropertiesAsync"/>. Compare
+///     existence and length-vs-expected (chunk plaintext length +
+///     <see cref="EncryptionService.EncryptionOverhead"/>). Cost:
+///     ~1 KB / chunk over the wire, no body bytes.</item>
+///   <item><b>T2 -- full blob:</b> on T1 fail, download the full encrypted
+///     blob via <see cref="IBlobStorageService.DownloadChunkAsync"/>, which
+///     internally runs envelope CRC + AES-GCM tag check via
+///     <c>VerifyDownloadIntegrity</c> and emits the X1b
+///     <c>[CRC FAIL]</c> diag with envelope head/tail/version.</item>
+///   <item><b>T3 -- byte-for-byte:</b> on T2 success-but-still-suspect (or
+///     direct caller request), re-read the local file's
+///     <c>chunkInfo.Length</c> bytes at <c>chunkInfo.Offset</c> and pass
+///     to <see cref="IBlobStorageService.VerifyChunkIntegrityAsync"/>
+///     which decrypts the remote chunk and runs constant-time compare.</item>
+/// </list>
+/// <para>
+/// The engine emits a per-file <see cref="FileOperationDiagnostics"/> .diag
+/// for every failure (any tier) plus a single run-summary .diag at op end.
+/// Per-op metrics flow through <see cref="ThroughputMetrics"/> using
+/// <c>operation = "integrity-check"</c> so the existing X2 CrcFailCount
+/// counter is captured automatically and decision records justify any
+/// tier escalation.
+/// </para>
+/// </remarks>
+public sealed class IntegrityCheckService
+{
+    private readonly LocalDatabaseService _databaseService;
+    private readonly IBlobStorageService _blobService;
+    private readonly EncryptionService _encryptionService;
+
+    /// <summary>
+    /// HEAD-request concurrency cap (D1, item 6 from the design discussion).
+    /// 16 is comfortably below Azure's 5 K transactions/sec/partition limit
+    /// and large enough that T1 stays cheap on a normal corpus. NOT exposed
+    /// in the UI -- the bottleneck is Azure RTT, not local CPU, so a knob
+    /// here would be performance-theatre.
+    /// </summary>
+    private const int T1Concurrency = 16;
+
+    /// <summary>How many integrity-check runs to keep in the history table.</summary>
+    private const int RunRetention = 30;
+
+    /// <summary>
+    /// Optional <see cref="ThroughputMetrics"/> sink. When non-null the engine
+    /// emits a context record at start, decision records on tier escalations,
+    /// and an op record at end (with per-op CRC-fail delta from X2).
+    /// </summary>
+    public ThroughputMetrics? Metrics { get; set; }
+
+    /// <summary>
+    /// Optional <see cref="DiagnosticBundleExporter"/> directory. When
+    /// non-null AND the run produces any failures AND
+    /// <see cref="IntegrityCheckOptions.AutoExportBundleOnFailure"/> is
+    /// true, the engine writes a bundle ZIP and stores its path on the run row.
+    /// </summary>
+    public string? DiagnosticsDirectory { get; set; }
+
+    /// <summary>Optional <see cref="CrashSafeLogger"/> session id for log correlation.</summary>
+    public Guid SessionId { get; set; }
+
+    /// <summary>
+    /// Event for per-line debug log forwarding to <c>CrashSafeLogger</c>.
+    /// </summary>
+    public event EventHandler<string>? DiagnosticLog;
+
+    private void Log(string message)
+    {
+        DiagnosticLog?.Invoke(this, $"[IntegrityCheck] {message}");
+    }
+
+    public IntegrityCheckService(
+        LocalDatabaseService databaseService,
+        IBlobStorageService blobService,
+        EncryptionService encryptionService)
+    {
+        ArgumentNullException.ThrowIfNull(databaseService);
+        ArgumentNullException.ThrowIfNull(blobService);
+        ArgumentNullException.ThrowIfNull(encryptionService);
+        _databaseService = databaseService;
+        _blobService = blobService;
+        _encryptionService = encryptionService;
+    }
+
+    /// <summary>
+    /// Runs the three-tier check against the files identified by
+    /// <see cref="IntegrityCheckOptions.FileIds"/>. Returns the persisted
+    /// run row plus an in-memory list of failures.
+    /// </summary>
+    public async Task<IntegrityCheckResult> RunAsync(
+        IntegrityCheckOptions options,
+        IProgress<IntegrityCheckProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (!_databaseService.IntegrityCheckSupported)
+            throw new NotSupportedException("Integrity check requires the SQLite backend (see LocalDatabaseService).");
+
+        // --- Setup ---
+        var startedUtc = DateTime.UtcNow;
+        var run = new IntegrityCheckRun
+        {
+            StartedUtc = startedUtc,
+            SessionId = SessionId,
+            ScopeSummary = options.ScopeSummary,
+            ParentRunId = options.ParentRunId
+        };
+        var runId = _databaseService.InsertIntegrityCheckRun(run);
+        // The new run's failures table starts empty; stale rows from prior
+        // runs go away here so the "Failures (latest run)" UI is bounded.
+        _databaseService.DeleteIntegrityCheckFailuresExcept(runId);
+
+        var crcFailStart = _blobService.TotalCrcFailures;
+
+        Metrics?.RecordContext("integrity-check", memoryBudgetMb: 0, memoryBudgetEnabled: false);
+        Metrics?.RecordDecision("integrity-check-start", new Dictionary<string, object?>
+        {
+            ["files"] = options.FileIds.Count,
+            ["scope"] = options.ScopeSummary,
+            ["t1Concurrency"] = T1Concurrency,
+            ["isReCheck"] = options.IsReCheckOfFailures,
+            ["parentRunId"] = options.ParentRunId
+        });
+
+        var failures = new List<IntegrityCheckFailure>();
+        var failuresLock = new object();
+        int filesPassed = 0, filesFailedT1 = 0, filesFailedT2 = 0, filesFailedT3 = 0, filesWarning = 0;
+        int filesProcessed = 0;
+        var totalFiles = options.FileIds.Count;
+
+        Log($"RunAsync: starting (files={totalFiles}, scope='{options.ScopeSummary}', runId={runId})");
+
+        try
+        {
+            // Per-file workers. File-level parallelism (8) stays the same as
+            // the rest of the app; each file's chunks are checked sequentially
+            // because that's where the cancel-friendly progress reporting
+            // lives. Chunk-level parallelism is bounded by T1Concurrency
+            // inside the per-file loop.
+            await Parallel.ForEachAsync(
+                options.FileIds,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = 8,
+                    CancellationToken = cancellationToken
+                },
+                async (fileId, ct) =>
+                {
+                    var fileFailures = await CheckOneFileAsync(fileId, runId, ct);
+                    var processed = Interlocked.Increment(ref filesProcessed);
+
+                    int t1 = 0, t2 = 0, t3 = 0, warn = 0;
+                    foreach (var f in fileFailures)
+                    {
+                        if (f.FailureTier == 1)
+                        {
+                            if (f.FailureReason == "size-disagreement") warn++;
+                            else t1++;
+                        }
+                        else if (f.FailureTier == 2) t2++;
+                        else if (f.FailureTier == 3) t3++;
+                    }
+
+                    // Classify the file by its deepest failure tier.
+                    if (fileFailures.Count == 0)
+                    {
+                        Interlocked.Increment(ref filesPassed);
+                    }
+                    else if (t3 > 0) Interlocked.Increment(ref filesFailedT3);
+                    else if (t2 > 0) Interlocked.Increment(ref filesFailedT2);
+                    else if (t1 > 0) Interlocked.Increment(ref filesFailedT1);
+                    else if (warn > 0) Interlocked.Increment(ref filesWarning);
+
+                    if (fileFailures.Count > 0)
+                    {
+                        lock (failuresLock) failures.AddRange(fileFailures);
+                        foreach (var f in fileFailures)
+                        {
+                            try { _databaseService.InsertIntegrityCheckFailure(f); }
+                            catch (Exception ex) { Log($"InsertIntegrityCheckFailure failed: {ex.Message}"); }
+                        }
+                    }
+
+                    progress?.Report(new IntegrityCheckProgress(
+                        processed, totalFiles,
+                        fileFailures.FirstOrDefault()?.LocalPath ?? "",
+                        Volatile.Read(ref filesFailedT1),
+                        Volatile.Read(ref filesFailedT2),
+                        Volatile.Read(ref filesFailedT3)));
+                });
+        }
+        catch (OperationCanceledException)
+        {
+            run.Cancelled = true;
+            Log("RunAsync: cancelled");
+        }
+
+        // --- Finalize ---
+        run.Id = runId;
+        run.FinishedUtc = DateTime.UtcNow;
+        run.FilesChecked = filesProcessed;
+        run.FilesPassed = filesPassed;
+        run.FilesFailedT1 = filesFailedT1;
+        run.FilesFailedT2 = filesFailedT2;
+        run.FilesFailedT3 = filesFailedT3;
+        run.FilesWarning = filesWarning;
+
+        var anyFailure = filesFailedT1 + filesFailedT2 + filesFailedT3 > 0;
+        if (anyFailure && options.AutoExportBundleOnFailure && DiagnosticsDirectory is { } dir)
+        {
+            try
+            {
+                var dataDir = System.IO.Path.GetDirectoryName(dir.TrimEnd(
+                    System.IO.Path.DirectorySeparatorChar,
+                    System.IO.Path.AltDirectorySeparatorChar)) ?? dir;
+                run.DiagBundlePath = DiagnosticBundleExporter.Export(dataDir, dataDir, SessionId);
+                Log($"Auto-exported bundle to {run.DiagBundlePath}");
+            }
+            catch (Exception ex)
+            {
+                Log($"Bundle export failed: {ex.Message}");
+            }
+        }
+
+        _databaseService.UpdateIntegrityCheckRun(run);
+        _databaseService.PruneIntegrityCheckRuns(RunRetention);
+
+        var elapsed = (run.FinishedUtc.Value - run.StartedUtc).TotalSeconds;
+        Metrics?.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "integrity-check",
+            Files = filesProcessed,
+            Succeeded = filesPassed,
+            Failed = filesFailedT1 + filesFailedT2 + filesFailedT3,
+            ElapsedSeconds = elapsed,
+            CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart)
+        });
+
+        Log($"RunAsync: complete in {elapsed:F1}s -- passed={filesPassed}, " +
+            $"T1={filesFailedT1}, T2={filesFailedT2}, T3={filesFailedT3}, warn={filesWarning}, cancelled={run.Cancelled}");
+
+        return new IntegrityCheckResult
+        {
+            Run = run,
+            Failures = failures
+        };
+    }
+
+    /// <summary>
+    /// T1 + T2 + T3 escalation for a single file. Returns the failures
+    /// produced; an empty list means the file is clean.
+    /// </summary>
+    private async Task<List<IntegrityCheckFailure>> CheckOneFileAsync(
+        int fileId, int runId, CancellationToken cancellationToken)
+    {
+        var failures = new List<IntegrityCheckFailure>();
+        var fileFromDb = _databaseService.GetAllBackedUpFiles().FirstOrDefault(f => f.Id == fileId);
+        if (fileFromDb == null)
+        {
+            failures.Add(new IntegrityCheckFailure
+            {
+                RunId = runId,
+                FileId = fileId,
+                LocalPath = $"<unknown file id {fileId}>",
+                FailureTier = 1,
+                FailureReason = "missing-file-record",
+                Detail = "{}"
+            });
+            return failures;
+        }
+
+        // Per-file diag is created lazily so a clean file produces no .diag
+        // (option b from the design discussion). It IS created for every
+        // failure regardless of tier (you tightened the design here).
+        FileOperationDiagnostics? diag = null;
+        FileOperationDiagnostics EnsureDiag()
+        {
+            return diag ??= new FileOperationDiagnostics(
+                fileFromDb.LocalPath, "IntegrityCheck", DiagnosticsDirectory);
+        }
+
+        try
+        {
+            // Bounded T1 concurrency across the file's chunks. SemaphoreSlim
+            // is shared per file; cross-file concurrency is the ParallelOptions.
+            using var t1Sem = new SemaphoreSlim(T1Concurrency);
+
+            foreach (var chunk in fileFromDb.Chunks)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await t1Sem.WaitAsync(cancellationToken);
+                try
+                {
+                    await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, cancellationToken);
+                }
+                finally
+                {
+                    t1Sem.Release();
+                }
+            }
+
+            // Always flush the diag if it was created (i.e., any failure).
+            if (diag != null)
+            {
+                var summary = failures.Count == 0
+                    ? null
+                    : $"{failures.Count} failures: " +
+                      string.Join(", ", failures.Select(f => $"{f.FailureReason}@T{f.FailureTier}").Distinct());
+                var diagPath = diag.Flush(summary);
+                foreach (var f in failures.Where(f => f.DiagFilePath == null))
+                {
+                    f.DiagFilePath = diagPath;
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            if (diag != null) diag.Flush("cancelled mid-check");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Engine-level failure on a single file shouldn't abort the run.
+            Log($"CheckOneFileAsync: {fileFromDb.LocalPath}: {ex.GetType().Name}: {ex.Message}");
+            if (diag != null)
+            {
+                diag.RecordError("CheckOneFileAsync", ex);
+                var diagPath = diag.Flush($"engine error: {ex.Message}");
+                failures.Add(new IntegrityCheckFailure
+                {
+                    RunId = runId,
+                    FileId = fileId,
+                    LocalPath = fileFromDb.LocalPath,
+                    FailureTier = 1,
+                    FailureReason = "engine-error",
+                    Detail = $"{{\"exception\":\"{ex.GetType().Name}\",\"message\":\"{ex.Message.Replace("\"", "\\\"")}\"}}",
+                    DiagFilePath = diagPath
+                });
+            }
+        }
+
+        return failures;
+    }
+
+    /// <summary>
+    /// Three-tier check for a single chunk. Records failures into
+    /// <paramref name="failures"/> as it escalates.
+    /// </summary>
+    private async Task CheckOneChunkAsync(
+        BackedUpFile file,
+        ChunkInfo chunk,
+        int runId,
+        Func<FileOperationDiagnostics> ensureDiag,
+        List<IntegrityCheckFailure> failures,
+        CancellationToken cancellationToken)
+    {
+        var blobName = $"chunks/{chunk.Hash}";
+        var expectedEncryptedLength = chunk.Length + EncryptionService.EncryptionOverhead;
+
+        // -------- T1: HEAD --------
+        var (exists, contentLength, _) = await _blobService.GetChunkPropertiesAsync(blobName, cancellationToken);
+        if (!exists)
+        {
+            ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, extra: "missing-blob");
+            failures.Add(NewFailure(runId, file, chunk, tier: 1, reason: "missing-blob",
+                detail: $"{{\"chunkIndex\":{chunk.Index},\"totalChunks\":{file.Chunks.Count}}}"));
+            return; // no point downloading what isn't there
+        }
+        if (contentLength != expectedEncryptedLength)
+        {
+            ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                extra: $"wrong-size expected={expectedEncryptedLength}");
+            failures.Add(NewFailure(runId, file, chunk, tier: 1, reason: "wrong-size",
+                detail: $"{{\"expectedSize\":{expectedEncryptedLength},\"actualSize\":{contentLength}}}"));
+            // Escalate to T2 to capture the corruption envelope evidence too;
+            // the wrong-size already constitutes a confirmed problem.
+        }
+
+        // -------- T2: full blob --------
+        // Only escalate if T1 failed OR we want a deeper check; here we only
+        // escalate on T1 fail to keep the cheap path cheap. A separate
+        // "paranoid mode" knob (future) would always run T2 + T3.
+        var t1Failed = !exists || contentLength != expectedEncryptedLength;
+        if (!t1Failed) return;
+
+        byte[]? decrypted = null;
+        Metrics?.RecordDecision("integrity-check-tier-escalation", new Dictionary<string, object?>
+        {
+            ["file"] = file.LocalPath,
+            ["chunk"] = chunk.Hash,
+            ["from"] = "T1",
+            ["to"] = "T2"
+        });
+        try
+        {
+            // DownloadChunkAsync runs VerifyDownloadIntegrity (X1b/X2) and
+            // emits the [CRC FAIL] diag itself if the envelope CRC fails.
+            decrypted = await _blobService.DownloadChunkAsync(blobName, cancellationToken);
+        }
+        catch (DataIntegrityException ex)
+        {
+            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                crcValid: false, extra: $"crc-or-md5-fail: {ex.Message}");
+            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "crc-mismatch",
+                detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+            return;
+        }
+        catch (System.Security.Cryptography.CryptographicException ex)
+        {
+            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                crcValid: false, extra: $"decrypt-failed: {ex.Message}");
+            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "decrypt-failed",
+                detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+            return;
+        }
+        catch (Exception ex)
+        {
+            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                extra: $"download-error: {ex.GetType().Name}");
+            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "download-error",
+                detail: $"{{\"chunkIndex\":{chunk.Index},\"exception\":\"{ex.GetType().Name}\"}}"));
+            return;
+        }
+
+        // -------- T3: byte compare against local file --------
+        Metrics?.RecordDecision("integrity-check-tier-escalation", new Dictionary<string, object?>
+        {
+            ["file"] = file.LocalPath,
+            ["chunk"] = chunk.Hash,
+            ["from"] = "T2",
+            ["to"] = "T3"
+        });
+        if (!File.Exists(file.LocalPath))
+        {
+            ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length,
+                extra: "local-file-missing");
+            failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "local-file-missing",
+                detail: $"{{\"chunkIndex\":{chunk.Index},\"localPath\":\"{Escape(file.LocalPath)}\"}}"));
+            return;
+        }
+
+        // Re-read just this chunk's bytes from disk -- bounded by chunk.Length.
+        var rented = ArrayPool<byte>.Shared.Rent(chunk.Length);
+        try
+        {
+            int read;
+            using (var fs = new FileStream(file.LocalPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                fs.Position = chunk.Offset;
+                read = await fs.ReadAsync(rented.AsMemory(0, chunk.Length), cancellationToken);
+            }
+            if (read != chunk.Length)
+            {
+                ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length,
+                    extra: $"local-short-read: got={read} expected={chunk.Length}");
+                failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "local-short-read",
+                    detail: $"{{\"chunkIndex\":{chunk.Index},\"got\":{read},\"expected\":{chunk.Length}}}"));
+                return;
+            }
+
+            var localSpan = rented.AsSpan(0, chunk.Length);
+            var match = decrypted.Length == chunk.Length &&
+                        System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(localSpan, decrypted);
+            if (!match)
+            {
+                ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length, decrypted.Length,
+                    extra: "byte-differ");
+                failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "byte-differ",
+                    detail: $"{{\"chunkIndex\":{chunk.Index},\"localLen\":{chunk.Length},\"remoteLen\":{decrypted.Length}}}"));
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+
+    private static IntegrityCheckFailure NewFailure(
+        int runId, BackedUpFile file, ChunkInfo chunk, int tier, string reason, string detail)
+    {
+        return new IntegrityCheckFailure
+        {
+            RunId = runId,
+            FileId = file.Id,
+            LocalPath = file.LocalPath,
+            FailureTier = tier,
+            FailureReason = reason,
+            ChunkHash = chunk.Hash,
+            Detail = detail
+        };
+    }
+
+    private static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+}

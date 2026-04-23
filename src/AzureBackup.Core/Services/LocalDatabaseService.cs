@@ -780,4 +780,68 @@ public partial class LocalDatabaseService : IDisposable
             Log($"CheckpointTimerCallback: Checkpoint failed: {ex.Message}");
         }
     }
+
+    #region Integrity Check Persistence (D1)
+
+    // Forwarders to SqliteBackend. The integrity-check feature lives only on
+    // the SQLite backend (production default since C-5/C-6); the LiteDB
+    // legacy fallback is shrinking and acquiring a second schema there
+    // would cost more than it earns. Calls on a LiteDB backend throw
+    // NotSupportedException so the UI surfaces a clear "switch to SQLite"
+    // diagnostic rather than silently corrupting.
+    private const string IntegrityNotSupportedOnLiteDb =
+        "Data integrity check requires the SQLite backend. The LiteDB legacy backend " +
+        "does not store integrity-check history. Re-run after the next app launch " +
+        "(C-5 migration is automatic) to enable this feature.";
+
+    public int InsertIntegrityCheckRun(IntegrityCheckRun run)
+    {
+        if (_sqliteBackend != null) return _sqliteBackend.InsertIntegrityCheckRun(run);
+        throw new NotSupportedException(IntegrityNotSupportedOnLiteDb);
+    }
+
+    public void UpdateIntegrityCheckRun(IntegrityCheckRun run)
+    {
+        if (_sqliteBackend != null) { _sqliteBackend.UpdateIntegrityCheckRun(run); return; }
+        throw new NotSupportedException(IntegrityNotSupportedOnLiteDb);
+    }
+
+    public void InsertIntegrityCheckFailure(IntegrityCheckFailure failure)
+    {
+        if (_sqliteBackend != null) { _sqliteBackend.InsertIntegrityCheckFailure(failure); return; }
+        throw new NotSupportedException(IntegrityNotSupportedOnLiteDb);
+    }
+
+    public List<IntegrityCheckRun> GetRecentIntegrityCheckRuns(int limit)
+    {
+        if (_sqliteBackend != null) return _sqliteBackend.GetRecentIntegrityCheckRuns(limit);
+        return [];
+    }
+
+    public List<IntegrityCheckFailure> GetIntegrityCheckFailures(int runId)
+    {
+        if (_sqliteBackend != null) return _sqliteBackend.GetIntegrityCheckFailures(runId);
+        return [];
+    }
+
+    public void DeleteIntegrityCheckFailuresExcept(int keepRunId)
+    {
+        if (_sqliteBackend != null) { _sqliteBackend.DeleteIntegrityCheckFailuresExcept(keepRunId); return; }
+        // LiteDB no-op: nothing to delete because nothing was ever inserted.
+    }
+
+    public void PruneIntegrityCheckRuns(int keep)
+    {
+        if (_sqliteBackend != null) { _sqliteBackend.PruneIntegrityCheckRuns(keep); return; }
+        // LiteDB no-op.
+    }
+
+    /// <summary>
+    /// True when the integrity-check feature is available (i.e., the
+    /// SQLite backend is in use). The UI greys out the "Check Data
+    /// Integrity" button when this returns false.
+    /// </summary>
+    public bool IntegrityCheckSupported => _sqliteBackend != null;
+
+    #endregion
 }
