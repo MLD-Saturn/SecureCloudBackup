@@ -1,9 +1,5 @@
 # Copilot Instructions
 
-## Project Guidelines
-
-* Avoid multi-line PowerShell commands in terminal.
-
 ## Terminal command execution
 
 When running PowerShell commands via the terminal tool, always emit the
