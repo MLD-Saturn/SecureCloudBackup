@@ -87,6 +87,11 @@ public class EncryptionService : IDisposable
 
         // Convert password to bytes and zero after use
         var passwordBytes = PasswordBytes.FromChars(password.Span);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var gcMode = System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation";
+        var workingSetMb = System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+        Log($"DeriveKeyAsync: starting Argon2id (memory={Argon2MemorySize / 1024} MB, lanes={Argon2DegreeOfParallelism}, " +
+            $"iterations={Argon2Iterations}, gcMode={gcMode}, workingSet={workingSetMb} MB)");
         try
         {
             // B11/B12: see SqliteBackend.DeriveKeyFromPassword for the
@@ -108,17 +113,24 @@ public class EncryptionService : IDisposable
                     Iterations = Argon2Iterations
                 };
                 var result = await argon2.GetBytesAsync(KeySize);
-                Log("DeriveKeyAsync: Key derivation completed");
+                Log($"DeriveKeyAsync: Key derivation completed in {sw.ElapsedMilliseconds} ms");
                 return result;
             }
             catch (OutOfMemoryException ex)
             {
                 lastOom = ex;
+                Log($"DeriveKeyAsync: OutOfMemoryException at {sw.ElapsedMilliseconds} ms -- {ex.Message}");
+                Log($"  Pre-compaction state: workingSet={System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024)} MB, " +
+                    $"GC managed={GC.GetTotalMemory(false) / (1024 * 1024)} MB, " +
+                    $"GC available={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024)} MB");
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
                     System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
+                Log($"  Post-compaction state: workingSet={System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024)} MB, " +
+                    $"GC managed={GC.GetTotalMemory(false) / (1024 * 1024)} MB, " +
+                    $"GC available={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024)} MB");
             }
 
             try
@@ -131,12 +143,13 @@ public class EncryptionService : IDisposable
                     Iterations = Argon2Iterations
                 };
                 var result = await argon2.GetBytesAsync(KeySize);
-                Log("DeriveKeyAsync: Key derivation completed (after LOH compaction)");
+                Log($"DeriveKeyAsync: Key derivation completed (after LOH compaction) in {sw.ElapsedMilliseconds} ms");
                 return result;
             }
             catch (OutOfMemoryException ex)
             {
                 lastOom = ex;
+                Log($"DeriveKeyAsync: OutOfMemoryException AFTER LOH compaction at {sw.ElapsedMilliseconds} ms -- giving up");
             }
 
             throw new InsufficientMemoryForKdfException(

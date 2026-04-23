@@ -189,7 +189,12 @@ public partial class LocalDatabaseService : IDisposable
             // EnsureMigratedToSqliteAsync helper in MainWindowViewModel.
             Log($"Initialize: AZBK_USE_SQLITE flag is set; routing to SqliteBackend");
             _databasePath = databasePath;
-            _sqliteBackend = DatabaseBackendFactory.CreateAndInitializeSqlite(databasePath, password);
+            // B13: forward the backend's diagnostic events through this
+            // service's own DiagnosticLog so the file logger captures the
+            // Argon2id KDF entry/exit/OOM messages.
+            _sqliteBackend = DatabaseBackendFactory.CreateAndInitializeSqlite(
+                databasePath, password,
+                diagnosticLogSink: (s, msg) => DiagnosticLog?.Invoke(this, msg));
             // Note: SqliteBackend does its OWN WAL checkpoint lifecycle
             // via synchronous=NORMAL + internal periodic-checkpoint, so
             // we do NOT start the LiteDB-oriented _checkpointTimer.

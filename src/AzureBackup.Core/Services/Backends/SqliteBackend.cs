@@ -98,6 +98,25 @@ internal sealed class SqliteBackend : IDatabaseBackend
     public string? DatabasePath => _databasePath;
 
     /// <summary>
+    /// B13: diagnostic-event surface so the backend can ship structured
+    /// progress / error context to the file logger via
+    /// <see cref="LocalDatabaseService"/>'s existing relay. Pre-B13 the
+    /// Argon2id key derivation was completely silent in the log file;
+    /// an OutOfMemoryException on a tester machine surfaced only as the
+    /// generic UI-pane "Unlock failed" message with no diagnostic
+    /// breadcrumbs to triage from. Now we emit timing + memory snapshots
+    /// at every KDF entry/exit and log the OOM stack with pre/post
+    /// LOH-compaction process state.
+    /// </summary>
+    public event EventHandler<string>? DiagnosticLog;
+
+    private void EmitDiag(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        DiagnosticLog?.Invoke(this, $"[{timestamp}] [SqliteBackend] {message}");
+    }
+
+    /// <summary>
     /// Opens (or creates) the encrypted SQLite database at
     /// <paramref name="databasePath"/>. Derives the encryption key from
     /// <paramref name="password"/> using Argon2id and the stored salt; if the
@@ -110,6 +129,7 @@ internal sealed class SqliteBackend : IDatabaseBackend
             throw new ArgumentException("Password cannot be empty", nameof(password));
 
         _databasePath = databasePath;
+        EmitDiag($"Initialize: starting (path={databasePath})");
 
         var directory = Path.GetDirectoryName(databasePath);
         if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
@@ -128,6 +148,7 @@ internal sealed class SqliteBackend : IDatabaseBackend
         // setup. Real bug observed by tester.
         var dbExistedBeforeOpen = File.Exists(databasePath);
         var saltExistedBeforeOpen = File.Exists(GetSaltFilePath(databasePath));
+        EmitDiag($"Initialize: dbExistedBeforeOpen={dbExistedBeforeOpen}, saltExistedBeforeOpen={saltExistedBeforeOpen}");
 
         var salt = LoadOrCreateSalt(databasePath);
         var derivedKey = DeriveKeyFromPassword(password, salt);
@@ -136,9 +157,11 @@ internal sealed class SqliteBackend : IDatabaseBackend
             OpenAndUnlock(databasePath, derivedKey, dbExistedBeforeOpen);
             ApplyPragmas();
             CreateSchema();
+            EmitDiag("Initialize: completed successfully");
         }
-        catch
+        catch (Exception ex)
         {
+            EmitDiag($"Initialize: failed with {ex.GetType().Name}: {ex.Message}");
             // B10: clean up the salt file we just wrote if (a) the DB
             // didn't exist before AND (b) we failed to initialise. This
             // prevents the side-effect chain where a wrong-password on a
@@ -2282,35 +2305,25 @@ internal sealed class SqliteBackend : IDatabaseBackend
         return fresh;
     }
 
-    private static byte[] DeriveKeyFromPassword(ReadOnlySpan<char> password, byte[] salt)
+    private byte[] DeriveKeyFromPassword(ReadOnlySpan<char> password, byte[] salt)
+        => DeriveKeyFromPasswordCore(passwordChars: password, salt: salt, diag: EmitDiag);
+
+    private static byte[] DeriveKeyFromPasswordCore(
+        ReadOnlySpan<char> passwordChars, byte[] salt, Action<string>? diag)
     {
-        var passwordBytes = PasswordBytes.FromChars(password);
+        var passwordBytes = PasswordBytes.FromChars(passwordChars);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var gcMode = System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation";
+        var workingSetMb = System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+        var managedMb = GC.GetTotalMemory(false) / (1024 * 1024);
+        diag?.Invoke($"DeriveKey: starting Argon2id (memory={Argon2MemorySize / 1024} MB, lanes={Argon2DegreeOfParallelism}, " +
+                     $"iterations={Argon2Iterations}, gcMode={gcMode}, workingSet={workingSetMb} MB, managedHeap={managedMb} MB)");
         try
         {
-            // B11/B12: Argon2id allocates a ulong[128 * blocksPerLane] per lane.
-            // With our defaults (MemorySize=64MB, lanes=8) that's 8 MB per
-            // lane -- which goes to the .NET Large Object Heap. On a machine
-            // with plenty of free RAM this can still fail with OOM if the
-            // LOH is fragmented (e.g., debugger + Diagnostic Tools window
-            // pinning memory, or a long-running process that has churned the
-            // LOH). Real bug observed by tester with 34 GB free physical
-            // memory.
-            //
-            // B12 fix: reduce MemorySize between attempts (NOT lanes -- B11
-            // had this backwards; reducing lanes increases the per-allocation
-            // contiguous block size which makes LOH fragmentation worse).
-            // Halving MemorySize halves both the total working memory AND
-            // the per-lane allocation, giving the GC the best chance of
-            // satisfying the request. The derived key DOES change with
-            // MemorySize, so we record the parameters the unlock SUCCEEDED
-            // with and reject silent fallback when the database was keyed
-            // at a different memory level. (See B12 note below.)
-            //
-            // For now we keep MemorySize fixed and let the ladder be a
-            // RECOVERY MECHANISM only -- meaning if the default fails, the
-            // app surfaces the real diagnostic; we do NOT silently key the
-            // DB with weaker parameters. A future change could persist the
-            // chosen MemorySize alongside the salt so re-unlock can match.
+            // B11/B12: see comment block in EncryptionService.DeriveKeyAsync
+            // for the LOH-compaction-on-OOM rationale. We never silently
+            // weaken parameters because that would change the derived key
+            // and lock the user out of their existing database.
             Exception? lastOom = null;
             try
             {
@@ -2321,25 +2334,29 @@ internal sealed class SqliteBackend : IDatabaseBackend
                     MemorySize = Argon2MemorySize,
                     Iterations = Argon2Iterations,
                 };
-                return argon2.GetBytes(DerivedKeySize);
+                var key = argon2.GetBytes(DerivedKeySize);
+                diag?.Invoke($"DeriveKey: completed in {sw.ElapsedMilliseconds} ms");
+                return key;
             }
             catch (OutOfMemoryException ex)
             {
                 lastOom = ex;
-                // Force LOH compaction + full GC. The .NET 10 GC will
-                // compact the LOH on a Gen2 collection if explicitly
-                // requested via GCSettings.LargeObjectHeapCompactionMode.
+                diag?.Invoke($"DeriveKey: OutOfMemoryException at {sw.ElapsedMilliseconds} ms -- {ex.Message}");
+                diag?.Invoke($"  Pre-compaction: workingSet={System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024)} MB, " +
+                             $"GC managed={GC.GetTotalMemory(false) / (1024 * 1024)} MB, " +
+                             $"GC available={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024)} MB, " +
+                             $"loh fragmented={GC.GetGCMemoryInfo().FragmentedBytes / (1024 * 1024)} MB");
                 System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
                     System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
                 GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
                 GC.WaitForPendingFinalizers();
                 GC.Collect();
+                diag?.Invoke($"  Post-compaction: workingSet={System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024)} MB, " +
+                             $"GC managed={GC.GetTotalMemory(false) / (1024 * 1024)} MB, " +
+                             $"GC available={GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024)} MB, " +
+                             $"loh fragmented={GC.GetGCMemoryInfo().FragmentedBytes / (1024 * 1024)} MB");
             }
 
-            // Retry once after LOH compaction. If this still fails, the
-            // problem is genuinely environmental; surface a diagnostic that
-            // includes process memory state so the user knows whether to
-            // close apps or restart.
             try
             {
                 using var argon2 = new Argon2id(passwordBytes)
@@ -2349,11 +2366,14 @@ internal sealed class SqliteBackend : IDatabaseBackend
                     MemorySize = Argon2MemorySize,
                     Iterations = Argon2Iterations,
                 };
-                return argon2.GetBytes(DerivedKeySize);
+                var key = argon2.GetBytes(DerivedKeySize);
+                diag?.Invoke($"DeriveKey: completed (after LOH compaction) in {sw.ElapsedMilliseconds} ms");
+                return key;
             }
             catch (OutOfMemoryException ex)
             {
                 lastOom = ex;
+                diag?.Invoke($"DeriveKey: OutOfMemoryException AFTER LOH compaction at {sw.ElapsedMilliseconds} ms -- giving up");
             }
 
             throw new InsufficientMemoryForKdfException(
@@ -2446,7 +2466,7 @@ internal sealed class SqliteBackend : IDatabaseBackend
             throw new FileNotFoundException("Database does not exist", databasePath);
 
         var salt = LoadOrCreateSalt(databasePath);
-        var derivedKey = DeriveKeyFromPassword(password, salt);
+        var derivedKey = DeriveKeyFromPasswordCore(passwordChars: password, salt: salt, diag: null);
         try
         {
             return OpenAndUnlockCore(

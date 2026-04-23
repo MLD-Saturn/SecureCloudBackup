@@ -88,10 +88,24 @@ internal static class DatabaseBackendFactory
     /// so <see cref="LocalDatabaseService"/> does not need a
     /// <c>using</c> on the Backends namespace.
     /// </summary>
+    /// <param name="diagnosticLogSink">
+    /// B13: optional event subscriber that receives the backend's
+    /// diagnostic events from the moment of construction. Pre-B13
+    /// the SqliteBackend was created and Initialize'd in one call,
+    /// so any events fired during Initialize (notably the Argon2id
+    /// KDF entry/exit/OOM events) had no subscriber and were lost.
+    /// LocalDatabaseService passes its own DiagnosticLog event handler
+    /// so those messages reach the file logger via the standard relay.
+    /// </param>
     public static SqliteBackend CreateAndInitializeSqlite(
-        string databasePath, ReadOnlySpan<char> password)
+        string databasePath, ReadOnlySpan<char> password,
+        EventHandler<string>? diagnosticLogSink = null)
     {
         var backend = new SqliteBackend();
+        if (diagnosticLogSink != null)
+        {
+            backend.DiagnosticLog += diagnosticLogSink;
+        }
         backend.Initialize(databasePath, password);
         return backend;
     }

@@ -93,6 +93,33 @@ public sealed class CrashSafeLogger : IDisposable
         Log($"OS: {os}", callerFile: "CrashSafeLogger", callerMethod: "ctor");
         Log($"DataDir: {dataDir}", callerFile: "CrashSafeLogger", callerMethod: "ctor");
         Log($"LogFile: {LogFilePath}", callerFile: "CrashSafeLogger", callerMethod: "ctor");
+
+        // B13: GC mode + process memory baseline. Critical for diagnosing
+        // OutOfMemoryException reports against Argon2id key derivation:
+        // Workstation GC + heavy LOH fragmentation will produce OOM even
+        // when the OS has 30+ GB free. Knowing the GC mode at startup
+        // lets a triager rule in/out the (test = Server GC, prod = Workstation GC)
+        // class of bug without having to ask.
+        try
+        {
+            var isServerGc = System.Runtime.GCSettings.IsServerGC;
+            var latencyMode = System.Runtime.GCSettings.LatencyMode;
+            var memInfo = GC.GetGCMemoryInfo();
+            var totalAvailMb = memInfo.TotalAvailableMemoryBytes / (1024 * 1024);
+            var heapSizeMb = memInfo.HeapSizeBytes / (1024 * 1024);
+            var workingSetMb = System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / (1024 * 1024);
+            var debuggerAttached = System.Diagnostics.Debugger.IsAttached;
+
+            Log($"GC: IsServerGC={isServerGc}, LatencyMode={latencyMode}, " +
+                $"TotalAvailable={totalAvailMb} MB, HeapSize={heapSizeMb} MB, " +
+                $"WorkingSet={workingSetMb} MB, DebuggerAttached={debuggerAttached}",
+                callerFile: "CrashSafeLogger", callerMethod: "ctor");
+        }
+        catch (Exception ex)
+        {
+            Log($"GC info collection failed: {ex.GetType().Name}: {ex.Message}",
+                callerFile: "CrashSafeLogger", callerMethod: "ctor");
+        }
     }
 
     private static string RuntimeInformation_ProcessArchitecture()

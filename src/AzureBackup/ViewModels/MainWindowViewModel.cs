@@ -1033,6 +1033,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _pendingLogMessages.Enqueue($"[{timestamp}] {message}");
         Interlocked.Exchange(ref _latestStatusMessage, message);
         DrainLogQueue();
+        // B13: also persist to the crash-safe file log. Pre-B13 the unlock
+        // flow's AddLog calls (notably the OOM / wrong-password / migration
+        // failure messages) only reached the in-memory Logs UI tab, which
+        // a tester cannot copy into a bug report after the app has been
+        // closed. Routing to the file logger as well means a session log
+        // contains the full unlock narrative even if the UI was closed
+        // immediately after the failure.
+        Program.Logger?.Log(message);
     }
 
     /// <summary>

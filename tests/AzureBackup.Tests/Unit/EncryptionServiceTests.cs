@@ -655,5 +655,28 @@ public class EncryptionServiceTests : IDisposable
         Assert.Equal(plaintext, decBuffer[..decWritten]);
     }
 
+    [Fact]
+    public async Task DeriveKeyAsync_EmitsDiagnosticEntryAndExitEvents()
+    {
+        // B13: regression test for the "no logs at all when unlock fails"
+        // bug. The KDF must emit at least one diagnostic event on entry
+        // (so a future failure in the same session has timing context)
+        // and one on exit (so the elapsed-ms can be quoted in a bug
+        // report). Pre-B13 the Argon2id call sites were silent; an OOM
+        // surfaced only as the generic UI message with no breadcrumbs.
+        var captured = new List<string>();
+        _encryptionService.DiagnosticLog += (_, msg) => captured.Add(msg);
+
+        var salt = EncryptionService.GenerateSalt();
+        _ = await _encryptionService.DeriveKeyAsync(TestPassword, salt);
+
+        Assert.Contains(captured, m => m.Contains("DeriveKeyAsync: starting Argon2id"));
+        Assert.Contains(captured, m => m.Contains("Key derivation completed"));
+        // Must surface the configured KDF parameters so a triager can
+        // verify the deployed defaults match what the failure was using.
+        Assert.Contains(captured, m => m.Contains("memory=64 MB"));
+        Assert.Contains(captured, m => m.Contains("lanes=8"));
+    }
+
     #endregion
 }
