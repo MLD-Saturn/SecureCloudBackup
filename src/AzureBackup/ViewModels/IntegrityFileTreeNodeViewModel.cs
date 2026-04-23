@@ -88,10 +88,21 @@ public partial class IntegrityFileTreeNodeViewModel : TreeNodeViewModelBase<Inte
     /// Builds a directory-grouped tree from a flat list of backed-up files.
     /// Each file becomes a leaf; common path prefixes become folder nodes.
     /// </summary>
+    /// <remarks>
+    /// D7 review fix 3.5: O(N) instead of O(N^2). The pre-D7 implementation
+    /// did a linear scan of <c>parent.Children</c> for each path component
+    /// of every file -- a corpus where 1000 files share <c>C:\Photos\</c>
+    /// did 1000 linear scans of an ever-growing list. We now keep a
+    /// transient per-node dictionary keyed by case-insensitive folder
+    /// name so each lookup is O(1). The dictionaries are dropped after
+    /// the build; only the resulting Children lists survive (the runtime
+    /// data structure the TreeView actually binds to).
+    /// </remarks>
     public static List<IntegrityFileTreeNodeViewModel> BuildTree(IEnumerable<BackedUpFile> files)
     {
-        // Group by top-level drive/root for clean visual separation.
         var roots = new Dictionary<string, IntegrityFileTreeNodeViewModel>(System.StringComparer.OrdinalIgnoreCase);
+        // Per-node child-folder lookup; absent for leaf nodes.
+        var folderLookup = new Dictionary<IntegrityFileTreeNodeViewModel, Dictionary<string, IntegrityFileTreeNodeViewModel>>();
 
         foreach (var file in files.OrderBy(f => f.LocalPath, System.StringComparer.OrdinalIgnoreCase))
         {
@@ -104,15 +115,17 @@ public partial class IntegrityFileTreeNodeViewModel : TreeNodeViewModelBase<Inte
                 root = new IntegrityFileTreeNodeViewModel(rootName, rootName,
                     isFolder: true, file: null, backedUpAt: file.BackedUpAt);
                 roots[rootName] = root;
+                folderLookup[root] = new Dictionary<string, IntegrityFileTreeNodeViewModel>(System.StringComparer.OrdinalIgnoreCase);
             }
 
-            InsertFile(root, parts, 1, file);
+            InsertFile(root, parts, 1, file, folderLookup);
         }
 
         return roots.Values.OrderBy(r => r.Name, System.StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    private static void InsertFile(IntegrityFileTreeNodeViewModel parent, string[] parts, int index, BackedUpFile file)
+    private static void InsertFile(IntegrityFileTreeNodeViewModel parent, string[] parts, int index,
+        BackedUpFile file, Dictionary<IntegrityFileTreeNodeViewModel, Dictionary<string, IntegrityFileTreeNodeViewModel>> folderLookup)
     {
         if (index == parts.Length - 1)
         {
@@ -127,18 +140,20 @@ public partial class IntegrityFileTreeNodeViewModel : TreeNodeViewModelBase<Inte
         }
 
         var folderName = parts[index];
-        var folderPath = string.Join(Path.DirectorySeparatorChar.ToString(), parts.Take(index + 1));
-        var existing = parent.Children.FirstOrDefault(c => c.IsFolder && string.Equals(c.Name, folderName, System.StringComparison.OrdinalIgnoreCase));
-        if (existing == null)
+        var siblings = folderLookup[parent];
+        if (!siblings.TryGetValue(folderName, out var existing))
         {
+            var folderPath = string.Join(Path.DirectorySeparatorChar.ToString(), parts.Take(index + 1));
             existing = new IntegrityFileTreeNodeViewModel(folderName, folderPath,
                 isFolder: true, file: null, file.BackedUpAt)
             {
                 Parent = parent
             };
             parent.Children.Add(existing);
+            siblings[folderName] = existing;
+            folderLookup[existing] = new Dictionary<string, IntegrityFileTreeNodeViewModel>(System.StringComparer.OrdinalIgnoreCase);
         }
-        InsertFile(existing, parts, index + 1, file);
+        InsertFile(existing, parts, index + 1, file, folderLookup);
     }
 
     private static string[] SplitPath(string path)

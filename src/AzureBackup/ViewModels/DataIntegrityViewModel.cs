@@ -153,6 +153,12 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     public bool HasRunHistory => RunHistory.Count > 0;
 
     /// <summary>
+    /// True when the backup catalogue has at least one file. Drives the
+    /// empty-state TextBlock in the file-tree panel (D7 review fix 2.5).
+    /// </summary>
+    public bool HasFiles => FileTreeRoots.Count > 0;
+
+    /// <summary>
     /// True when there is a non-empty failure list to re-check (either
     /// the latest run or a historical run selected in the History
     /// expander) and no operation is currently running.
@@ -172,7 +178,11 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     /// <summary>
     /// Loads the file tree from the persisted backup corpus. Called on
     /// first navigation to the tab and any time the user clicks Refresh.
+    /// Exposed as a RelayCommand so the view can bind a Refresh button
+    /// (D7 review fix 3.4) -- after backing up new files in another tab,
+    /// the user can repopulate without restarting.
     /// </summary>
+    [RelayCommand]
     public async Task RefreshFileTreeAsync()
     {
         var files = await Task.Run(() => _databaseService.GetAllBackedUpFiles());
@@ -182,6 +192,7 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
         {
             FileTreeRoots.Clear();
             foreach (var r in roots) FileTreeRoots.Add(r);
+            OnPropertyChanged(nameof(HasFiles));
             ApplyScopePreset(SelectedScopePreset);
             RefreshHistory();
         });
@@ -190,26 +201,48 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     /// <summary>
     /// Recompute the failure-list pane from the most recent persisted run.
     /// Called after a check completes and on app start (to restore last
-    /// state since the tab persists indefinitely).
+    /// state since the tab persists indefinitely). Reads run via
+    /// <see cref="Task.Run"/> so a large failures table does not hitch
+    /// the UI thread (D7 review fix 1.4).
     /// </summary>
     public void RefreshHistory()
     {
-        RunHistory.Clear();
-        var runs = _databaseService.GetRecentIntegrityCheckRuns(limit: 10);
-        foreach (var r in runs)
+        // Run the DB reads on a background thread; marshal updates back
+        // through Avalonia's dispatcher. Fire-and-forget is acceptable
+        // here -- a slow refresh just delays the visible update; it
+        // cannot corrupt state.
+        _ = Task.Run(() =>
         {
-            RunHistory.Add(new IntegrityCheckRunViewModel(r));
-        }
-        OnPropertyChanged(nameof(HasRunHistory));
+            var runs = _databaseService.GetRecentIntegrityCheckRuns(limit: 10);
+            var latest = runs.FirstOrDefault();
+            var failures = latest != null
+                ? _databaseService.GetIntegrityCheckFailures(latest.Id)
+                : new List<IntegrityCheckFailure>();
 
-        FailureGroups.Clear();
-        var latest = runs.FirstOrDefault();
-        if (latest != null)
-        {
-            var failures = _databaseService.GetIntegrityCheckFailures(latest.Id);
-            PopulateFailureGroups(failures);
-        }
-        OnPropertyChanged(nameof(HasFailures));
+            Dispatcher.UIThread.Post(() =>
+            {
+                RunHistory.Clear();
+                foreach (var r in runs)
+                {
+                    RunHistory.Add(new IntegrityCheckRunViewModel(r));
+                }
+                OnPropertyChanged(nameof(HasRunHistory));
+
+                FailureGroups.Clear();
+                if (latest != null)
+                {
+                    PopulateFailureGroups(failures);
+                }
+                OnPropertyChanged(nameof(HasFailures));
+
+                // D7 review fix 1.7: clear the user's prior History row
+                // selection because the VM instances they pointed at have
+                // just been replaced. Setting null intentionally triggers
+                // OnSelectedRunChanged which redirects the failures pane
+                // back to the latest run.
+                SelectedRun = null;
+            });
+        });
     }
 
     private void PopulateFailureGroups(IList<IntegrityCheckFailure> failures)
@@ -466,17 +499,31 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
 
     partial void OnSelectedRunChanged(IntegrityCheckRunViewModel? value)
     {
-        // Repopulate the failures pane with this run's rows. Null = show
-        // the latest run (default behaviour).
-        FailureGroups.Clear();
-        var runId = value?.Run.Id ?? _databaseService.GetRecentIntegrityCheckRuns(1).FirstOrDefault()?.Id ?? 0;
-        if (runId > 0)
+        // D7 review fix 1.3: move DB read off the UI thread. A run with
+        // thousands of failure rows would visibly hitch the click.
+        var runId = value?.Run.Id ?? 0;
+        _ = Task.Run(() =>
         {
-            var failures = _databaseService.GetIntegrityCheckFailures(runId);
-            PopulateFailureGroups(failures);
-        }
-        OnPropertyChanged(nameof(HasFailures));
-        OnPropertyChanged(nameof(CanReCheckFailures));
+            // null SelectedRun => fall back to latest run (the on-tab-
+            // open default). Otherwise show the requested historical run.
+            var effectiveRunId = runId > 0
+                ? runId
+                : _databaseService.GetRecentIntegrityCheckRuns(1).FirstOrDefault()?.Id ?? 0;
+            var failures = effectiveRunId > 0
+                ? _databaseService.GetIntegrityCheckFailures(effectiveRunId)
+                : new List<IntegrityCheckFailure>();
+
+            Dispatcher.UIThread.Post(() =>
+            {
+                FailureGroups.Clear();
+                if (effectiveRunId > 0)
+                {
+                    PopulateFailureGroups(failures);
+                }
+                OnPropertyChanged(nameof(HasFailures));
+                OnPropertyChanged(nameof(CanReCheckFailures));
+            });
+        });
     }
 
     /// <summary>

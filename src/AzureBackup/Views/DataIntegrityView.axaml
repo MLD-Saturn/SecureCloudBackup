@@ -51,8 +51,16 @@
         <!-- File tree panel -->
         <Border Grid.Row="2" Classes="card" Margin="0,0,0,8">
             <Grid RowDefinitions="Auto,*">
-                <TextBlock Grid.Row="0" Text="Files in scope" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                <TreeView Grid.Row="1"
+                <Grid Grid.Row="0" ColumnDefinitions="*,Auto" Margin="0,0,0,4">
+                    <TextBlock Grid.Column="0" Text="Files in scope" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    <Button Grid.Column="1" Content="Refresh files" Command="{Binding RefreshFileTreeCommand}"
+                            ToolTip.Tip="Re-read the backup catalogue. Use this after backing up new files in another tab so they appear here without restarting the app."/>
+                </Grid>
+                <TextBlock Grid.Row="1" IsVisible="{Binding !HasFiles}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Opacity="0.6" TextAlignment="Center"
+                           Text="No backed-up files yet. Run a backup from the Sync tab first, then click Refresh files."/>
+                <TreeView Grid.Row="1" IsVisible="{Binding HasFiles}"
                           ItemsSource="{Binding FileTreeRoots}">
                     <TreeView.ItemContainerTheme>
                         <ControlTheme TargetType="TreeViewItem"
@@ -82,7 +90,7 @@
         <Border Grid.Row="3" Classes="card" Margin="0,0,0,8"
                 IsVisible="{Binding IsOperationInProgress}">
             <StackPanel Orientation="Vertical" Spacing="4">
-                <TextBlock Text="{Binding ProgressText}" FontSize="12"/>
+                <TextBlock Text="{Binding ProgressText}" FontSize="12" TextTrimming="CharacterEllipsis"/>
                 <ProgressBar Value="{Binding ProgressValue}" Maximum="100" Height="8"/>
                 <TextBlock FontSize="11" Opacity="0.7">
                     <Run Text="T1 fail: "/><Run Text="{Binding T1FailCount}"/>
@@ -143,7 +151,7 @@
                           IsVisible="{Binding HasRunHistory}">
                     <ListBox ItemsSource="{Binding RunHistory}"
                              SelectedItem="{Binding SelectedRun, Mode=TwoWay}"
-                             MaxHeight="160">
+                             MaxHeight="320">
                         <ListBox.ItemTemplate>
                             <DataTemplate x:DataType="vm:IntegrityCheckRunViewModel">
                                 <TextBlock Text="{Binding Header}" FontFamily="Consolas,monospace" FontSize="11"/>

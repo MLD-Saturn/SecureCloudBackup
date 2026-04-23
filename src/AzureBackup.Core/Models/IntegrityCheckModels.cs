@@ -93,6 +93,23 @@ public sealed class IntegrityCheckRun
     public int FilesFailedT3 { get; set; }
     public int FilesWarning { get; set; }
 
+    /// <summary>
+    /// True when the run was cancelled before processing every file in
+    /// scope. Partial-state contract for cancelled runs:
+    /// <list type="bullet">
+    ///   <item><c>FilesChecked</c>, <c>FilesPassed</c>, <c>FilesFailedT1</c>,
+    ///         <c>FilesFailedT2</c>, <c>FilesFailedT3</c>, <c>FilesWarning</c>
+    ///         reflect the work completed BEFORE cancellation.</item>
+    ///   <item>The integrity_check_failures table contains every failure
+    ///         that was discovered before cancellation.</item>
+    ///   <item><c>FinishedUtc</c> is the cancellation timestamp, not the
+    ///         scope's natural completion time.</item>
+    ///   <item>Files that were in scope but never processed have NO row
+    ///         and are NOT counted in any of the Files* totals.</item>
+    /// </list>
+    /// A re-check of a cancelled run will re-process files that were
+    /// already classified before cancel.
+    /// </summary>
     public bool Cancelled { get; set; }
 
     /// <summary>

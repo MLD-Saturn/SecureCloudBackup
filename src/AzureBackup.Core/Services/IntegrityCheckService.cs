@@ -116,6 +116,12 @@ public sealed class IntegrityCheckService
         ArgumentNullException.ThrowIfNull(options);
         if (!_databaseService.IntegrityCheckSupported)
             throw new NotSupportedException("Integrity check requires the SQLite backend (see LocalDatabaseService).");
+        // D7 review fix 1.12: programmer error -- a 0-file run is
+        // ambiguous (would record a "passing" run row that summarises
+        // nothing). The UI guards against this via CanRunCheck but the
+        // engine should reject it independently.
+        if (options.FileIds.Count == 0)
+            throw new ArgumentException("FileIds must be non-empty.", nameof(options));
 
         // --- Setup ---
         var startedUtc = DateTime.UtcNow;
@@ -157,8 +163,11 @@ public sealed class IntegrityCheckService
         // 1000-file run that is ~1000 full table scans (O(N^2) over N files
         // = O(N^3) over chunks); a 10K-file run was unusable. The map
         // below converts the lookup to O(1) per file.
-        var corpus = (await Task.Run(() => _databaseService.GetAllBackedUpFiles(), cancellationToken))
-            .ToDictionary(f => f.Id);
+        // D7 review fix: the corpus snapshot uses Task.Run with the
+        // cancellation token, so a pre-cancelled token throws BEFORE we
+        // reach the catch handler that sets run.Cancelled. Allocate
+        // empty corpus on cancel so the run row is properly stamped.
+        Dictionary<int, BackedUpFile> corpus;
 
         // D5 fix 3.2/3.3: single shared semaphores across the run. Pre-D5
         // each per-file worker had its own SemaphoreSlim(16) which the 8
@@ -170,6 +179,9 @@ public sealed class IntegrityCheckService
 
         try
         {
+            corpus = (await Task.Run(() => _databaseService.GetAllBackedUpFiles(), cancellationToken))
+                .ToDictionary(f => f.Id);
+
             // Per-file workers. File-level parallelism (8) stays the same as
             // the rest of the app; each file's chunks are checked sequentially
             // because that's where the cancel-friendly progress reporting
@@ -367,7 +379,7 @@ public sealed class IntegrityCheckService
                     LocalPath = fileFromDb.LocalPath,
                     FailureTier = 1,
                     FailureReason = "engine-error",
-                    Detail = $"{{\"exception\":\"{ex.GetType().Name}\",\"message\":\"{ex.Message.Replace("\"", "\\\"")}\"}}",
+                    Detail = Detail(("exception", ex.GetType().Name), ("message", ex.Message)),
                     DiagFilePath = diagPath
                 });
             }
@@ -393,6 +405,24 @@ public sealed class IntegrityCheckService
         CancellationToken cancellationToken)
     {
         var blobName = $"chunks/{chunk.Hash}";
+        // D7 review fix 1.11: defensive bounds check on chunk.Length so
+        // a malformed DB row does not later trip ArrayPool.Rent or read
+        // a non-sense byte range from the local file. Negative or
+        // zero-length chunks cannot describe real data.
+        if (chunk.Length <= 0)
+        {
+            failures.Add(new IntegrityCheckFailure
+            {
+                RunId = runId,
+                FileId = file.Id,
+                LocalPath = file.LocalPath,
+                FailureTier = 1,
+                FailureReason = "invalid-chunk-length",
+                ChunkHash = chunk.Hash,
+                Detail = Detail(("chunkIndex", chunk.Index), ("length", chunk.Length))
+            });
+            return;
+        }
         var expectedEncryptedLength = chunk.Length + EncryptionService.EncryptionOverhead;
 
         // -------- T1: HEAD (gated by engine-shared t1Sem) --------
@@ -412,7 +442,7 @@ public sealed class IntegrityCheckService
         {
             ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, extra: "missing-blob");
             failures.Add(NewFailure(runId, file, chunk, tier: 1, reason: "missing-blob",
-                detail: $"{{\"chunkIndex\":{chunk.Index},\"totalChunks\":{file.Chunks.Count}}}"));
+                detail: Detail(("chunkIndex", chunk.Index), ("totalChunks", file.Chunks.Count))));
             return; // no point downloading what isn't there
         }
         if (contentLength != expectedEncryptedLength)
@@ -420,7 +450,7 @@ public sealed class IntegrityCheckService
             ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
                 extra: $"wrong-size expected={expectedEncryptedLength}");
             failures.Add(NewFailure(runId, file, chunk, tier: 1, reason: "wrong-size",
-                detail: $"{{\"expectedSize\":{expectedEncryptedLength},\"actualSize\":{contentLength}}}"));
+                detail: Detail(("expectedSize", expectedEncryptedLength), ("actualSize", contentLength))));
             // Escalate to T2 to capture the corruption envelope evidence too;
             // the wrong-size already constitutes a confirmed problem.
         }
@@ -458,7 +488,9 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
                     extra: $"md5-mismatch expected={Convert.ToHexString(persistedMd5)} actual={Convert.ToHexString(azureMd5)}");
                 failures.Add(NewFailure(runId, file, chunk, tier: 1, reason: "md5-mismatch",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"expectedMd5\":\"{Convert.ToHexString(persistedMd5)}\",\"actualMd5\":\"{Convert.ToHexString(azureMd5)}\"}}"));
+                    detail: Detail(("chunkIndex", chunk.Index),
+                                   ("expectedMd5", Convert.ToHexString(persistedMd5)),
+                                   ("actualMd5", Convert.ToHexString(azureMd5)))));
             }
         }
 
@@ -496,7 +528,7 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
                     crcValid: false, extra: $"crc-or-md5-fail: {ex.Message}");
                 failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "crc-mismatch",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+                    detail: Detail(("chunkIndex", chunk.Index), ("message", ex.Message))));
                 return;
             }
             catch (System.Security.Cryptography.CryptographicException ex)
@@ -504,7 +536,7 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
                     crcValid: false, extra: $"decrypt-failed: {ex.Message}");
                 failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "decrypt-failed",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+                    detail: Detail(("chunkIndex", chunk.Index), ("message", ex.Message))));
                 return;
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -512,7 +544,7 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
                     extra: $"download-error: {ex.GetType().Name}");
                 failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "download-error",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"exception\":\"{ex.GetType().Name}\"}}"));
+                    detail: Detail(("chunkIndex", chunk.Index), ("exception", ex.GetType().Name))));
                 return;
             }
         }
@@ -534,7 +566,7 @@ public sealed class IntegrityCheckService
             ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length,
                 extra: "local-file-missing");
             failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "local-file-missing",
-                detail: $"{{\"chunkIndex\":{chunk.Index},\"localPath\":\"{Escape(file.LocalPath)}\"}}"));
+                detail: Detail(("chunkIndex", chunk.Index), ("localPath", file.LocalPath))));
             return;
         }
 
@@ -553,7 +585,7 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length,
                     extra: $"local-short-read: got={read} expected={chunk.Length}");
                 failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "local-short-read",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"got\":{read},\"expected\":{chunk.Length}}}"));
+                    detail: Detail(("chunkIndex", chunk.Index), ("got", read), ("expected", chunk.Length))));
                 return;
             }
 
@@ -565,7 +597,7 @@ public sealed class IntegrityCheckService
                 ensureDiag().RecordChunk("T3", chunk.Index, chunk.Hash, chunk.Length, decrypted.Length,
                     extra: "byte-differ");
                 failures.Add(NewFailure(runId, file, chunk, tier: 3, reason: "byte-differ",
-                    detail: $"{{\"chunkIndex\":{chunk.Index},\"localLen\":{chunk.Length},\"remoteLen\":{decrypted.Length}}}"));
+                    detail: Detail(("chunkIndex", chunk.Index), ("localLen", chunk.Length), ("remoteLen", decrypted.Length))));
             }
         }
         finally
@@ -589,5 +621,17 @@ public sealed class IntegrityCheckService
         };
     }
 
-    private static string Escape(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+    /// <summary>
+    /// D7 review fix 1.9: build a JSON detail object via the system
+    /// serializer so unusual filenames / exception messages with
+    /// backslashes, quotes, control characters, or non-ASCII don't
+    /// produce invalid JSON. Replaces ~10 hand-rolled $"{{\"...\":..."}}
+    /// sites that were collectively hard to audit.
+    /// </summary>
+    private static string Detail(params (string key, object? value)[] pairs)
+    {
+        var dict = new Dictionary<string, object?>(pairs.Length);
+        foreach (var (k, v) in pairs) dict[k] = v;
+        return System.Text.Json.JsonSerializer.Serialize(dict);
+    }
 }
