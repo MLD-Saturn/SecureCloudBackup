@@ -239,6 +239,42 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task T3ByteDiffer_LocalFileModified_AfterT1Failure_ReportsT3()
+    {
+        // T3 is reachable only when T1 failed AND T2 succeeded; the
+        // engine returns early if T1 is clean. To hit T3 we replace the
+        // chunk with a VALID encryption envelope of DIFFERENT plaintext
+        // at a DIFFERENT length so T1 trips on wrong-size, T2 succeeds
+        // (the substituted envelope is internally consistent), and T3
+        // then byte-compares the decrypted-remote against the local
+        // file segment -- they don't match because the substituted
+        // plaintext is not what the local file holds.
+        var f = await SeedOneFileAsync("t3-byte.bin", RandomBytes(4096));
+        var blobName = $"chunks/{f.Chunks[0].Hash}";
+
+        // Encrypt a different-length plaintext and replace the blob.
+        var differentPlaintext = RandomBytes(1024);
+        var differentEnvelope = _encryptionService.Encrypt(differentPlaintext);
+        await _blobService.DeleteBlobAsync(blobName);
+        await _blobService.UploadBlobAsync(blobName, differentEnvelope);
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "T3 byte-differ",
+            AutoExportBundleOnFailure = false
+        });
+
+        // The contract: T1 trips on wrong-size, T2 download succeeds
+        // (substituted envelope is valid AES-GCM), T3 sees the local
+        // file's bytes != decrypted-remote and emits a byte-differ.
+        // The deepest tier classification should be T3.
+        Assert.True(result.Run.FilesFailedT3 > 0,
+            $"Expected T3 failure; got T1={result.Run.FilesFailedT1}, T2={result.Run.FilesFailedT2}, T3={result.Run.FilesFailedT3}");
+        Assert.Contains(result.Failures, x => x.FailureTier == 3 && x.FailureReason == "byte-differ");
+    }
+
+    [Fact]
     public async Task ReCheckFailures_ProducesChildRun_WithParentLineage()
     {
         // D3 lineage: ReCheckFailuresAsync feeds the parent's failed

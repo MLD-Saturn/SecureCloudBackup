@@ -105,6 +105,16 @@
                                         <ItemsControl.ItemTemplate>
                                             <DataTemplate x:DataType="vm:IntegrityFailureItemViewModel">
                                                 <Grid ColumnDefinitions="*,Auto,Auto" Margin="20,2,0,2">
+                                                    <Grid.ContextMenu>
+                                                        <ContextMenu>
+                                                            <MenuItem Header="Open .diag in default editor"
+                                                                      Command="{Binding OpenDiagCommand}"
+                                                                      IsEnabled="{Binding HasDiag}"/>
+                                                            <MenuItem Header="Show .diag in folder"
+                                                                      Command="{Binding ShowInFolderCommand}"
+                                                                      IsEnabled="{Binding HasDiag}"/>
+                                                        </ContextMenu>
+                                                    </Grid.ContextMenu>
                                                     <StackPanel Grid.Column="0" Orientation="Vertical">
                                                         <TextBlock Text="{Binding DisplayPath}"
                                                                    ToolTip.Tip="{Binding DisplayPath}"
@@ -117,6 +127,7 @@
                                                     </StackPanel>
                                                     <TextBlock Grid.Column="1" Text="{Binding DiagPath}"
                                                                FontSize="10" Opacity="0.5" Margin="8,0"
+                                                               ToolTip.Tip="Right-click to open or reveal in folder."
                                                                TextTrimming="CharacterEllipsis"/>
                                                 </Grid>
                                             </DataTemplate>

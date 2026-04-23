@@ -42,13 +42,21 @@ public sealed class IntegrityCheckService
     private readonly EncryptionService _encryptionService;
 
     /// <summary>
-    /// HEAD-request concurrency cap (D1, item 6 from the design discussion).
-    /// 16 is comfortably below Azure's 5 K transactions/sec/partition limit
-    /// and large enough that T1 stays cheap on a normal corpus. NOT exposed
-    /// in the UI -- the bottleneck is Azure RTT, not local CPU, so a knob
-    /// here would be performance-theatre.
+    /// HEAD-request concurrency cap (D5 review fix 3.2). 16 is comfortably
+    /// below Azure's 5 K transactions/sec/partition limit and large enough
+    /// that T1 stays cheap on a normal corpus. Single instance shared
+    /// across the engine so the EFFECTIVE cap is 16, not 16 x file-level
+    /// parallelism (which pre-D5 multiplied to 128).
     /// </summary>
     private const int T1Concurrency = 16;
+
+    /// <summary>
+    /// Full-blob download concurrency cap (D5 review fix 3.3). T2/T3
+    /// pull body bytes so the bottleneck is bandwidth, not request rate.
+    /// 4 keeps a healthy run cheap and a heavily-corrupted run from
+    /// saturating the link.
+    /// </summary>
+    private const int T2Concurrency = 4;
 
     /// <summary>How many integrity-check runs to keep in the history table.</summary>
     private const int RunRetention = 30;
@@ -151,13 +159,21 @@ public sealed class IntegrityCheckService
         var corpus = (await Task.Run(() => _databaseService.GetAllBackedUpFiles(), cancellationToken))
             .ToDictionary(f => f.Id);
 
+        // D5 fix 3.2/3.3: single shared semaphores across the run. Pre-D5
+        // each per-file worker had its own SemaphoreSlim(16) which the 8
+        // file-level workers multiplied to 128 effective HEAD requests in
+        // flight; T2 had no cap at all. Now T1 is bounded at 16 and T2
+        // at 4 across the entire engine, regardless of file count.
+        using var t1Sem = new SemaphoreSlim(T1Concurrency);
+        using var t2Sem = new SemaphoreSlim(T2Concurrency);
+
         try
         {
             // Per-file workers. File-level parallelism (8) stays the same as
             // the rest of the app; each file's chunks are checked sequentially
             // because that's where the cancel-friendly progress reporting
-            // lives. Chunk-level parallelism is bounded by T1Concurrency
-            // inside the per-file loop.
+            // lives. Effective HEAD/download concurrency is bounded by the
+            // shared semaphores above.
             await Parallel.ForEachAsync(
                 options.FileIds,
                 new ParallelOptions
@@ -167,7 +183,7 @@ public sealed class IntegrityCheckService
                 },
                 async (fileId, ct) =>
                 {
-                    var fileFailures = await CheckOneFileAsync(fileId, runId, corpus, ct);
+                    var fileFailures = await CheckOneFileAsync(fileId, runId, corpus, t1Sem, t2Sem, ct);
                     var processed = Interlocked.Increment(ref filesProcessed);
 
                     int t1 = 0, t2 = 0, t3 = 0, warn = 0;
@@ -272,7 +288,10 @@ public sealed class IntegrityCheckService
     /// produced; an empty list means the file is clean.
     /// </summary>
     private async Task<List<IntegrityCheckFailure>> CheckOneFileAsync(
-        int fileId, int runId, IReadOnlyDictionary<int, BackedUpFile> corpus, CancellationToken cancellationToken)
+        int fileId, int runId,
+        IReadOnlyDictionary<int, BackedUpFile> corpus,
+        SemaphoreSlim t1Sem, SemaphoreSlim t2Sem,
+        CancellationToken cancellationToken)
     {
         var failures = new List<IntegrityCheckFailure>();
         if (!corpus.TryGetValue(fileId, out var fileFromDb))
@@ -301,22 +320,16 @@ public sealed class IntegrityCheckService
 
         try
         {
-            // Bounded T1 concurrency across the file's chunks. SemaphoreSlim
-            // is shared per file; cross-file concurrency is the ParallelOptions.
-            using var t1Sem = new SemaphoreSlim(T1Concurrency);
-
+            // Process chunks sequentially within a single file -- the engine
+            // semaphores (t1Sem/t2Sem) bound the network concurrency at the
+            // engine level, so adding per-file parallelism here would be
+            // accidental complexity for no measurable benefit (see review
+            // 3.2). The file-level Parallel.ForEachAsync gives 8-way
+            // file parallelism; that is plenty.
             foreach (var chunk in fileFromDb.Chunks)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await t1Sem.WaitAsync(cancellationToken);
-                try
-                {
-                    await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, cancellationToken);
-                }
-                finally
-                {
-                    t1Sem.Release();
-                }
+                await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, t1Sem, t2Sem, cancellationToken);
             }
 
             // Always flush the diag if it was created (i.e., any failure).
@@ -364,7 +377,9 @@ public sealed class IntegrityCheckService
 
     /// <summary>
     /// Three-tier check for a single chunk. Records failures into
-    /// <paramref name="failures"/> as it escalates.
+    /// <paramref name="failures"/> as it escalates. Network calls are
+    /// gated by the engine-shared <paramref name="t1Sem"/> (HEAD) and
+    /// <paramref name="t2Sem"/> (full download) semaphores.
     /// </summary>
     private async Task CheckOneChunkAsync(
         BackedUpFile file,
@@ -372,13 +387,25 @@ public sealed class IntegrityCheckService
         int runId,
         Func<FileOperationDiagnostics> ensureDiag,
         List<IntegrityCheckFailure> failures,
+        SemaphoreSlim t1Sem,
+        SemaphoreSlim t2Sem,
         CancellationToken cancellationToken)
     {
         var blobName = $"chunks/{chunk.Hash}";
         var expectedEncryptedLength = chunk.Length + EncryptionService.EncryptionOverhead;
 
-        // -------- T1: HEAD --------
-        var (exists, contentLength, _) = await _blobService.GetChunkPropertiesAsync(blobName, cancellationToken);
+        // -------- T1: HEAD (gated by engine-shared t1Sem) --------
+        bool exists;
+        long contentLength;
+        await t1Sem.WaitAsync(cancellationToken);
+        try
+        {
+            (exists, contentLength, _) = await _blobService.GetChunkPropertiesAsync(blobName, cancellationToken);
+        }
+        finally
+        {
+            t1Sem.Release();
+        }
         if (!exists)
         {
             ensureDiag().RecordChunk("T1", chunk.Index, chunk.Hash, chunk.Length, extra: "missing-blob");
@@ -411,35 +438,47 @@ public sealed class IntegrityCheckService
             ["from"] = "T1",
             ["to"] = "T2"
         });
+        // T2 (and T3 byte-compare which depends on T2's decrypted bytes)
+        // are gated by t2Sem to bound download bandwidth on a heavily-
+        // corrupted run. Held only over the actual network download;
+        // T3's local-file re-read happens after release.
+        await t2Sem.WaitAsync(cancellationToken);
         try
         {
-            // DownloadChunkAsync runs VerifyDownloadIntegrity (X1b/X2) and
-            // emits the [CRC FAIL] diag itself if the envelope CRC fails.
-            decrypted = await _blobService.DownloadChunkAsync(blobName, cancellationToken);
+            try
+            {
+                // DownloadChunkAsync runs VerifyDownloadIntegrity (X1b/X2) and
+                // emits the [CRC FAIL] diag itself if the envelope CRC fails.
+                decrypted = await _blobService.DownloadChunkAsync(blobName, cancellationToken);
+            }
+            catch (DataIntegrityException ex)
+            {
+                ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                    crcValid: false, extra: $"crc-or-md5-fail: {ex.Message}");
+                failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "crc-mismatch",
+                    detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+                return;
+            }
+            catch (System.Security.Cryptography.CryptographicException ex)
+            {
+                ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                    crcValid: false, extra: $"decrypt-failed: {ex.Message}");
+                failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "decrypt-failed",
+                    detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
+                return;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
+                    extra: $"download-error: {ex.GetType().Name}");
+                failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "download-error",
+                    detail: $"{{\"chunkIndex\":{chunk.Index},\"exception\":\"{ex.GetType().Name}\"}}"));
+                return;
+            }
         }
-        catch (DataIntegrityException ex)
+        finally
         {
-            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
-                crcValid: false, extra: $"crc-or-md5-fail: {ex.Message}");
-            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "crc-mismatch",
-                detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
-            return;
-        }
-        catch (System.Security.Cryptography.CryptographicException ex)
-        {
-            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
-                crcValid: false, extra: $"decrypt-failed: {ex.Message}");
-            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "decrypt-failed",
-                detail: $"{{\"chunkIndex\":{chunk.Index},\"message\":\"{Escape(ex.Message)}\"}}"));
-            return;
-        }
-        catch (Exception ex)
-        {
-            ensureDiag().RecordChunk("T2", chunk.Index, chunk.Hash, chunk.Length, (int)contentLength,
-                extra: $"download-error: {ex.GetType().Name}");
-            failures.Add(NewFailure(runId, file, chunk, tier: 2, reason: "download-error",
-                detail: $"{{\"chunkIndex\":{chunk.Index},\"exception\":\"{ex.GetType().Name}\"}}"));
-            return;
+            t2Sem.Release();
         }
 
         // -------- T3: byte compare against local file --------

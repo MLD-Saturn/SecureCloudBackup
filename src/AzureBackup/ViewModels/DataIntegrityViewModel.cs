@@ -120,15 +120,27 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
 
     public ObservableCollection<IntegrityCheckRunViewModel> RunHistory { get; } = [];
 
-    /// <summary>The full list of available scope presets shown in the dropdown.</summary>
+    /// <summary>
+    /// Sentinel scope-preset value assigned to <see cref="SelectedScopePreset"/>
+    /// when the user manually toggles a checkbox in the file tree. NOT part
+    /// of the dropdown's <see cref="ScopeOptions"/> -- the user can never
+    /// pick it, only land on it via tree manipulation. Avalonia's ComboBox
+    /// happily displays a bound value that is not in its ItemsSource
+    /// without highlighting any item, which is exactly the affordance we
+    /// want for a "current state" indicator.
+    /// </summary>
+    public const string CustomScopeSentinel = "(Custom selection)";
+
+    /// <summary>The scope presets shown in the dropdown. The user picks
+    /// one of these; <see cref="CustomScopeSentinel"/> is set programmatically
+    /// when the user diverges from any preset by toggling checkboxes.</summary>
     public string[] ScopeOptions { get; } =
     [
         "This session",
         "Last 24 hours",
         "Last 7 days",
         "All files",
-        "Files that failed last run",
-        "(Custom selection)"
+        "Files that failed last run"
     ];
 
     #endregion
@@ -225,7 +237,7 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     /// </summary>
     private void ApplyScopePreset(string preset)
     {
-        if (preset == "(Custom selection)") return; // user-driven: do nothing
+        if (preset == CustomScopeSentinel) return; // user-driven: do nothing
         if (FileTreeRoots.Count == 0) return;
 
         _applyingPreset = true;
@@ -279,10 +291,10 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
         if (_applyingPreset) return;
 
         // User-driven toggle -- flip the dropdown without re-entering ApplyScopePreset.
-        if (SelectedScopePreset != "(Custom selection)")
+        if (SelectedScopePreset != CustomScopeSentinel)
         {
             _applyingPreset = true; // suppress preset re-application
-            try { SelectedScopePreset = "(Custom selection)"; }
+            try { SelectedScopePreset = CustomScopeSentinel; }
             finally { _applyingPreset = false; }
         }
         UpdateSelectedFileCount();
@@ -513,7 +525,7 @@ public sealed class IntegrityFailureGroupViewModel
     }
 }
 
-public sealed class IntegrityFailureItemViewModel
+public partial class IntegrityFailureItemViewModel : ObservableObject
 {
     public IntegrityCheckFailure Failure { get; }
     public string DisplayPath => Failure.LocalPath;
@@ -522,11 +534,72 @@ public sealed class IntegrityFailureItemViewModel
         ? "(file-scope)"
         : $"chunk {Failure.ChunkHash[..Math.Min(16, Failure.ChunkHash.Length)]}...";
     public string DiagPath => Failure.DiagFilePath ?? "(no .diag)";
+    public bool HasDiag => !string.IsNullOrEmpty(Failure.DiagFilePath) && System.IO.File.Exists(Failure.DiagFilePath);
 
     public IntegrityFailureItemViewModel(IntegrityCheckFailure failure)
     {
         Failure = failure;
     }
+
+    /// <summary>
+    /// Opens the .diag file in the system default text editor (D5 review
+    /// fix 2.8). Uses <c>UseShellExecute = true</c> so the shell picks the
+    /// default editor (Notepad on Windows, TextEdit on macOS, xdg-open on
+    /// Linux). Failures are silent because this is a best-effort UX hook;
+    /// the path is shown in the row regardless so the user can still copy
+    /// it manually.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(HasDiag))]
+    private void OpenDiag()
+    {
+        if (!HasDiag) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Failure.DiagFilePath!)
+            {
+                UseShellExecute = true
+            });
+        }
+        catch { /* best effort -- the path is shown in the row regardless */ }
+    }
+
+    /// <summary>
+    /// Reveals the .diag file in the OS file manager (Explorer / Finder /
+    /// Files). On Windows uses <c>explorer /select,</c> to highlight the
+    /// file inside its containing folder; on other platforms falls back
+    /// to opening the parent directory.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(HasDiag))]
+    private void ShowInFolder()
+    {
+        if (!HasDiag) return;
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{Failure.DiagFilePath}\"");
+            }
+            else
+            {
+                var dir = System.IO.Path.GetDirectoryName(Failure.DiagFilePath);
+                if (!string.IsNullOrEmpty(dir))
+                {
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir)
+                    {
+                        UseShellExecute = true
+                    });
+                }
+            }
+        }
+        catch { /* best effort */ }
+    }
+
+    /// <summary>
+    /// Copies the .diag file path to the system clipboard. Caller (the
+    /// view) handles the actual clipboard call because Avalonia's
+    /// clipboard API is window-scoped; the VM just exposes the string.
+    /// </summary>
+    public string PathForCopy => Failure.DiagFilePath ?? string.Empty;
 }
 
 public sealed class IntegrityCheckRunViewModel
