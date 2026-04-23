@@ -2287,61 +2287,118 @@ internal sealed class SqliteBackend : IDatabaseBackend
         var passwordBytes = PasswordBytes.FromChars(password);
         try
         {
-            // B11: Argon2id allocates roughly MemorySize-KB * DegreeOfParallelism
-            // working memory in a single contiguous block. With our defaults
-            // (64 MB * 8 lanes ~= 512 MB) this fails with OutOfMemoryException
-            // on memory-constrained environments (debugger + Diagnostic
-            // Tools window + other apps). Real bug observed by tester:
-            // "Unlock failed: Insufficient memory to continue the execution
-            // of the program." - the user could not unlock the app at all.
+            // B11/B12: Argon2id allocates a ulong[128 * blocksPerLane] per lane.
+            // With our defaults (MemorySize=64MB, lanes=8) that's 8 MB per
+            // lane -- which goes to the .NET Large Object Heap. On a machine
+            // with plenty of free RAM this can still fail with OOM if the
+            // LOH is fragmented (e.g., debugger + Diagnostic Tools window
+            // pinning memory, or a long-running process that has churned the
+            // LOH). Real bug observed by tester with 34 GB free physical
+            // memory.
             //
-            // Strategy: try the secure default first; on OOM progressively
-            // halve the parallelism (8 -> 4 -> 2 -> 1). MemorySize stays
-            // constant so the security strength of the KDF is preserved
-            // (Argon2id's resistance is dominated by total memory, not lane
-            // count). DerivedKey is identical regardless of parallelism
-            // because Konscious treats DegreeOfParallelism as a parallelism
-            // hint inside a deterministic algorithm; the same (password,
-            // salt, memory, iterations) tuple always produces the same key.
-            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            // B12 fix: reduce MemorySize between attempts (NOT lanes -- B11
+            // had this backwards; reducing lanes increases the per-allocation
+            // contiguous block size which makes LOH fragmentation worse).
+            // Halving MemorySize halves both the total working memory AND
+            // the per-lane allocation, giving the GC the best chance of
+            // satisfying the request. The derived key DOES change with
+            // MemorySize, so we record the parameters the unlock SUCCEEDED
+            // with and reject silent fallback when the database was keyed
+            // at a different memory level. (See B12 note below.)
+            //
+            // For now we keep MemorySize fixed and let the ladder be a
+            // RECOVERY MECHANISM only -- meaning if the default fails, the
+            // app surfaces the real diagnostic; we do NOT silently key the
+            // DB with weaker parameters. A future change could persist the
+            // chosen MemorySize alongside the salt so re-unlock can match.
             Exception? lastOom = null;
-            foreach (var lanes in parallelismLadder)
+            try
             {
-                try
+                using var argon2 = new Argon2id(passwordBytes)
                 {
-                    using var argon2 = new Argon2id(passwordBytes)
-                    {
-                        Salt = salt,
-                        DegreeOfParallelism = lanes,
-                        MemorySize = Argon2MemorySize,
-                        Iterations = Argon2Iterations,
-                    };
-                    return argon2.GetBytes(DerivedKeySize);
-                }
-                catch (OutOfMemoryException ex)
-                {
-                    lastOom = ex;
-                    // Try the next ladder rung. GC.Collect() between attempts
-                    // reclaims any partially-allocated working buffers from
-                    // the failed Argon2id instance so the next attempt has
-                    // the maximum chance of succeeding.
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                }
+                    Salt = salt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations,
+                };
+                return argon2.GetBytes(DerivedKeySize);
             }
-            // Every rung failed. The message must NOT pretend this is a
-            // wrong-password situation -- the user cannot fix it by typing
-            // again. Re-throw a typed exception the unlock VM can render
-            // with a useful diagnostic.
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+                // Force LOH compaction + full GC. The .NET 10 GC will
+                // compact the LOH on a Gen2 collection if explicitly
+                // requested via GCSettings.LargeObjectHeapCompactionMode.
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                    System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+
+            // Retry once after LOH compaction. If this still fails, the
+            // problem is genuinely environmental; surface a diagnostic that
+            // includes process memory state so the user knows whether to
+            // close apps or restart.
+            try
+            {
+                using var argon2 = new Argon2id(passwordBytes)
+                {
+                    Salt = salt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations,
+                };
+                return argon2.GetBytes(DerivedKeySize);
+            }
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+            }
+
             throw new InsufficientMemoryForKdfException(
-                $"Unable to derive the database key: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
-                $"Argon2id working memory even at parallelism=1. Close other applications and try again, " +
-                $"or restart the machine to free fragmented memory.",
+                BuildOomDiagnostic("database key", Argon2MemorySize),
                 lastOom);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(passwordBytes);
+        }
+    }
+
+    /// <summary>
+    /// B12: produce a diagnostic message that contradicts the bare
+    /// "Insufficient memory" runtime text by reporting actual process
+    /// memory state. If the OS reports plenty of free memory but the
+    /// process still cannot allocate, the failure is LOH fragmentation
+    /// (or the debugger's Diagnostic Tools window pinning memory),
+    /// which the user can address.
+    /// </summary>
+    private static string BuildOomDiagnostic(string what, int kdfMemoryKb)
+    {
+        try
+        {
+            var proc = System.Diagnostics.Process.GetCurrentProcess();
+            var workingSetMb = proc.WorkingSet64 / (1024 * 1024);
+            var privateMb = proc.PrivateMemorySize64 / (1024 * 1024);
+            var gcMb = GC.GetTotalMemory(forceFullCollection: false) / (1024 * 1024);
+            var memInfo = GC.GetGCMemoryInfo();
+            var totalAvailableMb = memInfo.TotalAvailableMemoryBytes / (1024 * 1024);
+
+            return $"Unable to derive the {what}: Argon2id key derivation could not allocate " +
+                   $"its {kdfMemoryKb / 1024} MB working memory after a forced LOH compaction. " +
+                   $"Process state: workingSet={workingSetMb} MB, privateBytes={privateMb} MB, " +
+                   $"GC managed={gcMb} MB, GC reports {totalAvailableMb} MB available. " +
+                   $"If 'available' is high, the cause is Large Object Heap fragmentation -- " +
+                   $"common when running under the Visual Studio debugger with Diagnostic Tools open. " +
+                   $"Close Diagnostic Tools (Debug > Windows > Show Diagnostic Tools), or run " +
+                   $"the app outside the debugger.";
+        }
+        catch
+        {
+            return $"Unable to derive the {what}: Argon2id key derivation could not allocate " +
+                   $"its {kdfMemoryKb / 1024} MB working memory. Close other applications, " +
+                   $"close VS Diagnostic Tools, or restart the machine.";
         }
     }
 

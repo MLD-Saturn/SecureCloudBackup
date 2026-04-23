@@ -89,40 +89,60 @@ public class EncryptionService : IDisposable
         var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
-            // B11: same OOM-fallback ladder as SqliteBackend.DeriveKeyFromPassword.
-            // The unlock flow runs both KDFs back-to-back so a memory-
-            // constrained machine that just barely survived the SqliteBackend
-            // pass would otherwise OOM here. Halving DegreeOfParallelism
-            // preserves the deterministic key (same password+salt+memory
-            // +iterations always produces the same bytes).
-            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            // B11/B12: see SqliteBackend.DeriveKeyFromPassword for the
+            // full rationale. Argon2id makes 8 MB-per-lane LOH allocations
+            // that occasionally fail under heavy LOH fragmentation. We try
+            // the secure default once, force LOH compaction on OOM, and
+            // try ONCE more. Reducing MemorySize would change the derived
+            // key bytes, so we never silently weaken the parameters --
+            // any genuine inability to allocate surfaces as a typed
+            // InsufficientMemoryForKdfException with diagnostic context.
             Exception? lastOom = null;
-            foreach (var lanes in parallelismLadder)
+            try
             {
-                try
+                using Argon2id argon2 = new(passwordBytes)
                 {
-                    using Argon2id argon2 = new(passwordBytes)
-                    {
-                        Salt = salt,
-                        DegreeOfParallelism = lanes,
-                        MemorySize = Argon2MemorySize,
-                        Iterations = Argon2Iterations
-                    };
-                    var result = await argon2.GetBytesAsync(KeySize);
-                    Log($"DeriveKeyAsync: Key derivation completed (lanes={lanes})");
-                    return result;
-                }
-                catch (OutOfMemoryException ex)
-                {
-                    lastOom = ex;
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                }
+                    Salt = salt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations
+                };
+                var result = await argon2.GetBytesAsync(KeySize);
+                Log("DeriveKeyAsync: Key derivation completed");
+                return result;
             }
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                    System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+
+            try
+            {
+                using Argon2id argon2 = new(passwordBytes)
+                {
+                    Salt = salt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations
+                };
+                var result = await argon2.GetBytesAsync(KeySize);
+                Log("DeriveKeyAsync: Key derivation completed (after LOH compaction)");
+                return result;
+            }
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+            }
+
             throw new InsufficientMemoryForKdfException(
-                $"Unable to derive the encryption key: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
-                "Argon2id working memory even at parallelism=1. Close other applications and try again, " +
-                "or restart the machine to free fragmented memory.",
+                $"Unable to derive the encryption key: Argon2id key derivation could not allocate " +
+                $"its {Argon2MemorySize / 1024} MB working memory after a forced LOH compaction. " +
+                $"Close other applications, close VS Diagnostic Tools, or restart the machine.",
                 lastOom);
         }
         finally
@@ -239,32 +259,48 @@ public class EncryptionService : IDisposable
         var passwordBytes = PasswordBytes.FromChars(password.Span);
         try
         {
-            // B11: same OOM-fallback ladder as DeriveKeyAsync above.
-            int[] parallelismLadder = { Argon2DegreeOfParallelism, 4, 2, 1 };
+            // B11/B12: see DeriveKeyAsync above for full rationale.
             Exception? lastOom = null;
-            foreach (var lanes in parallelismLadder)
+            try
             {
-                try
+                using Argon2id argon2 = new(passwordBytes)
                 {
-                    using Argon2id argon2 = new(passwordBytes)
-                    {
-                        Salt = verificationSalt,
-                        DegreeOfParallelism = lanes,
-                        MemorySize = Argon2MemorySize,
-                        Iterations = Argon2Iterations
-                    };
-                    return await argon2.GetBytesAsync(32);
-                }
-                catch (OutOfMemoryException ex)
-                {
-                    lastOom = ex;
-                    GC.Collect();
-                    GC.WaitForPendingFinalizers();
-                }
+                    Salt = verificationSalt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations
+                };
+                return await argon2.GetBytesAsync(32);
             }
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                    System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+                GC.WaitForPendingFinalizers();
+                GC.Collect();
+            }
+
+            try
+            {
+                using Argon2id argon2 = new(passwordBytes)
+                {
+                    Salt = verificationSalt,
+                    DegreeOfParallelism = Argon2DegreeOfParallelism,
+                    MemorySize = Argon2MemorySize,
+                    Iterations = Argon2Iterations
+                };
+                return await argon2.GetBytesAsync(32);
+            }
+            catch (OutOfMemoryException ex)
+            {
+                lastOom = ex;
+            }
+
             throw new InsufficientMemoryForKdfException(
-                $"Unable to derive the verification hash: this machine cannot allocate the {Argon2MemorySize / 1024} MB " +
-                "Argon2id working memory even at parallelism=1.",
+                $"Unable to derive the verification hash: Argon2id could not allocate " +
+                $"its {Argon2MemorySize / 1024} MB working memory after a forced LOH compaction.",
                 lastOom);
         }
         finally
