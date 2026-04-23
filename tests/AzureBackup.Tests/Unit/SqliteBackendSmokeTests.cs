@@ -166,4 +166,28 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.True(ex is InvalidPasswordException,
             $"Expected InvalidPasswordException, got {ex.GetType().Name}: {ex.Message}");
     }
+
+    [Fact]
+    public void GetPendingChanges_WithIntMaxValueBatchSize_DoesNotOom()
+    {
+        // B17 regression: pre-fix, GetPendingChanges(int.MaxValue) tried
+        // to allocate List<FileChangeEvent>(2147483647) which throws
+        // OutOfMemoryException because List<T> pre-allocates an array
+        // of the requested capacity. Real bug observed by tester:
+        // CleanupStalePendingChanges called this path during the unlock
+        // flow with int.MaxValue as a "no limit" sentinel and OOM'd
+        // even on a machine with 34 GB free physical RAM (the failure
+        // is per-allocation contiguous block availability, not absolute
+        // memory). See B15 stack trace.
+        using var backend = new SqliteBackend();
+        backend.Initialize(_dbPath, "PendingPassword123!".AsSpan());
+
+        // Empty pending_changes table is the steady-state for an
+        // unlock; the bug fires regardless of row count because the
+        // failure is the pre-allocation, not the read.
+        var result = backend.GetPendingChanges(int.MaxValue);
+
+        Assert.NotNull(result);
+        Assert.Empty(result);
+    }
 }

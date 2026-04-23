@@ -652,41 +652,72 @@ public partial class LocalDatabaseService : IDisposable
             // size-matches, drop the pending row. If the change is a
             // delete and the file is excluded, drop the pending row.
             //
-            // We call GetPendingChanges with a large batch so a single
-            // round-trip materialises the work list. RemovePendingChange
-            // uses the backend's own DELETE-by-path primitive, so each
-            // cleanup takes one small transaction on the SQLite side.
+            // B17: paginate through pending changes in fixed-size pages
+            // (10k rows) instead of asking for int.MaxValue in one call.
+            // Pre-B17 the int.MaxValue request reached SqliteBackend
+            // .GetPendingChanges which pre-allocated a List<T> with that
+            // capacity, allocating ~51 GB of references and OOM-ing the
+            // unlock flow. Real bug observed by tester: the unlock
+            // succeeded at the database level but failed during
+            // RefreshStatistics with "Insufficient memory to continue
+            // the execution of the program." (See B15 stack trace.)
+            // Pagination keeps the per-call memory bounded AND lets a
+            // future cancel/abort interrupt the cleanup mid-stream.
             var backend = _sqliteBackend;
-            var pending = backend.GetPendingChanges(int.MaxValue);
             var removedCount = 0;
-
-            foreach (var change in pending)
+            const int PageSize = 10_000;
+            // We loop until a page comes back smaller than PageSize.
+            // RemovePendingChange deletes the row in-place so on the
+            // next iteration the SQL ORDER BY skips it; no offset
+            // arithmetic needed.
+            while (true)
             {
-                var backedUp = backend.GetBackedUpFile(change.FilePath);
-                if (backedUp != null && backedUp.Status == BackupStatus.Completed)
+                var pending = backend.GetPendingChanges(PageSize);
+                if (pending.Count == 0) break;
+
+                var removedThisPage = 0;
+                foreach (var change in pending)
                 {
-                    try
+                    var backedUp = backend.GetBackedUpFile(change.FilePath);
+                    if (backedUp != null && backedUp.Status == BackupStatus.Completed)
                     {
-                        System.IO.FileInfo fileInfo = new(change.FilePath);
-                        if (fileInfo.Exists && fileInfo.Length == backedUp.FileSize)
+                        try
+                        {
+                            System.IO.FileInfo fileInfo = new(change.FilePath);
+                            if (fileInfo.Exists && fileInfo.Length == backedUp.FileSize)
+                            {
+                                backend.RemovePendingChange(change.FilePath);
+                                removedCount++;
+                                removedThisPage++;
+                            }
+                        }
+                        catch
+                        {
+                            // Can't access file - leave in pending queue
+                        }
+                    }
+                    else if (change.ChangeType == FileChangeType.Deleted)
+                    {
+                        if (backedUp != null && backedUp.Status == BackupStatus.Excluded)
                         {
                             backend.RemovePendingChange(change.FilePath);
                             removedCount++;
+                            removedThisPage++;
                         }
                     }
-                    catch
-                    {
-                        // Can't access file - leave in pending queue
-                    }
                 }
-                else if (change.ChangeType == FileChangeType.Deleted)
-                {
-                    if (backedUp != null && backedUp.Status == BackupStatus.Excluded)
-                    {
-                        backend.RemovePendingChange(change.FilePath);
-                        removedCount++;
-                    }
-                }
+
+                // If we got a partial page AND removed nothing, we are
+                // looking at rows we cannot clean up (file in use, etc.)
+                // Stop to avoid an infinite loop re-reading the same
+                // un-removable rows on every iteration.
+                if (pending.Count < PageSize && removedThisPage == 0) break;
+                // If we got a full page but removed nothing, we still
+                // need to advance past these rows. The next iteration
+                // would re-fetch the same page. Bail out to avoid the
+                // infinite loop; the un-removable rows can wait until
+                // the next launch.
+                if (removedThisPage == 0) break;
             }
 
             return removedCount;

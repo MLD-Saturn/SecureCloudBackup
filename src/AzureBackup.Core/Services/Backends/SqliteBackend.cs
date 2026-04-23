@@ -1992,13 +1992,26 @@ internal sealed class SqliteBackend : IDatabaseBackend
     /// Uses LIMIT to bound memory; LiteDB equivalent achieved the same
     /// via .OrderBy().Take().
     /// </summary>
+    /// <remarks>
+    /// B17: <paramref name="batchSize"/> is the SQL LIMIT cap, NOT the
+    /// initial allocation size of the result list. Pre-B17 the list ctor
+    /// was called with the raw batchSize, which produced an OOM when the
+    /// caller passed <c>int.MaxValue</c> as a "no limit" sentinel
+    /// (List&lt;T&gt;(2147483647) tries to allocate ~51 GB of references).
+    /// We now clamp the pre-allocation to a small ceiling and let the
+    /// list grow naturally as rows are read.
+    /// </remarks>
     public List<FileChangeEvent> GetPendingChanges(int batchSize = 100)
     {
         if (_connection == null)
             throw new InvalidOperationException("Backend is not initialized.");
         if (batchSize <= 0) batchSize = 100;
 
-        var result = new List<FileChangeEvent>(batchSize);
+        // B17: bound the up-front allocation. 1024 covers the 99th-pct
+        // batch for the FileChangeEvent worker without needing to grow.
+        const int InitialCapacityCeiling = 1024;
+        var initialCapacity = Math.Min(batchSize, InitialCapacityCeiling);
+        var result = new List<FileChangeEvent>(initialCapacity);
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
             SELECT file_path, change_type, detected_at
