@@ -274,7 +274,7 @@ public partial class BackupOrchestrator
             using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
 
             Log($"MirrorSyncToAzureAsync: Backing up {filesToBackup.Count} new/modified files " +
-                $"(max {MaxParallelFileBackups} concurrent, " +
+                $"(max {EffectiveMaxParallelFileBackups} concurrent, " +
                 $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
 
             Metrics?.RecordContext("mirror-to-azure", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
@@ -375,7 +375,7 @@ public partial class BackupOrchestrator
             Bytes = result.BytesTransferred,
             ElapsedSeconds = mirrorElapsed,
             ThroughputMbps = mirrorElapsed > 0 ? result.BytesTransferred / mirrorElapsed / (1024 * 1024) : 0,
-            FileConcurrency = MaxParallelFileBackups,
+            FileConcurrency = EffectiveMaxParallelFileBackups,
             MemoryBudgetMb = filesToBackup.Count > 0 ? (int)(_databaseService.GetConfiguration().MemoryLimitMB) : 0,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
             CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
@@ -574,7 +574,7 @@ public partial class BackupOrchestrator
         using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
 
         Log($"BackupFilesAsync: Starting parallel backup of {filePaths.Count} files " +
-            $"(max {MaxParallelFileBackups} concurrent, " +
+            $"(max {EffectiveMaxParallelFileBackups} concurrent, " +
             $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
 
         Metrics?.RecordContext("backup", config.MemoryLimitEnabled ? config.MemoryLimitMB : 0, config.MemoryLimitEnabled);
@@ -587,7 +587,7 @@ public partial class BackupOrchestrator
         Metrics?.RecordDecision("backup-concurrency", new Dictionary<string, object?>
         {
             ["files"] = filePaths.Count,
-            ["maxParallelFileBackups"] = MaxParallelFileBackups,
+            ["maxParallelFileBackups"] = EffectiveMaxParallelFileBackups,
             ["memoryBudgetMb"] = memoryBudget.IsUnlimited ? "unlimited" : (memoryBudget.TotalBytes / (1024 * 1024)).ToString(),
             ["memoryBudgetEnabled"] = config.MemoryLimitEnabled,
             ["processors"] = Environment.ProcessorCount
@@ -620,7 +620,7 @@ public partial class BackupOrchestrator
             Bytes = processedBytes,
             ElapsedSeconds = opElapsed,
             ThroughputMbps = opElapsed > 0 ? processedBytes / opElapsed / (1024 * 1024) : 0,
-            FileConcurrency = MaxParallelFileBackups,
+            FileConcurrency = EffectiveMaxParallelFileBackups,
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
             CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
@@ -692,7 +692,7 @@ public partial class BackupOrchestrator
             filePaths.Select((path, idx) => (path, idx)),
             new ParallelOptions
             {
-                MaxDegreeOfParallelism = MaxParallelFileBackups,
+                MaxDegreeOfParallelism = EffectiveMaxParallelFileBackups,
                 CancellationToken = cancellationToken
             },
             async (item, ct) =>

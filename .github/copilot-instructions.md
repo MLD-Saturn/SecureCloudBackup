@@ -1,5 +1,24 @@
 # Copilot Instructions
 
+## Read this first
+
+Before answering ANY question or doing ANY work in this repository, read
+the file `AGENT_CONTEXT.md` at the repo root. It is the persistent memory
+across Copilot sessions and contains: project facts, user preferences,
+architectural pitfalls, in-progress workstreams, recent commits, and the
+"how to update this file" maintenance protocol.
+
+UPDATE `AGENT_CONTEXT.md` during your session whenever any of these happen:
+- a user preference or convention is established or changed
+- a non-obvious production behavior is discovered
+- a benchmark is run that produces a measurable design-relevant number
+- a workstream completes, blocks, or pivots
+- a commit lands that future sessions need to know about
+- a "do not do this" lesson is learned
+
+The file's last section is a dated maintenance log; add one line per
+session that touches it.
+
 ## Terminal command execution
 
 When running PowerShell commands via the terminal tool, always emit the

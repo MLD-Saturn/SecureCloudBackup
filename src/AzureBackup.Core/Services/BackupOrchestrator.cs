@@ -46,6 +46,55 @@ public partial class BackupOrchestrator : IAsyncDisposable
     // The MemoryBudget caps total in-flight memory regardless of file count.
     private const int MaxParallelFileBackups = 8;
 
+    /// <summary>
+    /// B25-bench-2: optional per-instance override for
+    /// <see cref="MaxParallelChunkUploads"/>. When non-null the
+    /// per-file upload pipeline (channel size + consumer count) uses
+    /// this value instead of the constant. Intended for the
+    /// <c>AdaptiveChunkConcurrencyBenchmark</c> harness so it can
+    /// sweep the per-file chunk concurrency without forking the
+    /// orchestrator. Defaults to <c>null</c> -- production behaviour
+    /// is unchanged when the property is left unset.
+    /// </summary>
+    /// <remarks>
+    /// This is a deliberately minimal seam. The benchmark sets it
+    /// once on the instance immediately after construction and never
+    /// changes it during a backup. Concurrent set during an in-flight
+    /// <c>BackupFileAsync</c> would race; the production call sites
+    /// snapshot the effective value at the top of each method, so a
+    /// race produces a stale-but-valid value rather than torn state.
+    /// </remarks>
+    public int? MaxParallelChunkUploadsOverride { get; set; }
+
+    /// <summary>
+    /// B25-bench-2: optional per-instance override for
+    /// <see cref="MaxParallelFileBackups"/>. When non-null the
+    /// file-level <c>Parallel.ForEachAsync</c> uses this value
+    /// instead of the constant. Intended for the
+    /// <c>TwoTierFileSplitBenchmark</c> harness. Defaults to
+    /// <c>null</c> -- production behaviour is unchanged when the
+    /// property is left unset.
+    /// </summary>
+    public int? MaxParallelFileBackupsOverride { get; set; }
+
+    /// <summary>
+    /// Effective per-file chunk-upload concurrency. Reads
+    /// <see cref="MaxParallelChunkUploadsOverride"/> when set,
+    /// falls back to the production constant. Snapshotted once at
+    /// the top of <c>BackupFileAsync</c> so the value cannot change
+    /// mid-pipeline.
+    /// </summary>
+    private int EffectiveMaxParallelChunkUploads
+        => MaxParallelChunkUploadsOverride ?? MaxParallelChunkUploads;
+
+    /// <summary>
+    /// Effective file-level concurrency. Reads
+    /// <see cref="MaxParallelFileBackupsOverride"/> when set, falls
+    /// back to the production constant.
+    /// </summary>
+    private int EffectiveMaxParallelFileBackups
+        => MaxParallelFileBackupsOverride ?? MaxParallelFileBackups;
+
     // Batch size for the background backup monitoring loop
     private const int BackupLoopBatchSize = 50;
 
@@ -516,6 +565,10 @@ public partial class BackupOrchestrator : IAsyncDisposable
         var diag = new FileOperationDiagnostics(filePath, "Backup", DiagnosticsDirectory);
         using var _ = diag.SetAmbient();
         var fileStopwatch = Stopwatch.StartNew();
+        // B25-bench-2: snapshot the effective per-file chunk concurrency once
+        // so the override cannot change mid-pipeline. Default is the
+        // production constant (6) when no override is set.
+        var maxParallelChunkUploads = EffectiveMaxParallelChunkUploads;
         try
         {
             if (!File.Exists(filePath))
@@ -579,7 +632,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             // Pipeline: CDC + filtered upload in a single file open.
             // The bounded channel provides backpressure — the producer blocks when
             // MaxParallelChunkUploads consumers are busy uploading.
-            var channel = Channel.CreateBounded<ChunkPayload>(new BoundedChannelOptions(MaxParallelChunkUploads)
+            var channel = Channel.CreateBounded<ChunkPayload>(new BoundedChannelOptions(maxParallelChunkUploads)
             {
                 SingleWriter = true,
                 FullMode = BoundedChannelFullMode.Wait
@@ -618,7 +671,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             // chunksUploadedCount declaration above for rationale.
 
             // Consumers: upload workers read from channel in parallel
-            var consumerTasks = Enumerable.Range(0, MaxParallelChunkUploads).Select(async _ =>
+            var consumerTasks = Enumerable.Range(0, maxParallelChunkUploads).Select(async _ =>
             {
                 await foreach (var payload in channel.Reader.ReadAllAsync(cancellationToken))
                 {
@@ -913,14 +966,14 @@ public partial class BackupOrchestrator : IAsyncDisposable
                     using var batchBudget = MemoryBudget.FromConfig(batchConfig, CdcBufferOverhead);
 
                     Log($"RunBackupLoopAsync: Processing {backups.Count} files in parallel " +
-                        $"(max {MaxParallelFileBackups}, " +
+                        $"(max {EffectiveMaxParallelFileBackups}, " +
                         $"memoryBudget={(!batchBudget.IsUnlimited ? $"{batchConfig.MemoryLimitMB} MB" : "unlimited")})");
 
                     await Parallel.ForEachAsync(
                         backups,
                         new ParallelOptions
                         {
-                            MaxDegreeOfParallelism = MaxParallelFileBackups,
+                            MaxDegreeOfParallelism = EffectiveMaxParallelFileBackups,
                             CancellationToken = cancellationToken
                         },
                         async (change, ct) =>
