@@ -442,6 +442,13 @@ public partial class RestoreService
         catch (OperationCanceledException)
         {
             Log("RestoreFileAsync: Operation cancelled");
+            // B24: cancellation is a user-initiated outcome, NOT an error
+            // worth surfacing as a .diag file. Mirrors the B23 fix in
+            // BackupOrchestrator.BackupFileAsync. Without this Discard,
+            // an in-flight Restore at Cancel time leaves the diag in
+            // the live registry and the ProcessExit hook writes a
+            // stale partial snapshot to disk.
+            diag.Discard();
             FileSystemHelper.TryDelete(tempPath);
             throw;
         }
@@ -468,6 +475,17 @@ public partial class RestoreService
 
             ErrorOccurred?.Invoke(this, $"Failed to restore {file.LocalPath}: {ex.Message}");
             return false;
+        }
+        finally
+        {
+            // B24: belt-and-braces -- the success path returns true above
+            // without throwing, leaving diag registered in the static
+            // _live set. Discard removes it so the AppDomain.ProcessExit
+            // hook does NOT write a stale snapshot for a file that
+            // restored cleanly. Idempotent: calling Discard after Flush
+            // (the catch paths above) is a no-op via the _isFlushed
+            // Interlocked guard.
+            diag.Discard();
         }
     }
     
