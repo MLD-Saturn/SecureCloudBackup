@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AzureBackup.Core.Models;
+using AzureBackup.Core.Services;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
@@ -293,7 +294,7 @@ public partial class MainWindowViewModel
             AddLog($"Mirror sync: {sourceFolder} → {targetFolder}");
 
             var totalBytes = filesToSync.Sum(f => f.FileSize);
-            const long SmallFileThreshold = 100L * 1024 * 1024;
+            const long SmallFileThreshold = RestoreService.SmallFileThresholdBytes;
             var smallFileCount = filesToSync.Count(f => f.FileSize <= SmallFileThreshold);
             var smallFileTotalBytes = filesToSync.Where(f => f.FileSize <= SmallFileThreshold).Sum(f => f.FileSize);
 
@@ -513,14 +514,16 @@ public partial class MainWindowViewModel
     /// Executes a batch restore with progress tracking on the Progress tab.
     /// Uses RestoreFilesWithRemappingAsync for parallel, corrupted-recovery-aware restore.
     /// Reports per-file start/progress/complete events to <see cref="ProgressTab"/>.
-    /// Small files (≤100 MB) are grouped into an aggregate row instead of individual rows.
+    /// Small files (≤ <see cref="RestoreService.SmallFileThresholdBytes"/>) are grouped
+    /// into an aggregate row instead of individual rows, matching the production
+    /// pipeline's small-file optimization in <see cref="RestoreService"/>.
     /// </summary>
     private async Task<AzureBackup.Core.Models.RestoreResult> ExecuteRestoreWithRemappingAsync(
         List<(BackedUpFile file, string targetPath)> filesWithPaths,
         CancellationToken cancellationToken)
     {
         var totalBytes = filesWithPaths.Sum(f => f.file.FileSize);
-        const long SmallFileThreshold = 100L * 1024 * 1024;
+        const long SmallFileThreshold = RestoreService.SmallFileThresholdBytes;
         var smallFileCount = filesWithPaths.Count(f => f.file.FileSize <= SmallFileThreshold);
         var smallFileTotalBytes = filesWithPaths.Where(f => f.file.FileSize <= SmallFileThreshold).Sum(f => f.file.FileSize);
 

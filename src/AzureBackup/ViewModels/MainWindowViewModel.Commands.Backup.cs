@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using AzureBackup.Core.Models;
+using AzureBackup.Core.Services;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
@@ -364,7 +365,7 @@ public partial class MainWindowViewModel
         var totalBytes = preview.TotalBytesToTransfer;
 
         // Compute small-file grouping from preview data
-        const long SmallFileThreshold = 100L * 1024 * 1024;
+        const long SmallFileThreshold = RestoreService.SmallFileThresholdBytes;
         var includedFiles = preview.FilesToCreate.Where(f => f.IsIncluded)
             .Concat(preview.FilesToOverwrite.Where(f => f.IsIncluded))
             .ToList();

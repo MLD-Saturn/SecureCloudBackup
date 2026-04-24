@@ -3,6 +3,7 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using AzureBackup.Core;
 using AzureBackup.Core.Models;
+using AzureBackup.Core.Services;
 using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -122,7 +123,7 @@ public partial class ProgressTabViewModel : ViewModelBase
         : 0;
 
     public string SmallFileGroupText => SmallFilesTotal > 0
-        ? $"Small files (≤100 MB)    {SmallFilesCompleted:N0} / {SmallFilesTotal:N0} files"
+        ? $"Small files (≤{RestoreService.SmallFileThresholdBytes / (1024 * 1024)} MB)    {SmallFilesCompleted:N0} / {SmallFilesTotal:N0} files"
         : string.Empty;
 
     public string SmallFileGroupBytesText => SmallFilesTotalBytes > 0

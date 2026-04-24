@@ -10,6 +10,24 @@ namespace AzureBackup.Core.Services;
 public partial class RestoreService
 {
     /// <summary>
+    /// Maximum file size, in bytes, that the batch restore pipeline treats as a
+    /// "small file" and routes through the high-concurrency small-file lane
+    /// (see <see cref="RestoreFilesBatchCoreAsync"/>). Files at or below this
+    /// threshold are restored with up to <c>MaxParallelSmallFiles</c> running
+    /// in parallel; larger files use the lower-concurrency, per-file-chunked
+    /// lane.
+    /// </summary>
+    /// <remarks>
+    /// Exposed as <c>public const</c> so the desktop UI (Avalonia
+    /// <c>MainWindowViewModel</c> and <c>ProgressTabViewModel</c>) can group
+    /// the same set of files into the aggregate "Small files" progress row
+    /// without duplicating the threshold value. Previously the UI hard-coded
+    /// 100 MB while production used 16 MB, so the progress UI grouped a
+    /// strictly larger set of files than the production code actually treated
+    /// specially. Both UI and production now read this single constant.
+    /// </remarks>
+    public const long SmallFileThresholdBytes = 16L * 1024 * 1024;
+    /// <summary>
     /// Searches for files matching a pattern in the backup.
     /// </summary>
     public async Task<List<BackedUpFile>> SearchFilesAsync(
@@ -801,7 +819,7 @@ public partial class RestoreService
         int[] completedFiles = [0];
         object resultLock = new();
 
-        const long SmallFileThreshold = 16L * 1024 * 1024; 
+        const long SmallFileThreshold = SmallFileThresholdBytes;
         const int MaxParallelSmallFiles = 32;
 
         var smallFiles = new List<(BackedUpFile file, string targetPath, int originalIndex)>();
