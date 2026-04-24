@@ -66,3 +66,38 @@ When committing code that changes anything user-facing, build-related,
 or architecturally significant, audit the affected doc files in the
 same commit and update or remove stale content. Documentation that is
 not maintained alongside the code becomes a liability, not an asset.
+
+### Verified-current docs in this repo
+
+Two docs have been systematically verified against source and are
+authoritative as of their most recent commit. They MUST be maintained
+in lockstep with the code:
+
+- `docs/SETUP.md` — Azure provisioning, build-from-source, single-file
+  publish, portable mode, encryption envelope, per-extension chunking
+  config, storage tiers, file locations, technical specifications.
+- `docs/USER_GUIDE.md` — every view, every user-visible button /
+  toggle / setting, default values, end-user workflows.
+
+Per-commit maintenance protocol (these are non-negotiable):
+
+- Adding/renaming a view file (`src/AzureBackup/Views/*.axaml`) →
+  update `docs/USER_GUIDE.md` table of contents and the corresponding
+  section in the same commit.
+- Adding/renaming a user-visible button, toggle, or setting → update
+  `docs/USER_GUIDE.md` in the same commit.
+- Changing a default value the user can see → update
+  `docs/USER_GUIDE.md` in the same commit.
+- Changing the encryption envelope, Argon2id parameters, chunk-size
+  config, storage-tier set, or `AppMode.DataDirectory` resolution →
+  update `docs/SETUP.md` in the same commit.
+- Changing build flags, target framework, runtime identifiers, the
+  publish profile, or NuGet package versions called out in the
+  technical-specifications table → update `docs/SETUP.md` in the
+  same commit.
+
+When the doc and the code drift, the doc is wrong by definition; fix
+the doc, do not weaken the code to match.
+
+`AGENT_CONTEXT.md` at the repo root contains the full, more-detailed
+version of this protocol and the maintenance log of past doc fixes.

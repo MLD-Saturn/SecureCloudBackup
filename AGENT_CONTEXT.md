@@ -27,16 +27,16 @@ This file is the **persistent memory** for Copilot agent sessions on the AzureBa
 
 ## Project at a glance
 
-- **Name:** AzureBackup — a Windows desktop application that backs up local files to Azure Blob Storage with client-side encryption and content-defined chunking for deduplication.
+- **Name:** AzureBackup — a cross-platform desktop application that backs up local files to Azure Blob Storage with client-side encryption and content-defined chunking for deduplication. Runs on Windows, macOS, and Linux.
 - **Language/runtime:** C# on .NET 10 (`net10.0` TFM).
 - **Solution:** `azurebackup.sln` at repo root.
 - **Project layout:**
   - `src/AzureBackup.Core/` — all backup/restore/encryption/database logic. Cross-platform-clean C# library; no UI dependencies. **All non-trivial logic lives here.**
-  - `src/AzureBackup/` — WPF UI shell (`MainWindowViewModel` + views). **Windows-only.** A non-Windows session can build / test `Core` and `Benchmarks` but cannot build the WPF project.
+  - `src/AzureBackup/` — **Avalonia 11.3.12** desktop UI shell (`MainWindowViewModel` + views). Targets `net10.0` (no `-windows` suffix), so it builds and runs on Windows, macOS, and Linux. Verify with `Select-String Avalonia src/AzureBackup/AzureBackup.csproj` if in doubt.
   - `tests/AzureBackup.Tests/` — xUnit. As of B25-bench-2: 759 tests, all passing.
   - `benchmarks/AzureBackup.Benchmarks/` — BenchmarkDotNet 0.15.8. Release-only, never run in CI. See "Running tests and benchmarks" below.
-- **Setup:** `docs/SETUP.md` exists in the repo but is **stale until verified** (see "Documentation trust policy" below). For an authoritative setup path, run `dotnet restore azurebackup.sln; dotnet build azurebackup.sln -c Debug` from the repo root and follow whatever errors surface. NuGet restore handles the SQLCipher native binaries automatically as of the current `.csproj` files.
-- **User-facing docs:** `docs/USER_GUIDE.md` exists but is **stale until verified**. To answer a UX question authoritatively, read the relevant view code under `src/AzureBackup/Views/` and the `MainWindowViewModel` rather than quoting the doc.
+- **Setup, build, publish, file locations:** `docs/SETUP.md` is current and authoritative as of the most recent commit that touched it. If you change build flags, target frameworks, runtime identifiers, the `portable.marker` mechanism, the `AppMode.DataDirectory` resolution, or the encryption/chunking parameters listed in its "Technical specifications" table, you MUST update `docs/SETUP.md` in the same commit.
+- **End-user UX (views, settings, menus, dialogs):** `docs/USER_GUIDE.md` is current and authoritative as of the most recent commit that touched it. If you add or rename a view (`*.axaml` under `src/AzureBackup/Views/`), add or rename a button/toggle/setting, change a default value visible to the user, or change a user-visible workflow, you MUST update `docs/USER_GUIDE.md` in the same commit.
 - **Database backend:** SQLCipher-encrypted SQLite (production default since commit `63103b1` = `C-5`). Legacy LiteDB code path still present for migration only.
 - **Authentication:** Argon2id KDF (64 MB, 8 lanes, 3 iterations) for both database key derivation and the `EncryptionService` content key.
 - **Encryption envelope:** AES-256-GCM with `[magic(4) | version(1) | nonce(12) | ciphertext(N) | tag(16) | crc32(4)]`. `EncryptionService.EncryptionOverhead = 37`.
@@ -50,14 +50,28 @@ These come from `.github/copilot-instructions.md` and from explicit user instruc
 
 ### Documentation trust policy
 
-**Treat every Markdown documentation file in this repo as stale until proven current.** This includes any `README.md`, `AGENT_CONTEXT.md` (yes, even this file — verify its claims before relying on them), anything under `docs/` such as `SETUP.md` / `USER_GUIDE.md` / `stress-test-plan.md` / the `option-c-c3-results-*.md` series, and any `CONTRIBUTING.md` / similar that may appear later.
+**Treat every Markdown documentation file in this repo as stale until proven current** — with two specific exceptions noted below. This policy covers any `README.md`, `AGENT_CONTEXT.md` (yes, even this file — verify its claims before relying on them), anything under `docs/` such as `stress-test-plan.md` and the `option-c-c3-results-*.md` series, and any `CONTRIBUTING.md` / similar that may appear later.
 
-Before relying on a statement from any doc file as ground truth:
+**Verified-current docs (treat as authoritative, but maintain rigorously):**
+
+- `docs/SETUP.md` — verified accurate against source on 2026-04-24. Covers Azure provisioning, build-from-source, single-file publish, portable mode (`portable.marker`), encryption envelope, per-extension chunking config, storage tiers, `AppMode.DataDirectory` paths, and a verified "Technical specifications" table.
+- `docs/USER_GUIDE.md` — verified accurate against source on 2026-04-24. Covers every view (`SyncView`, `SettingsView`, `StorageHealthView`, `TierMigrationView`, `DataIntegrityView`, `LogsView`), the diagnostic-bundle export flow, the memory-limit slider, and all four storage tiers (Hot/Cool/Cold/Archive).
+
+**Mandatory maintenance protocol for the verified-current docs:** every commit that touches one of the things they describe MUST update them in the same commit. Specifically:
+
+- Adding/renaming a view file (`src/AzureBackup/Views/*.axaml`) → update `docs/USER_GUIDE.md` table of contents and the corresponding section.
+- Adding/renaming a user-visible button, toggle, or setting → update `docs/USER_GUIDE.md`.
+- Changing a default value the user can see (default storage tier, default container name, default exclusion patterns, default memory-limit state) → update `docs/USER_GUIDE.md`.
+- Changing the encryption envelope, Argon2id parameters, chunk-size config, storage-tier set, or `AppMode.DataDirectory` resolution → update `docs/SETUP.md`.
+- Changing build flags, target framework, runtime identifiers, the publish profile, or NuGet package versions called out in the technical-specifications table → update `docs/SETUP.md`.
+- Adding or renaming a top-level menu, tab, or workflow step → update both docs as appropriate.
+
+When the doc and the code drift, the doc is wrong by definition; fix the doc, do not weaken the code to match. If a commit cannot reasonably update the doc in the same change (e.g. an emergency hotfix), record an observation in this file's maintenance log and open a follow-up.
+
+For any other Markdown doc not on the verified-current list:
 
 - Verify it against the actual code, project files, configuration, build output, or a fresh test run. Do not paraphrase a doc claim into a response without that verification.
 - If the statement is wrong or out of date, update the doc file in the same commit as the code change that reveals the discrepancy. Do not leave a known-wrong doc file in place.
-
-When committing code that changes anything user-facing, build-related, or architecturally significant, audit the affected doc files in the same commit and update or remove stale content. Documentation that is not maintained alongside the code becomes a liability, not an asset.
 
 This file (`AGENT_CONTEXT.md`) is the one doc that future sessions are *required* to read first, so the bar for keeping it current is correspondingly higher: every commit that invalidates anything in it MUST update it in the same commit, and the maintenance log at the bottom must record the change.
 
@@ -184,8 +198,8 @@ Notes:
 - "Should we change the production default to 16-way file concurrency?" → yes per the data, pending B26a.
 - "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B26b.
 - "Can I re-run the benchmarks on this machine and compare?" → yes, results are under `BenchmarkDotNet.Artifacts/results/`. The committed numbers in each benchmark's xmldoc table are tied to whatever hardware ran them at commit time; a re-run on different hardware may show different absolute values but the deltas between configurations should be directionally consistent. Add a dated note in the maintenance log of this file if the deltas materially differ.
-- "Why does the WPF project fail to build on this machine?" → it's Windows-only. Build `AzureBackup.Core` and `AzureBackup.Benchmarks` instead.
-- "What does `MemoryLimitMB` map to in the UI?" → soft cap on in-flight chunk buffers; disabled by default. The exact UI control and binding live in `src/AzureBackup/Views/` + `MainWindowViewModel`; the `docs/USER_GUIDE.md` description may be stale, verify before quoting.
+- "Why does the WPF project fail to build on this machine?" → trick question. The UI is **Avalonia 11.3.12**, not WPF, and it targets bare `net10.0` so it builds on Windows, macOS, and Linux. If you saw an older AGENT_CONTEXT version claim WPF / Windows-only, that was wrong and is now corrected.
+- "What does `MemoryLimitMB` map to in the UI?" → a toggle plus stepped slider in `SettingsView.axaml` (search for `MemoryLimitEnabled` / `MemoryLimitSliderIndex`). Soft cap on in-flight chunk buffers; **disabled by default**. See `docs/USER_GUIDE.md` "Memory limit" — verified accurate.
 
 ---
 
@@ -213,4 +227,5 @@ Run `git log --oneline | Select-Object -First 20` for the latest. Earlier histor
 - **2026-04-24** — Initial creation. Captures B25-bench-2 in-progress state, all four benchmarks measured, two production seams added, working-tree dirty pending commit. Author: Copilot agent session (Claude Sonnet 4.5).
 - **2026-04-24** — User pointed out that PC-specific data (CPU model, free disk, terminal-tool timeout, hardware-tied benchmark numbers, workstream status that referred to uncommitted edits already long-since committed as `171f07e`) misleads sessions on other machines. Removed all such data. Removed the entire stale "what remains in W1" subsection. Added explicit "never record machine-specific values" rule to the edit policy at the top. Added pointers to `docs/SETUP.md` and `docs/USER_GUIDE.md` in the project-at-a-glance section. Replaced the hardware-tied "Local environment quirks" section with a hardware-neutral "Running tests and benchmarks" section so a fresh agent on a fresh clone knows the entry-point commands. Added an explicit Windows-only note about the WPF project. Added architectural fact #8 covering the new B25-bench-2 override seam on `BackupOrchestrator`. Promoted B25-bench / B25-bench-2 into a "Completed workstreams" section. Renumbered the active W2 (LPT investigation) since the old W2/W3 collapsed. Updated the recent-commit-history table to include `171f07e`. Author: Copilot agent session.
 - **2026-04-24** — Added two permanent rules: (1) never run `git push` under any circumstances, pushing is the user's manual job; (2) treat every Markdown doc in the repo as stale until verified against code, and update affected docs in the same commit as the code change that invalidates them. Added a new "Documentation trust policy" subsection under "Hard rules" capturing the second rule explicitly. Reworded the previous (also added today) `docs/SETUP.md` and `docs/USER_GUIDE.md` pointers in the project-at-a-glance section so they no longer treat those files as authoritative; instead they tell the agent to run a real `dotnet build` for setup and read the actual view code for UX questions. Reworded the corresponding `MemoryLimitMB` open-question entry the same way. Same updates applied to `.github/copilot-instructions.md` so a fresh agent reads them before even reaching this file. Author: Copilot agent session.
+- **2026-04-24** — Systematic rewrite of `docs/SETUP.md` and `docs/USER_GUIDE.md`. Verification against source revealed that AGENT_CONTEXT itself was wrong about the GUI framework: it claimed WPF / Windows-only, but the project is Avalonia 11.3.12 targeting bare `net10.0` (cross-platform: Windows, macOS, Linux). Fixed that error in the project-at-a-glance section and the open-questions list. Other corrections caught while verifying the docs: (a) default storage tier for new watched folders is **Hot**, not Cool as both old docs claimed; (b) the app supports **four** storage tiers (Hot/Cool/Cold/Archive), not three as both old docs claimed; (c) the app supports a **portable mode** triggered by a `portable.marker` file next to the EXE, completely undocumented before; (d) the **Data Integrity Check** and **Tier Migration** views existed but were not in the USER_GUIDE TOC; (e) the **Export Bundle** button in Logs and the **Auto-export bundle on failure** option in Data Integrity were undocumented; (f) the per-extension chunk-size config table was undocumented (old SETUP just said "64KB-1MB"); (g) the LiteDB-to-SQLCipher migration path was undocumented; (h) the diagnostic-logging story (runtime UI toggle gated on the `DIAGNOSTICLOG` build constant) was incorrectly described in USER_GUIDE as a generic runtime toggle. Both docs are now flagged in the Documentation trust policy as "verified-current" with an explicit per-commit maintenance protocol listing the categories of change that REQUIRE updating them in the same commit. Author: Copilot agent session.
 - _(Add a dated bullet here every session that touches this file. One line per session, summarize what changed in the file.)_

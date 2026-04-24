@@ -1,209 +1,288 @@
-# Azure Backup Tool - Setup Guide
+# Azure Backup Tool — Setup Guide
 
-## Overview
-
-This is a zero-knowledge encrypted backup tool that syncs your local files to Microsoft Azure Blob Storage. All encryption happens locally on your machine before any data is uploaded, ensuring that no one (including Microsoft) can read your backed-up data.
-
-## Azure Setup Instructions
-
-### Step 1: Create a Resource Group
-
-1. Go to [Azure Portal](https://portal.azure.com)
-2. Search for "Resource groups" in the top search bar
-3. Click **+ Create**
-4. Fill in:
-   - **Subscription**: Select your subscription
-   - **Resource group**: `rg-backup` (or your preferred name)
-   - **Region**: Choose a region close to you (e.g., `East US`, `West Europe`)
-5. Click **Review + create** ? **Create**
-
-### Step 2: Create a Storage Account
-
-1. Search for "Storage accounts" in the Azure portal
-2. Click **+ Create**
-3. Fill in the **Basics** tab:
-   - **Subscription**: Select your subscription
-   - **Resource group**: Select `rg-backup`
-   - **Storage account name**: `stbackup<yourname>` (must be globally unique, lowercase, no special characters)
-   - **Region**: Same region as your resource group
-   - **Performance**: **Standard** (not Premium)
-   - **Redundancy**: **Locally-redundant storage (LRS)**
-     - Or **Geo-redundant storage (GRS)** if you want disaster recovery across regions
-
-4. Click **Next: Advanced**
-   - **Require secure transfer**: ? Enabled
-   - **Enable blob public access**: ? Disabled
-   - **Enable storage account key access**: ? Enabled
-   - **Default access tier**: **Cool** (recommended for backup workloads)
-
-5. Click **Review + create** ? **Create**
-
-### Step 3: Get the Connection String
-
-1. Go to your newly created Storage Account
-2. In the left menu, under **Security + networking**, click **Access keys**
-3. Click **Show** next to the first key
-4. Copy the **Connection string** (it looks like: `DefaultEndpointsProtocol=https;AccountName=...`)
-5. Save this securely - you'll need it to configure the backup tool
+Last verified against code at commit time of this file. If you find a discrepancy between this document and the running app or current source, update this document in the same commit as the code change that revealed the discrepancy. See `.github/copilot-instructions.md` "Documentation trust policy".
 
 ---
 
-## Application Setup
+## What this app is
 
-### Running the Application
+A zero-knowledge encrypted backup tool that syncs local files to Azure Blob Storage. All encryption happens locally before any data leaves the machine, so Azure (and Microsoft) cannot read your backups. The app uses content-defined chunking (CDC) for deduplication and bandwidth-efficient delta sync.
 
-1. **From USB/Portable:**
-   - Copy the entire `AzureBackup` folder to your USB drive
-   - Run `AzureBackup.exe`
-
-2. **Publishing as Single File (for maximum portability):**
-   ```bash
-   dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
-   ```
-   For other platforms:
-   - macOS: `-r osx-x64` or `-r osx-arm64` (Apple Silicon)
-   - Linux: `-r linux-x64`
-
-### Initial Configuration
-
-1. Launch the application
-2. In the **Settings** view, choose an authentication method:
-   - **Connection String** -- paste the string from Azure Portal (from Step 3)
-   - **Microsoft Entra ID** -- click **Sign in with Microsoft** and enter your storage account name
-3. Enter a **Container Name** (default: `backup`)
-4. Click **Test Connection** to verify
-5. Enter a **Password** (this derives your encryption key)
-
-   **IMPORTANT**: If you forget this password, your data **CANNOT** be recovered!
-
-6. Click **Initialize & Connect** to encrypt the database, save settings, and connect
-
-### Adding Folders and Starting Backup
-
-1. Go to the **Sync** view
-2. Click the **+** button in the Local Files panel to add watched folders
-3. Click **Start Monitoring** to begin real-time file watching and automatic backup
+The application is a cross-platform Avalonia desktop app targeting .NET 10. It runs on Windows, macOS, and Linux.
 
 ---
 
-## How It Works
+## Azure Setup
 
-### Encryption (Zero-Knowledge)
+You need an Azure Storage Account and either a connection string or Microsoft Entra ID access.
+
+### Step 1 — Create a Resource Group
+
+1. Open the [Azure Portal](https://portal.azure.com).
+2. Search for "Resource groups" and click **+ Create**.
+3. Pick a subscription, give the group a name (e.g. `rg-backup`), and choose a region close to you.
+4. Click **Review + create**, then **Create**.
+
+### Step 2 — Create a Storage Account
+
+1. Search for "Storage accounts" and click **+ Create**.
+2. **Basics** tab:
+   - Subscription and resource group: as above.
+   - Storage account name: must be globally unique, lowercase, no special characters (e.g. `stbackup<yourname>`).
+   - Region: same as the resource group.
+   - Performance: **Standard**.
+   - Redundancy: **LRS** for cheapest, **GRS** for cross-region disaster recovery.
+3. **Advanced** tab:
+   - Require secure transfer: **Enabled**.
+   - Enable blob public access: **Disabled**.
+   - Enable storage account key access: **Enabled** (only required if you intend to use the connection-string auth path).
+   - Default access tier: **Hot** or **Cool** depending on how often you expect to restore. The app defaults new watched folders to **Hot**; you can change the per-folder tier later in Settings.
+4. **Review + create**, then **Create**.
+
+### Step 3 — Get credentials
+
+You can authenticate the app two ways. Pick one.
+
+**Option A — Connection string** (simplest, works with personal accounts):
+
+1. Open the new Storage Account.
+2. Under **Security + networking**, click **Access keys**.
+3. Click **Show** next to one of the keys.
+4. Copy the **Connection string** (starts with `DefaultEndpointsProtocol=https;AccountName=...`).
+5. Treat it like a password.
+
+**Option B — Microsoft Entra ID** (work/school accounts):
+
+1. On the Storage Account, open **Access Control (IAM)**.
+2. Add a role assignment giving your user account the **Storage Blob Data Contributor** role on this storage account.
+3. You will sign in interactively from the app; no key needed.
+
+---
+
+## Building from source (developers)
+
+Prerequisites: .NET 10 SDK. The repo includes a `global.json` pinning the SDK version; `dotnet --version` from the repo root will tell you which one.
+
+From the repo root:
 
 ```
-Your Password 
-     ?
-[Argon2id Key Derivation] ? Salt (stored locally)
-     ?
-256-bit AES Key
-     ?
-[AES-256-GCM Encryption] ? Random nonce per chunk
-     ?
-Encrypted Data ? Azure Blob Storage
+dotnet restore azurebackup.sln
+dotnet build azurebackup.sln -c Debug
 ```
 
-- **Argon2id**: Memory-hard key derivation (resistant to GPU attacks)
-- **AES-256-GCM**: Authenticated encryption (tamper-proof)
-- **Random nonce**: Each chunk has a unique nonce
-- **Zero-knowledge**: Azure only sees encrypted blobs with meaningless names
+NuGet restore handles the native SQLCipher binaries automatically through the `SQLitePCLRaw.bundle_e_sqlcipher` package.
 
-### Delta Sync (Bandwidth Optimization)
+To run the desktop app from source:
 
-For large files, the tool uses Content-Defined Chunking (CDC):
+```
+dotnet run --project src/AzureBackup -c Debug
+```
 
-1. Files are split into variable-sized chunks (64KB - 1MB)
-2. Each chunk is hashed
-3. Only chunks that have changed are uploaded
-4. Existing chunks are deduplicated (content-addressable storage)
+To run the test suite:
 
-This means if you modify a 1GB file, only the changed portions are uploaded.
+```
+dotnet test tests/AzureBackup.Tests/AzureBackup.Tests.csproj -c Debug
+```
 
-### Storage Tiers
-
-| Tier | Used For |
-|------|----------|
-| **Hot** | Frequently accessed data |
-| **Cool** | Backup data (default, recommended) |
-| **Cold** | Rarely accessed, long-term archival data |
-
-Each watched folder can be configured with a different storage tier in Settings. Cool tier provides a good balance for backup data that is:
-- Written frequently
-- Read rarely (disaster recovery only)
+For the BenchmarkDotNet performance suite, see `benchmarks/AzureBackup.Benchmarks/`. Benchmarks are Release-only and not part of CI.
 
 ---
 
-## Restore Operations
+## Publishing a portable single-file build
 
-### Individual File Restore
+The `src/AzureBackup` project is pre-configured for single-file self-contained publish (see `<PublishSingleFile>`, `<SelfContained>`, `<EnableCompressionInSingleFile>`, `<PublishReadyToRun>` in `src/AzureBackup/AzureBackup.csproj`).
 
-1. Go to the **Sync** view
-2. In the **Azure Backup** panel (right side), check the files to restore
-3. Use the **Search** bar to filter by filename
-4. Choose **Restore to original location** or click **Browse...** for a different destination
-5. Click **Restore Selected**
-6. Review the preview dialog and click **Proceed**
+Pick the runtime identifier for your target OS:
 
-### Full Folder Restore
+```
+dotnet publish src/AzureBackup -c Release -r win-x64
+dotnet publish src/AzureBackup -c Release -r linux-x64
+dotnet publish src/AzureBackup -c Release -r osx-x64
+dotnet publish src/AzureBackup -c Release -r osx-arm64
+```
 
-1. In the Azure Backup tree, select a folder
-2. Use the **Remap path** panel to set a target directory
-3. Click **Mirror Sync** to restore all files (and optionally remove extra local files)
-4. Review the preview and click **Proceed**
+The output ends up under `src/AzureBackup/bin/Release/net10.0/<rid>/publish/`.
+
+### Portable mode
+
+The app supports a "portable" mode that stores all data alongside the executable instead of in `LocalAppData`. To enable it, drop a file named `portable.marker` (any contents, even empty) next to the published executable. On launch the title bar shows `(Portable)` and `AppMode.DataDirectory` resolves to the executable directory.
+
+Without the marker file the app runs in installed mode. See "File locations" below.
+
+---
+
+## First-time configuration of the running app
+
+1. Launch the app.
+2. The **Settings** view appears with status "Not Configured".
+3. Pick an **Authentication Method**:
+   - **Connection String (Personal Accounts)** — paste the connection string from Step 3A above.
+   - **Microsoft Entra ID (Work/School)** — click **Sign in with Microsoft** to do a browser-based interactive sign-in (you have 2 minutes), then enter the Storage Account Name (just the name, not the full URL).
+4. Enter a **Container Name** (default `backup`).
+5. Click **Test Connection** to verify credentials.
+6. Enter and confirm a **Password**. This password derives the AES-256 key used to encrypt every byte sent to Azure.
+
+   **If you forget this password your data cannot be recovered.** There is no reset, no recovery question, no backdoor.
+7. Click **Initialize & Connect**. The app creates `backup.db` (encrypted with SQLCipher), stores your encrypted connection string inside it, and connects to Azure.
+8. Open the **Sync** view, click the **+** in the Local Files panel header to add folders to watch, then click **Start Monitoring**.
+
+---
+
+## How it works (technical overview)
+
+### Encryption envelope
+
+```
+Your Password
+    |
+    v
+Argon2id KDF  (memory=64 MB, lanes=8, iterations=3, salt is per-database, stored locally)
+    |
+    v
+256-bit AES key
+    |
+    v
+AES-256-GCM per chunk  (random 12-byte nonce per chunk)
+    |
+    v
+[magic(4) | version(1) | nonce(12) | ciphertext(N) | tag(16) | crc32(4)]   = 37 bytes overhead
+    |
+    v
+Encrypted blob in Azure
+```
+
+- **Argon2id** — memory-hard key derivation, resistant to GPU attacks.
+- **AES-256-GCM** — authenticated encryption; tampered ciphertext will fail to decrypt.
+- **CRC32 trailer** — fast tamper detection for partial reads, separate from the GCM tag.
+- **Zero-knowledge** — Azure only sees opaque blobs whose names are SHA-256 hashes of the encrypted content. No filenames, no folder structure, no clear-text metadata.
+
+### Content-defined chunking (deduplication)
+
+Files are split into variable-sized chunks using a Rabin-style rolling hash (window 48, prime 31). Chunk size is configured per file extension; the defaults aim for "small chunks for small files, large chunks for media":
+
+| File extension family | Min — Max chunk |
+|---|---|
+| `.txt` and similar tiny text | 16 KB — 128 KB |
+| Default (no extension match) | 64 KB — 1 MB |
+| Photos (`.jpg` and similar) | 256 KB — 4 MB |
+| Video (`.mkv` and similar) | 1 MB — 64 MB |
+
+Files larger than **500 MB** ignore the per-extension config and use 16 MB — 128 MB chunks regardless of type, for upload throughput. See `src/AzureBackup.Core/Services/ChunkingService.cs` for the authoritative table.
+
+Each chunk is hashed; only chunks whose content has changed are uploaded. Chunks shared between files are stored once.
+
+### Storage tiers
+
+The app supports four Azure tiers, configurable per watched folder:
+
+| Tier | Storage cost | Retrieval cost | Retrieval latency |
+|---|---|---|---|
+| **Hot** (default for new folders) | Highest | Lowest | Milliseconds |
+| **Cool** | Lower | Higher | Milliseconds |
+| **Cold** | Lower still | Higher still | Milliseconds |
+| **Archive** | Lowest | Highest | Hours |
+
+Use the **Tier Migration** view (in the app) to move existing chunks between tiers.
+
+### Local database
+
+The local metadata database is `backup.db`. Production builds use **SQLCipher-encrypted SQLite**; the database is unlocked at startup using your password (via the Argon2id-derived key). An older LiteDB-backed format is still supported for migration: if the app finds a legacy `backup.db`, it migrates it to the SQLite format on first unlock with the correct password. The original is preserved as a backup file for manual deletion.
+
+---
+
+## Restore operations
+
+### Single files or selections
+
+1. Open the **Sync** view.
+2. In the **Azure Backup** panel, check the files you want.
+3. Either tick **Restore to original location** or click **Browse...** for a different destination.
+4. Click **Restore Selected**, review the preview dialog, and click **Proceed**.
+
+### Whole folders / mirror sync
+
+1. Select a folder node in the Azure tree.
+2. Use the **Remap path** panel to redirect to a target local directory.
+3. Click **Mirror Sync** to make the local folder match Azure exactly. Mirror sync **deletes** local files that no longer exist in Azure under that folder, so the preview dialog will show every planned change before anything is touched. Click **Proceed** only after reviewing.
+
+For a guided UX walkthrough see `docs/USER_GUIDE.md`.
+
+---
+
+## File locations
+
+| File | Installed mode | Portable mode |
+|---|---|---|
+| `backup.db` | `%LOCALAPPDATA%\AzureBackup\backup.db` | `<exe-dir>\backup.db` |
+| Argon2id salt | next to `backup.db` | next to `backup.db` |
+| Daily logs | `<DataDirectory>\logs\` | `<DataDirectory>\logs\` |
+| Per-file `.diag` files (when present) | `<DataDirectory>\diagnostics\<session-id>\` | same |
+| Crash log | `<DataDirectory>\` | `<DataDirectory>\` |
+
+`%LOCALAPPDATA%` on non-Windows resolves to the platform's `Environment.SpecialFolder.LocalApplicationData` (e.g. `~/.local/share` on Linux, `~/Library/Application Support` on macOS).
+
+---
+
+## Diagnostics
+
+If something goes wrong, the **Logs** view has an **Export Bundle** button that zips up all logs, `.diag` files, and throughput metrics into a single archive suitable for sharing in a bug report. The bundle exporter excludes the encrypted database and salt files. The **Data Integrity Check** view also has an **Auto-export bundle on failure** option that writes the bundle automatically the first time an integrity-check failure is detected.
+
+The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runtime opt-in for service-level logging in builds that were compiled with the `DIAGNOSTICLOG` constant defined (Debug builds, by default — see `src/AzureBackup/AzureBackup.csproj` `DefineConstants`). Release builds omit the diagnostic log code entirely; the toggle has no effect there.
 
 ---
 
 ## Troubleshooting
 
 ### "Connection failed"
-- Verify your connection string is correct
-- Check that your firewall allows HTTPS (port 443) to Azure
-- Ensure the storage account exists and is accessible
+
+- Verify the connection string or storage account name.
+- Check that outbound HTTPS (port 443) to Azure is allowed by your firewall.
+- Ensure the storage account exists and the container is reachable.
+- For Entra ID auth, confirm your account has the **Storage Blob Data Contributor** role on the storage account.
+- Use **Test Connection** in Settings to isolate auth from sync.
 
 ### "Invalid password"
-- The password must match exactly what was used during initial setup
-- Passwords are case-sensitive
-- There is no password recovery - if forgotten, data is lost
 
-### "File locked"
-- The application waits up to 5 minutes for locked files
-- If a file remains locked, it will be skipped
-- Close applications using the file, or exclude it from backup
+- The password must match exactly what was used during initial setup; it is case-sensitive.
+- There is no password recovery. If forgotten, the encrypted backups are unrecoverable by design.
+- After 5 failed attempts the app applies a temporary lockout to slow brute-force attempts.
 
----
+### "File locked" / a file is being skipped
 
-## Security Best Practices
+- The backup pipeline waits up to **5 minutes** for a locked file to become readable (`BackupOrchestrator` calls `FileWatcherService.WaitForFileAsync` with a 5-minute timeout). If it remains locked, the file is skipped and will be retried on the next sync cycle.
+- Close the application that holds the lock, or add an exclusion pattern for the file.
 
-1. **Use a strong password**: At least 16 characters, mix of letters, numbers, symbols
-2. **Don't store password digitally**: Memorize it or use a physical backup
-3. **Secure your connection string**: Treat it like a password
-4. **Regular test restores**: Periodically verify you can restore files
-5. **Keep local database backed up**: The `backup.db` file contains metadata
+### Backups appear stuck or slow
+
+- Open the **Logs** view, turn on **Diagnostic Logging**, and re-trigger the operation. The log will show per-chunk timings.
+- Check the **Storage Health** view for orphaned chunks consuming space, and the **Data Integrity Check** view for any verified failures.
+- For a deeper analysis use the **Export Bundle** button and attach the zip to a bug report.
 
 ---
 
-## Technical Specifications
+## Security best practices
 
-| Component | Technology |
-|-----------|------------|
+1. Pick a strong password — at least 16 characters, mixed character classes. The app rejects weak passwords on initial setup.
+2. Do not store the password digitally next to the encrypted database. Use a password manager or write it down somewhere physically secure.
+3. Treat the Azure connection string as a secret. The app encrypts it inside `backup.db`, but the original copy you paste is your responsibility.
+4. Periodically run a real restore (to a temp folder) to verify backups are intact end-to-end.
+5. Run the **Data Integrity Check** view periodically. It re-downloads chunks and verifies hashes against the stored metadata.
+
+---
+
+## Technical specifications (verified)
+
+| Component | Value |
+|---|---|
 | Runtime | .NET 10 |
-| GUI | Avalonia UI 11 |
-| Encryption | AES-256-GCM |
-| Key Derivation | Argon2id (64MB memory, 3 iterations) |
-| Local Database | LiteDB |
-| Chunking | Content-Defined Chunking (CDC) |
-| Azure SDK | Azure.Storage.Blobs 12.x |
+| GUI framework | Avalonia 11.3.12 |
+| MVVM toolkit | CommunityToolkit.Mvvm 8.x |
+| Encryption | AES-256-GCM (per chunk) |
+| Key derivation | Argon2id, 64 MB memory, 8 lanes, 3 iterations |
+| Encryption envelope overhead | 37 bytes per chunk |
+| Local database (production) | SQLCipher-encrypted SQLite (`SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, `Microsoft.Data.Sqlite` 10.x) |
+| Local database (legacy / migration source) | LiteDB 5.x |
+| Chunking | Content-defined, Rabin-style rolling hash (window 48, prime 31), per-extension config |
+| Azure SDK | `Azure.Storage.Blobs` (see `src/AzureBackup.Core/AzureBackup.Core.csproj` for current pinned version) |
 
----
-
-## File Locations
-
-| File | Location | Purpose |
-|------|----------|---------|
-| `backup.db` | `%LOCALAPPDATA%\AzureBackup\` | Local metadata database |
-| Configuration | Inside `backup.db` | Azure connection, watched folders |
-
----
-
-## Support
-
-For issues or feature requests, please open an issue on the repository.
+If you need exact version numbers, check the `.csproj` files; this table is updated when those references change but the `.csproj` files are the source of truth.

@@ -1,444 +1,466 @@
-﻿# Azure Backup Tool - User Guide
+# Azure Backup Tool — User Guide
 
-This guide explains how to use the Azure Backup Tool for common backup and restore scenarios.
+This guide covers the everyday tasks: configuring the app, backing up files, restoring them, and getting useful diagnostic information when something goes wrong. For installation and the underlying technical design, see `docs/SETUP.md`.
 
-## Table of Contents
-
-1. [First-Time Setup](#first-time-setup)
-2. [Returning Users (Daily Unlock)](#returning-users-daily-unlock)
-3. [The Sync View](#the-sync-view)
-4. [Backing Up Files](#backing-up-files)
-5. [Restoring Files](#restoring-files)
-6. [Mirror Sync](#mirror-sync)
-7. [Deleting Files from Azure](#deleting-files-from-azure)
-8. [Managing Watched Folders](#managing-watched-folders)
-9. [Storage Health](#storage-health)
-10. [Settings](#settings)
-11. [Logs](#logs)
-12. [Drag and Drop](#drag-and-drop)
-13. [Operation Previews](#operation-previews)
-14. [Troubleshooting](#troubleshooting)
-15. [Best Practices](#best-practices)
+Last verified against code at commit time of this file. If you find a discrepancy between this document and the running app or current source, update this document in the same commit as the code change that revealed the discrepancy. See `.github/copilot-instructions.md` "Documentation trust policy".
 
 ---
 
-## First-Time Setup
+## Table of contents
 
-When you first launch the app, you will see the Settings view with "Not Configured" status.
+1. [First-time setup](#first-time-setup)
+2. [Returning users (daily unlock)](#returning-users-daily-unlock)
+3. [The Sync view](#the-sync-view)
+4. [Backing up files](#backing-up-files)
+5. [Restoring files](#restoring-files)
+6. [Mirror sync](#mirror-sync)
+7. [Deleting files from Azure](#deleting-files-from-azure)
+8. [Managing watched folders](#managing-watched-folders)
+9. [Storage Health view](#storage-health-view)
+10. [Tier Migration view](#tier-migration-view)
+11. [Data Integrity Check view](#data-integrity-check-view)
+12. [Settings](#settings)
+13. [Logs and diagnostic bundles](#logs-and-diagnostic-bundles)
+14. [Drag and drop](#drag-and-drop)
+15. [Operation previews](#operation-previews)
+16. [Troubleshooting](#troubleshooting)
+17. [Best practices](#best-practices)
 
-### Step 1: Choose an Authentication Method
+---
 
-In the **Authentication Method** card at the top of Settings, select one:
+## First-time setup
 
-- **Connection String (Personal Accounts)** -- for personal Microsoft accounts. You will paste a connection string from the Azure Portal.
-- **Microsoft Entra ID (Work/School)** -- for organizational accounts. Click **Sign in with Microsoft** to open a browser-based sign-in flow (you have 2 minutes to complete it). Then enter your **Storage Account Name** (just the name, not the full URL).
+When you first launch the app the **Settings** view opens with status "Not Configured".
 
-### Step 2: Configure Azure Storage
+### Step 1 — Choose an authentication method
 
-**If using Connection String:**
+In the **Authentication Method** card, pick one:
 
-1. Paste your **Connection String** (found in Azure Portal > Storage Account > Access keys).
-2. Enter a **Container Name** (default is "backup").
+- **Connection String (Personal Accounts)** — paste a connection string from the Azure Portal.
+- **Microsoft Entra ID (Work/School)** — click **Sign in with Microsoft** to do a browser-based interactive sign-in (you have 2 minutes to complete it). Then enter your **Storage Account Name** (just the name, not the full URL).
+
+### Step 2 — Configure Azure storage
+
+If using a connection string:
+
+1. Paste the connection string (Azure Portal → Storage Account → Access keys).
+2. Enter a **Container Name** (default `backup`).
 3. Click **Test Connection** to verify.
 
-> **Tip**: Use the **Show** toggle next to the connection string field to reveal it.
+If using Entra ID:
 
-**If using Entra ID:**
-
-1. Enter your **Storage Account Name** (e.g., "mystorageaccount").
+1. Enter the **Storage Account Name**.
 2. Enter a **Container Name**.
-3. Click **Test Connection** to verify.
+3. Click **Test Connection** to verify. Your account must hold the **Storage Blob Data Contributor** role on the storage account.
 
-> **Note**: Your Azure account must have the **Storage Blob Data Contributor** role on the storage account.
+### Step 3 — Set your encryption password
 
-### Step 3: Set Your Encryption Password
+1. Enter a strong password.
+2. Confirm it by typing it again. A red "Passwords do not match!" warning appears if they differ.
 
-1. Enter a **strong password** in the password field.
-2. **Confirm the password** by typing it again.
-3. A red warning appears if the passwords do not match.
+The password derives the AES-256 key that encrypts every byte before upload. **There is no recovery path.** If you forget it, the backed-up data is unrecoverable by design.
 
-> **CRITICAL**: If you forget this password, your data **CANNOT** be recovered. There is no password reset. Store it safely!
+### Step 4 — Initialize and connect
 
-### Step 4: Add Folders to Watch
+Click **Initialize & Connect**. The app will:
 
-1. Watched folders can be added from the **Sync** view after initializing (use the **+** button in the Local Files panel header).
-2. Alternatively, folders appear in the Settings **Watched Folders** list once added.
-3. Select a folder in the list to configure:
-   - **Storage Tier** -- Hot (frequent access), Cool (infrequent, default), or Cold (rare access).
-   - **Exclusion Patterns** -- semicolon-separated patterns to skip. Example: *.tmp;*.log;node_modules;.git;bin;obj;.vs
-
-### Step 5: Initialize and Connect
-
-Click **Initialize & Connect** to:
-- Create and encrypt the local database with your password.
-- Save and encrypt your connection string.
+- Create the local database (`backup.db`), encrypted with SQLCipher using your password.
+- Encrypt and store your connection string inside `backup.db`.
 - Connect to Azure Storage.
 
-You will see **[OK] Unlocked and Connected** when successful. The app automatically loads your Azure files and local watched folders.
+You should see a green **Unlocked and Connected** indicator. The app then auto-loads any pre-existing watched folders and Azure files.
+
+### Step 5 — Add folders to watch
+
+Watched folders are added from the **Sync** view, not from Settings:
+
+1. Open the **Sync** view.
+2. Click the **+** button in the **Local Files** panel header.
+3. Browse to the folder.
+
+Once added, you can configure each folder's storage tier and exclusion patterns from the Settings **Watched Folders** card.
 
 ---
 
-## Returning Users (Daily Unlock)
+## Returning users (daily unlock)
 
-When you relaunch the app after closing it, a **password dialog** appears automatically.
+Whenever the app launches and finds an existing `backup.db`, a **password dialog** appears immediately. Type your password and press **Enter** (or click **OK**). The app unlocks the database, reconnects to Azure, and loads your files.
 
-1. Enter your password and press **Enter** (or click **OK**).
-2. The app unlocks, reconnects to Azure, and loads your files.
+If you cancel the dialog, the app opens in the locked state. You can unlock later from Settings by entering your password and clicking **Unlock**.
 
-If you close the dialog, the app opens in locked state. You can unlock later from the **Settings** view by entering your password and clicking **Unlock**.
+After 5 wrong-password attempts the app applies a temporary lockout to slow brute-force attacks.
 
-> **Note**: Your Azure connection and watched folders are already saved. You only need your password to unlock.
 ---
 
-## The Sync View
+## The Sync view
 
-The **Sync** view is the main workspace. It is divided into two side-by-side panels with a resizable splitter between them.
+The Sync view is the main workspace. It shows two side-by-side panels with a resizable splitter.
 
-### Layout
-
-| Area | Description |
-|------|-------------|
-| **Toolbar** (top) | Summary counts, primary action buttons, status indicator |
-| **View Controls** (below toolbar) | Tree/list toggle, expand/collapse, search filter, selection controls |
+| Area | What it is |
+|---|---|
+| **Toolbar** (top) | Summary counts, primary actions, status indicator |
+| **View controls** (below toolbar) | Tree/list toggle, expand/collapse, search filter, selection controls |
 | **Local Files** (left panel) | Files in your watched folders, with backup status per file |
-| **Azure Backup** (right panel) | Files stored in Azure, with storage tier badges |
-| **Progress Panel** (below, when active) | Overall and per-file progress bars, speed, ETA, cancel button |
-| **Actions Panel** (below, when files selected) | Contextual actions for selected local and Azure files |
+| **Azure Backup** (right panel) | Files stored in Azure, with storage-tier badges |
+| **Progress panel** (when active) | Overall and per-file progress, speed, ETA, cancel button |
+| **Actions panel** (when files are selected) | Contextual actions for the current selection |
 
-### Status Indicators
+### Status indicators
 
-| Status | Indicator | Meaning |
-|--------|-----------|---------|
-| **Monitoring for Changes** | Green dot | Actively watching folders and backing up changes |
-| **Ready (Not Monitoring)** | Gray dot | Unlocked but not watching for changes |
-| **Locked (Enter Password)** | Gray dot | Needs password to unlock |
-| **Not Configured** | Gray dot | First-time setup required |
+| Status | Dot color | Meaning |
+|---|---|---|
+| Monitoring for Changes | Green | File watcher is running; changes back up automatically |
+| Ready (Not Monitoring) | Gray | Unlocked but not actively watching for changes |
+| Locked (Enter Password) | Gray | Needs the password to unlock the database |
+| Not Configured | Gray | First-time setup required |
 
-### Toolbar Buttons
+### Toolbar buttons
 
-| Button | Description |
-|--------|-------------|
-| **Sync Selected** | Backup selected local files AND restore selected Azure files in one operation |
-| **Start Monitoring** | Begin real-time file watching and automatic backup of changes |
-| **Stop Monitoring** | Stop the file watcher |
+| Button | What it does |
+|---|---|
+| **Sync Selected** | Backup the checked local files AND restore the checked Azure files in one operation |
+| **Start Monitoring** / **Stop Monitoring** | Start or stop the real-time file watcher |
 | **Refresh** | Reload both local and Azure file lists |
-| **Tree/List** | Toggle between folder tree view and flat list view |
+| **Tree / List** | Switch between hierarchical folder tree and flat scrollable list |
 
-### View Controls
+### View controls
 
-- **Expand All / Collapse All** -- expand or collapse all tree nodes (visible in tree view mode).
-- **Search** -- type a filename or path fragment to filter both panels. Click **X** to clear.
-- **Select All / Deselect All** -- check or uncheck all files in both panels.
-
-### Tree View vs. Flat List
-
-- **Tree view** displays files organized in a folder hierarchy. Folders show aggregate status. You can expand, collapse, and right-click for context menus.
-- **Flat list** shows every file in a single scrollable list with columns for path, size, and status.
-
-Toggle between them using the **Tree/List** button in the toolbar.
+- **Expand All** / **Collapse All** — only visible in tree view.
+- **Search** — type a filename or path fragment to filter both panels at once. Click **X** to clear.
+- **Select All** / **Deselect All** — bulk toggle.
 
 ---
 
-## Backing Up Files
+## Backing up files
 
-### Automatic Monitoring
+### Automatic monitoring
 
-1. Click **Start Monitoring** in the Sync toolbar.
-2. The app watches all enabled folders for file changes.
-3. Changed files are automatically queued and uploaded.
-4. The status dot turns green while monitoring is active.
+1. Click **Start Monitoring**.
+2. The watcher detects file changes inside every enabled watched folder.
+3. Changed files are queued and uploaded.
+4. Status dot turns green while monitoring.
 
-### Manual Backup of Selected Files
+The watcher waits up to **5 minutes** for files that are temporarily locked by another process before giving up; locked-out files are skipped and retried on the next sync cycle.
 
-1. In the **Local Files** panel, check the files or folders you want to back up.
+### Manual backup of a selection
+
+1. Check files or folders in the **Local Files** panel.
 2. Click **Backup Selected** in the actions panel at the bottom.
-3. A **Preview Dialog** appears showing what will be uploaded (new files, modified files, unchanged files).
-4. Review the preview, uncheck any files you want to exclude, then click **Proceed**.
+3. The **Preview Dialog** appears showing what will be uploaded (new, modified, unchanged).
+4. Optionally uncheck files to exclude, then click **Proceed**.
 5. Watch the progress panel for overall and per-file progress.
 
-### Context Menu (Tree View)
+### Right-click context menu (tree view)
 
-Right-click in the Local Files tree for additional options:
+| Item | What it does |
+|---|---|
+| Backup Selected | Upload checked files to Azure |
+| Add Watched Folder... | Add a new folder to the watch list |
+| Remove from Watch List | Remove the selected folder (does not delete from Azure) |
+| Select All / Deselect All | Bulk selection |
+| Expand All / Collapse All | Tree navigation |
+| Refresh | Reload local file list |
 
-| Menu Item | Description |
-|-----------|-------------|
-| **Backup Selected** | Upload checked files to Azure |
-| **Add Watched Folder...** | Add a new folder to the watch list |
-| **Remove from Watch List** | Remove the selected folder |
-| **Select All / Deselect All** | Bulk selection |
-| **Expand All / Collapse All** | Tree navigation |
-| **Refresh** | Reload local file list |
 ---
 
-## Restoring Files
+## Restoring files
 
-### Restore Selected Files
+### Restore selected files
 
-1. In the **Azure Backup** panel (right side), check the files you want to restore.
-2. Choose a destination:
-   - Check **Restore to original location** to put files back where they came from.
-   - Or click **Browse...** to select a different destination folder.
+1. In the **Azure Backup** panel, check the files to restore.
+2. Either tick **Restore to original location** to put them back where they were, or click **Browse...** for a different destination folder.
 3. Click **Restore Selected**.
-4. A **Preview Dialog** shows what will be created or overwritten. Review and click **Proceed**.
+4. The Preview Dialog shows what will be created or overwritten. Review and click **Proceed**.
 
-### Path Remapping
+### Path remapping
 
-When you select a folder in the Azure tree view, a **Remap path** panel appears above the file list. This lets you redirect an entire folder structure to a different location:
+When you select a folder node in the Azure tree, a **Remap path** panel appears. This redirects an entire subtree to a different location:
 
-1. Select a folder node in the Azure tree.
-2. In the remap panel, click **Browse...** or type a target path.
+1. Select a folder node.
+2. Click **Browse...** in the remap panel, or type a target path.
 3. Click **Set** to apply.
-4. Restored files under that folder will use the remapped path.
+4. Restored files under that subtree go to the remapped path.
 5. Click **Clear** to reset.
 
-### Restore Scenarios
+### What happens during restore
 
-| Scenario | Steps |
-|----------|-------|
-| **Recover a deleted file** | Check the file in Azure panel > Restore Selected |
-| **Recover to a new computer** | Check files > Browse destination > Restore Selected |
-| **Restore a folder to a different location** | Select folder in tree > Remap path > Restore Selected |
-| **Verify backup integrity** | Restore a file to a temp folder and compare |
+1. Encrypted chunks are downloaded from Azure in parallel.
+2. Each chunk is decrypted (AES-256-GCM) using the key derived from your password. Tampered or corrupt chunks fail the GCM tag check immediately.
+3. The original file is reassembled from its chunks.
+4. A SHA-256 hash check verifies end-to-end integrity against the stored metadata.
+5. The file is written to the destination.
 
-### What Happens During Restore
-
-1. Encrypted chunks are downloaded from Azure (in parallel).
-2. Chunks are decrypted using your password.
-3. The original file is reassembled.
-4. A SHA-256 hash check verifies integrity.
-5. The file is saved to the destination.
-
-> **Note**: You need the same password that was used to back up the files. Without it, restoration is impossible.
+You need the same password that was used during backup. There is no recovery path.
 
 ---
 
-## Mirror Sync
+## Mirror sync
 
-Mirror sync makes a local folder match the Azure backup exactly: missing files are restored, outdated files are updated, and extra local files are deleted.
+Mirror sync makes a local folder match the Azure backup exactly: missing files are restored, outdated files are updated, and **extra local files are deleted**.
 
-1. In the Azure tree, select a folder node.
+1. Select a folder node in the Azure tree.
 2. Use the **Remap path** panel to set the target local folder.
-3. Click **Mirror Sync** (or right-click > Mirror Sync).
-4. A **Preview Dialog** shows all planned actions (create, overwrite, delete, skip).
-5. Review carefully -- deletions are permanent. Uncheck any items you want to exclude.
-6. Click **Proceed** to start.
+3. Click **Mirror Sync** (or right-click → Mirror Sync).
+4. The Preview Dialog shows every planned action (create, overwrite, delete, skip).
+5. Review carefully — deletions are permanent. Uncheck any items you want to spare.
+6. Click **Proceed**.
 
 ---
 
-## Deleting Files from Azure
+## Deleting files from Azure
 
-1. Check the files or folders you want to remove in the **Azure Backup** panel.
-2. Click **Delete from Azure** in the actions panel (or right-click > Delete from Azure).
-3. A **Preview Dialog** shows what will be deleted.
-4. Review and click **Proceed**.
+1. Check the files or folders to remove in the **Azure Backup** panel.
+2. Click **Delete from Azure** in the actions panel (or right-click → Delete from Azure).
+3. Review the Preview Dialog and click **Proceed**.
 
-> **Warning**: Deleted files cannot be recovered from Azure after this operation.
+Deleted files cannot be recovered from Azure after this operation. Local copies are not touched.
+
 ---
 
-## Managing Watched Folders
+## Managing watched folders
 
-### Add a Folder
+### Add a folder
 
-1. Go to the **Sync** view.
+1. Open the **Sync** view.
 2. Click the **+** button in the Local Files panel header.
-3. Browse to and select the folder.
-4. The folder appears in the local tree immediately.
+3. Browse to the folder.
 
-### Remove a Folder
+### Remove a folder
 
 1. Select the folder in the Local Files tree.
-2. Click the **-** button in the panel header (or right-click > Remove from Watch List).
+2. Click the **-** button in the panel header (or right-click → Remove from Watch List).
 
-> **Note**: Removing a folder does not delete backed-up files from Azure. They remain available for restore.
+Removing a folder does not delete its backed-up files from Azure; they remain available for restore.
 
-### Configure a Folder
+### Configure a folder
 
-1. Go to **Settings**.
-2. Click a folder in the **Watched Folders** list.
+1. Open **Settings**.
+2. Click a folder in the **Watched Folders** card.
 3. Adjust:
-   - **Storage Tier** -- Hot, Cool (default), or Cold.
-   - **Exclusion Patterns** -- semicolon-separated file/folder patterns to skip.
+   - **Storage Tier** — Hot (default for new folders), Cool, Cold, or Archive.
+   - **Exclusion Patterns** — semicolon-separated glob patterns to skip.
 
-### Temporarily Disable a Folder
+### Temporarily disable a folder
 
-Uncheck the checkbox next to a folder in the Settings watched folders list. The folder will not be monitored until you re-enable it.
+Uncheck the checkbox next to a folder in the Settings watched-folders list. The folder is no longer monitored until re-enabled.
 
-### Common Exclusion Patterns
+### Common exclusion patterns
 
-| Pattern | What it Excludes |
-|---------|------------------|
-| *.tmp | Temporary files |
-| *.log | Log files |
-| .git | Git repository data |
-| node_modules | npm dependencies |
-| bin;obj | Build output folders |
-| .vs | Visual Studio cache |
-| thumbs.db | Windows thumbnail cache |
-| *.bak | Backup files |
+| Pattern | What it excludes |
+|---|---|
+| `*.tmp` | Temporary files |
+| `*.log` | Log files |
+| `*.bak` | Backup files |
+| `.git` | Git repository data |
+| `node_modules` | npm dependencies |
+| `bin;obj` | .NET build output |
+| `.vs` | Visual Studio cache |
+| `thumbs.db` | Windows thumbnail cache |
 
-**Example**: *.tmp;*.log;*.bak;node_modules;.git;bin;obj;.vs;thumbs.db
+Example combined value: `*.tmp;*.log;*.bak;node_modules;.git;bin;obj;.vs;thumbs.db`
+
 ---
 
-## Storage Health
+## Storage Health view
 
-The **Storage Health** view provides visibility into your chunk-level storage and tools for maintenance.
+The **Storage Health** view gives visibility into your chunk-level storage and tools for maintenance.
 
-### Chunk Index Summary
+### Chunk index summary
 
-Displays three key metrics:
+| Metric | What it means |
+|---|---|
+| Total Chunks | Number of content-addressed chunks stored in Azure |
+| Orphaned | Chunks no longer referenced by any file (wasted space) |
+| Deduplicated | Chunks shared by multiple files (storage saved) |
 
-| Metric | Description |
-|--------|-------------|
-| **Total Chunks** | Number of content-addressed chunks stored in Azure |
-| **Orphaned** | Chunks no longer referenced by any file (wasted storage) |
-| **Deduplicated** | Chunks shared by multiple files (storage saved via deduplication) |
+The card also shows the timestamp of the last index rebuild and the last Azure sync.
 
-Also shows the timestamp of the last index rebuild and last Azure sync.
+### Storage tier breakdown
 
-### Storage Tier Breakdown
+Visual cards per tier showing chunk count and total bytes stored:
 
-Visual cards showing how many chunks and how much data is stored in each tier:
+- **Hot** — highest access speed and cost.
+- **Cool** — recommended for backup data accessed infrequently.
+- **Cold** — lower cost still, milliseconds latency.
+- **Archive** — cheapest storage, hours of retrieval latency.
 
-- **Hot** -- highest access speed, highest storage rate.
-- **Cool** -- recommended for backups, lower storage rate.
-- **Cold** -- lowest storage rate, highest retrieval latency.
+### Orphan detection and cleanup
 
-### Orphan Detection and Cleanup
+Orphaned chunks are blobs in Azure that no file references. They waste storage.
 
-Orphaned chunks are blobs in Azure that no file references. They waste storage space.
+1. Click **Scan for Orphans**.
+2. Review the list (hash, size, tier, upload date, original file).
+3. Use **Select All** or check individual rows.
+4. Click **Delete Selected** to remove them from Azure.
 
-1. Click **Scan for Orphans** to detect them.
-2. Review the list showing hash, size, tier, upload date, and original file.
-3. Use the **Select All** checkbox or check individual items.
-4. Click **Delete Selected** to remove orphans from Azure.
+### Index management
 
-### Index Management
+| Action | What it does |
+|---|---|
+| Backup to Azure | Upload the chunk index to Azure for disaster recovery |
+| Restore from Azure | Download the index from Azure (e.g. after reinstalling) |
+| Rebuild from Azure | Rebuild the index by scanning all metadata blobs in Azure. Use this if the index is corrupted or out of sync. |
 
-| Action | Description |
-|--------|-------------|
-| **Backup to Azure** | Upload the chunk index to Azure for disaster recovery |
-| **Restore from Azure** | Download the index from Azure (e.g., after reinstalling) |
-| **Rebuild from Azure** | Rebuild the index by scanning all metadata blobs in Azure. Use this if the index is corrupted or out of sync. |
+---
+
+## Tier Migration view
+
+The **Tier Migration** view lets you move existing chunks between storage tiers (Hot ↔ Cool ↔ Cold ↔ Archive) without re-uploading them. Each tier card shows current count and bytes; choose a source and target tier and the operation rewrites only the tier metadata on each chunk.
+
+Use this when, for example, you decide that a cold archive of older media should live on the Archive tier to save monthly cost, or when promoting a frequently-restored folder back to Hot.
+
+---
+
+## Data Integrity Check view
+
+The **Data Integrity Check** view re-downloads stored chunks and verifies their hashes against the recorded metadata. Use it to confirm that backed-up data is still intact (no silent storage corruption, no partial uploads, no tier-migration mishaps).
+
+Key controls:
+
+- **Scope selector** — choose which subset of files to verify.
+- **Run** button — start the check; the progress text shows current file and chunk.
+- **History expander** — last 10 runs, click a row to see its failures.
+- **Auto-export bundle on failure** checkbox — when enabled, the first failure in a run automatically writes a diagnostic ZIP to the data directory. The bundle excludes the encrypted database and salt files (sensitive material is redacted), so it is safe to share in a bug report.
+- Per-file `.diag` files for failures can be opened in your default editor or revealed in the file manager via right-click.
+
 ---
 
 ## Settings
 
-The Settings view contains all configuration options.
+The Settings view contains all configuration. The page is divided into **cards**:
 
 ### Authentication Method
 
-Switch between **Connection String** and **Microsoft Entra ID** at any time.
+Switch between **Connection String** and **Microsoft Entra ID** at any time. The other card hides automatically.
 
-### Connection String Section (Personal Accounts)
+### Azure Storage
 
-- **Connection String** -- paste or update your Azure connection string. It is encrypted before storage.
-- **Container Name** -- the blob container to use (default: "backup").
-- **Test Connection** -- verify connectivity without saving.
-- **Update Connection String** -- clears the stored encrypted string so you can enter a new one. Your data and settings are preserved.
-- **Save & Connect** -- encrypt and save the new connection string, then reconnect.
-
-### Microsoft Entra ID Section (Work/School Accounts)
-
-- **Sign in with Microsoft** -- opens browser-based sign-in (2-minute timeout). A cancel button appears during sign-in.
-- **Storage Account Name** -- the Azure storage account name (not the full URL).
-- **Container Name** -- the blob container to use.
-- **Test Connection** -- verify connectivity.
+- **Connection String / Storage Account Name** — depending on the auth method.
+- **Container Name** — the blob container (default `backup`).
+- **Test Connection** — verify connectivity without saving.
+- **Update Connection String** — clears the stored encrypted string so a new one can be entered. Your data and settings are preserved.
+- **Save & Connect** — encrypt and save the new connection string, then reconnect.
 
 ### Password / Unlock
 
-- **Returning users**: enter your password and click **Unlock**.
-- **New users**: enter and confirm a password, then click **Initialize & Connect**.
+- Returning users: enter your password and click **Unlock**.
+- New users: enter and confirm a password, then click **Initialize & Connect**.
 
 ### Watched Folders
 
-Displays all watched folders with their enable/disable checkbox, storage tier badge, and exclusion patterns. Select a folder to configure its tier and exclusion patterns.
+Lists every watched folder with its enable/disable checkbox, storage-tier badge, and exclusion-pattern preview. Click a folder to configure its tier and exclusion patterns in the panel below.
 
-### Danger Zone
+Folders are added and removed from the **Sync** view (see "Managing watched folders" above), not from this card.
 
-**Reset Application** securely deletes all local settings, credentials, and file tracking data. Your files in Azure Storage are not affected. Requires confirmation.
+### Memory limit
+
+A toggle plus a slider that puts a soft cap on the total bytes the backup pipeline holds in flight at once (chunk buffers in transit between read, encrypt, and upload). When the toggle is **off** (default), the cap is unlimited and the pipeline can hold many GB at once on large workloads. Turn it on if you want bounded memory usage at the cost of throughput on large files.
+
+The slider snaps to a discrete set of values; the live label shows the chosen MB and a status color (green / amber / red) indicating how aggressive the cap is.
+
+### UI scale
+
+A slider that scales the whole UI, with a reset button next to it.
+
+### Danger Zone — Reset Application
+
+Securely deletes all local settings, credentials, and file-tracking data. **Files in Azure Storage are not affected.** Requires explicit confirmation. Use this if you want to start over from scratch on the same machine.
 
 ---
 
-## Logs
+## Logs and diagnostic bundles
 
 The **Logs** view shows a chronological activity log in a monospaced font.
 
-- **Diagnostic Logging** toggle (ON/OFF) -- when enabled, detailed service-level logs from encryption, chunking, restore, and blob services are included. Useful for troubleshooting.
-- **Clear Logs** -- removes all log entries from the current session.
+- **Diagnostic Logging** toggle (ON / OFF) — controls runtime opt-in for service-level logging from encryption, chunking, restore, and blob services. The toggle only has an effect in builds compiled with the `DIAGNOSTICLOG` constant defined (Debug builds, by default — Release builds omit the diagnostic-log code paths entirely so the toggle does nothing in those).
+- **Clear Logs** — wipes log entries from the current session.
+- **Export Bundle** — zips up all logs, all `.diag` files, and throughput metrics into a single archive next to the data directory. The encrypted database and salt files are excluded so the bundle is safe to share in a bug report.
+
+For repeatable bug reports the recommended sequence is:
+
+1. Open Logs, turn **Diagnostic Logging** ON.
+2. Reproduce the issue.
+3. Click **Export Bundle**.
+4. Attach the resulting ZIP to the bug report.
+
 ---
 
-## Drag and Drop
+## Drag and drop
 
 The Sync view supports drag and drop between panels:
 
-- **Drag files from the Azure panel to the Local panel** to restore them.
-- **Drag files from the Local panel to the Azure panel** to back them up.
+- Drag files from the **Azure** panel to the **Local** panel to restore them.
+- Drag files from the **Local** panel to the **Azure** panel to back them up.
 
-Drop targets highlight with a colored border and label when you drag over them.
+Drop targets highlight with a colored border and label while you drag over them.
 
 ---
 
-## Operation Previews
+## Operation previews
 
 Before any destructive or large operation (backup, restore, mirror sync, delete), a **Preview Dialog** appears showing:
 
-- **Summary statistics** -- counts of files to create, overwrite, delete, or skip.
-- **Transfer size** -- total bytes to upload or download.
-- **File list** -- every affected file with its action, size, and reason.
-- **Per-file checkboxes** -- uncheck files to exclude them from the operation.
-- **Warning banners** -- appear for operations that will delete files.
+- **Summary statistics** — counts of files to create, overwrite, delete, or skip.
+- **Transfer size** — total bytes to upload or download.
+- **File list** — every affected file with its action, size, and reason.
+- **Per-file checkboxes** — uncheck files to exclude them from the operation.
+- **Warning banners** — appear for operations that will delete files.
 
 Files are grouped by action type (new, overwrite, delete, skip) in collapsible sections. Click **Proceed** to execute or **Cancel** to abort.
+
 ---
 
 ## Troubleshooting
 
 ### "Please initialize first"
 
-Enter your password in Settings and click **Unlock** or **Initialize & Connect**.
+You are unlocked but the app is missing a configuration step. Open Settings and click **Unlock** or **Initialize & Connect**.
 
 ### "Passwords do not match"
 
-The password and confirmation fields do not match. Re-type both carefully.
+The password and confirmation fields differ. Re-type both carefully.
 
 ### "Invalid password"
 
-The password does not match what was used during initial setup. Passwords are case-sensitive. There is no password recovery.
+The password does not match what was used during initial setup. Passwords are case-sensitive. After 5 wrong attempts the app applies a temporary lockout. There is no password recovery — if forgotten, the data is unrecoverable.
 
 ### Files are not being backed up
 
-1. Ensure the folder is **enabled** (checkbox checked in Settings).
-2. Ensure the file is not matched by an **exclusion pattern**.
-3. Ensure **Monitoring** is started (green status dot in the Sync toolbar).
-4. Try clicking **Refresh** in the Sync toolbar.
+1. Confirm the folder is **enabled** (checkbox checked in Settings).
+2. Confirm the file is not matched by an **exclusion pattern**.
+3. Confirm **Monitoring** is started (green dot in Sync toolbar).
+4. Click **Refresh** in the Sync toolbar.
+5. If a single file is being skipped, it may be locked by another application — see "File locked" in `docs/SETUP.md`.
 
 ### "Connection failed"
 
-1. Verify your connection string or storage account name is correct.
-2. Check your internet connection.
+1. Verify the connection string or storage account name.
+2. Check your internet connection and any firewall rules blocking outbound HTTPS to Azure.
 3. Ensure the Azure storage account and container exist.
-4. Try **Test Connection** in Settings.
-5. For Entra ID, ensure you have the **Storage Blob Data Contributor** role.
+4. Use **Test Connection** in Settings to isolate auth from sync.
+5. For Entra ID, ensure you have the **Storage Blob Data Contributor** role on the storage account.
 
-### Restore fails with integrity error
+### Restore fails with an integrity error
 
-The backed-up data may be corrupted. Check the Logs view for details. Try restoring a different file to confirm the issue is isolated.
+The backed-up data may be corrupted, or your local metadata is out of sync with what is actually in Azure. Open the **Data Integrity Check** view and run a verification scope including the affected files. The history expander captures previous failures for comparison. For a deeper analysis use **Export Bundle** in Logs and attach the ZIP to a bug report.
 
 ### Application closes unexpectedly
 
-Check the log file in the data directory for crash details. Common causes:
-- Network interruption during upload/download
-- Insufficient disk space
+The crash log lives in the data directory (`%LOCALAPPDATA%\AzureBackup\` in installed mode, alongside the EXE in portable mode). Common causes:
+
+- Network interruption during a long upload or download
+- Insufficient disk space for the local database / temp chunk buffers
 - File access permission errors
 
 ---
 
-## Best Practices
+## Best practices
 
-1. **Run a Full Scan periodically** to catch any files missed by the real-time watcher.
-2. **Test restore periodically** to verify backups are intact.
-3. **Use exclusion patterns** to skip temporary files, build outputs, and caches.
-4. **Keep your password safe** -- consider a password manager.
-5. **Do not modify files during restore** to prevent conflicts.
-6. **Use the Storage Health view** to detect and clean up orphaned chunks.
-7. **Back up your chunk index to Azure** for disaster recovery.
+1. Run a **Refresh** in the Sync view periodically to catch any files missed by the real-time watcher.
+2. Run a **restore-to-temp-folder** test periodically to verify backups are intact end-to-end.
+3. Run the **Data Integrity Check** view periodically — at least monthly for important data.
+4. Use **exclusion patterns** to skip temporary files, build outputs, and caches. Backing them up just costs storage and bandwidth.
+5. Keep the password in a password manager. Do not store it in plain text next to the encrypted database.
+6. Do not modify files during a restore to prevent conflicts.
+7. Use the **Storage Health** view to spot and clean up orphaned chunks.
+8. **Backup the chunk index to Azure** (Storage Health → Backup to Azure) for disaster recovery — it lets you reconstruct the local database after a reinstall.
