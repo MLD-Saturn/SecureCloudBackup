@@ -1,6 +1,6 @@
 # AGENT_CONTEXT.md — Handoff for Copilot Sessions
 
-This file is the **persistent memory** for Copilot agent sessions on the AzureBackup repo. It is intentionally checked into source control so the agent can read it on a fresh chat (on any machine) and immediately understand the project state, conventions, recent decisions, and open questions.
+This file is the **persistent memory** for Copilot agent sessions on the AzureBackup repo. It is checked into source control so the agent can read it on a fresh chat (on **any machine, any OS-supported environment**) and immediately understand the project state, conventions, recent decisions, and open questions.
 
 ## How to use this file
 
@@ -15,23 +15,29 @@ This file is the **persistent memory** for Copilot agent sessions on the AzureBa
 - A commit lands that future sessions need to know about (e.g. a new B-numbered fix).
 - A "do not do this" lesson is learned (e.g. a refactor that broke something).
 
-**Edit policy:** keep entries dated (YYYY-MM-DD), keep the "Active workstreams" list small (move completed work to the "History" section), and keep the file under ~600 lines so a fresh agent can read it in one tool call.
+**Edit policy:**
+- Keep entries dated (YYYY-MM-DD).
+- Move completed workstreams to the "Completed workstreams" section near the bottom.
+- Keep the file under ~600 lines so a fresh agent can read it in one tool call.
+- **Never** record machine-specific values (free disk, CPU model, core count, terminal-tool timeouts, exact wall-clock times, OS-edition build numbers). Those mislead the next session if it is on a different PC. Record *relative* findings (deltas, percentages, comparisons) and *workload* identity (which benchmark / which workload name produced the number) instead.
 
-**Anti-pattern:** do not duplicate code or full xmldoc into this file. Reference file paths and commit hashes instead.
+**Anti-pattern:** do not duplicate code or full xmldoc into this file. Reference file paths, commit hashes, and benchmark file xmldoc tables instead.
 
 ---
 
 ## Project at a glance
 
-- **Name:** AzureBackup
-- **Language/runtime:** C# on .NET 10 (`net10.0` TFM, SDK 10.0.203)
-- **Solution:** `azurebackup.sln` at repo root
-- **Layout:**
-  - `src/AzureBackup.Core/` — all backup/restore/encryption/database logic (the only library project)
-  - `src/AzureBackup/` — WPF UI (MainWindowViewModel + views)
-  - `tests/AzureBackup.Tests/` — xUnit, **759 tests, all passing as of B25-bench**
-  - `benchmarks/AzureBackup.Benchmarks/` — BenchmarkDotNet 0.15.8 (Release-only, not in CI)
-- **Database backend:** SQLCipher-encrypted SQLite (production default since C-5). Legacy LiteDB code path still present for migration.
+- **Name:** AzureBackup — a Windows desktop application that backs up local files to Azure Blob Storage with client-side encryption and content-defined chunking for deduplication.
+- **Language/runtime:** C# on .NET 10 (`net10.0` TFM).
+- **Solution:** `azurebackup.sln` at repo root.
+- **Project layout:**
+  - `src/AzureBackup.Core/` — all backup/restore/encryption/database logic. Cross-platform-clean C# library; no UI dependencies. **All non-trivial logic lives here.**
+  - `src/AzureBackup/` — WPF UI shell (`MainWindowViewModel` + views). **Windows-only.** A non-Windows session can build / test `Core` and `Benchmarks` but cannot build the WPF project.
+  - `tests/AzureBackup.Tests/` — xUnit. As of B25-bench-2: 759 tests, all passing.
+  - `benchmarks/AzureBackup.Benchmarks/` — BenchmarkDotNet 0.15.8. Release-only, never run in CI. See "Running tests and benchmarks" below.
+- **Setup:** see `docs/SETUP.md` for clone-to-build instructions. NuGet restore handles the SQLCipher native binaries automatically.
+- **User-facing docs:** `docs/USER_GUIDE.md` for the WPF app's UX (memory limit slider, watched folders, restore flow, etc.).
+- **Database backend:** SQLCipher-encrypted SQLite (production default since commit `63103b1` = `C-5`). Legacy LiteDB code path still present for migration only.
 - **Authentication:** Argon2id KDF (64 MB, 8 lanes, 3 iterations) for both database key derivation and the `EncryptionService` content key.
 - **Encryption envelope:** AES-256-GCM with `[magic(4) | version(1) | nonce(12) | ciphertext(N) | tag(16) | crc32(4)]`. `EncryptionService.EncryptionOverhead = 37`.
 - **Chunking:** content-defined (Rabin-style rolling hash, window=48, prime=31). Per-extension chunk-size config (`.mkv` uses 1-64 MB, `.txt` uses 16-128 KB, etc.). Files >500 MB use 16-128 MB chunks regardless of extension.
@@ -45,9 +51,9 @@ These come from `.github/copilot-instructions.md` and from explicit user instruc
 ### Terminal commands
 
 - **Single physical line, always.** Chain with `;`. No here-strings, no backticks, no multi-line.
-- The user's shell is **PowerShell 7+ (`pwsh.exe`)**.
+- The user's shell is **PowerShell 7+ (`pwsh.exe`)**. Other shells will be flagged immediately.
 - Length is not a concern — correctness and single-line execution are.
-- An intermittent terminal-output corruption appears in some sessions: the leading "Set" of `Set-Location` is shown as garbage. **Ignore it** — the actual command runs (commit hash / output line still appears). This is a tooling display artifact, not a real failure.
+- Occasionally a tooling display artifact mangles the leading characters of the command in the echoed output (e.g. `Set-Location` shown as `t-Location`). The command **still runs correctly**; check the actual output / git state, not the echo.
 
 ### Git commits
 
@@ -55,14 +61,16 @@ These come from `.github/copilot-instructions.md` and from explicit user instruc
 - Use `git add .; git commit -m "..."` chained on one line, with multiple `-m` flags (one per paragraph). **Never** write the message to a file. **Never** use `git commit -F`.
 - **No emoji, no non-ASCII** in commit messages.
 - Escape `"` and `\` properly so the command parses cleanly.
-- Commit message convention in this repo: `B<number>: <imperative summary>`. See `git log --oneline` for the running B-series. Current head: `614825a` = `B25-bench`.
+- Commit message convention in this repo: `B<number>: <imperative summary>` (or the older `C-<number>:`). Pick the next free B-number — see `git log --oneline | Select-Object -First 1`.
+- Push when work reaches a natural review point or when the user is about to switch machines.
 
 ### Tool usage
 
 - Prefer `replace_string_in_file` / `multi_replace_string_in_file` over re-creating files. Re-create only when the file is small or being rewritten end-to-end.
 - Read files before editing them.
-- The `nuget_get-nuget-solver*` and `start_modernization` tools are NEVER appropriate for this project's typical work — do not invoke them unless the user asks for a package upgrade or .NET version change.
+- The `nuget_get-nuget-solver*` and `start_modernization` tools are NEVER appropriate for this project's typical work — do not invoke them unless the user explicitly asks for a package upgrade or .NET version change.
 - Do not call `code_search` in parallel; do not call `run_command_in_terminal` in parallel.
+- Long-running operations (benchmarks, large test sweeps) may exceed the terminal tool's timeout (whatever it is in the current environment). BenchmarkDotNet writes its result artifacts on each child-process completion, so even when the orchestrating call appears to time out you can usually find the artifacts under `BenchmarkDotNet.Artifacts/results/`. Always check there before assuming a benchmark didn't run.
 
 ---
 
@@ -70,80 +78,51 @@ These come from `.github/copilot-instructions.md` and from explicit user instruc
 
 These are non-obvious and have caused real bugs when forgotten.
 
-1. **`SqliteBackend` is single-connection, single-threaded.** Post-B23 every read AND write goes through one `SQLiteConnection` serialized by a single `_writeLock`. Adding more file-level parallelism cannot help SqliteBackend throughput; it just adds contention.
+1. **`SqliteBackend` is single-connection, single-threaded.** Post-B23 every read AND write goes through one `SQLiteConnection` serialized by a single `_writeLock`. Adding more file-level parallelism cannot help SqliteBackend throughput; it just adds contention. This is a known constraint of the chosen backend, not a bug.
 
 2. **`FileOperationDiagnostics` (`.diag` files)** are written by 4 producers: `BackupOrchestrator.BackupFileAsync`, `RestoreService.RestoreFileAsync`, `RestoreService.Batch.cs` (CorruptedRecovery), `IntegrityCheckService.CheckOneFileAsync`. Post-B23 + B24, **all four only emit on real errors**. The `FlushAllLive` shutdown hook in `FileOperationDiagnostics` snapshots any diag still in the live `_live` registry at process exit — so the success/cancel paths in producers MUST call `Discard()` to deregister.
 
-3. **`MemoryBudget` is a soft cap.** When `MemoryLimitEnabled=false` the budget is unlimited and the orchestrator can hold many GB of in-flight chunk buffers. Production telemetry (logs from 2026-04-23) showed an 11+ GB workingSet on a 7,313-file backup with `memoryBudget=unlimited`. The pipeline's per-file consumer count (default 6) × per-chunk size (up to 64 MB for media) × file-level concurrency (default 8) is the dominant memory cost.
+3. **`MemoryBudget` is a soft cap, configured via the WPF app's memory-limit slider** (`MemoryLimitEnabled` + `MemoryLimitMB` in the Configuration table). When `MemoryLimitEnabled=false` the budget is unlimited and the orchestrator can hold many GB of in-flight chunk buffers — confirmed by production telemetry showing multi-GB process working sets on large workloads with `memoryBudget=unlimited`. The dominant memory cost is `EffectiveMaxParallelChunkUploads (default 6) × per-chunk size (up to 64 MB for media) × EffectiveMaxParallelFileBackups (default 8)`.
 
-4. **CPU is NOT the production bottleneck.** Same production session showed CPU at ~3% during the entire backup. The bottleneck is somewhere downstream (network, disk, or the SqliteBackend write lock). Any "make it more parallel" hypothesis must be measured rather than reasoned about.
+4. **CPU is NOT the production bottleneck.** Production telemetry on a 7,313-file backup showed CPU usage well below 5%. The actual bottleneck is somewhere downstream: disk read throughput, the SqliteBackend write lock, or HttpClient/TLS state. Any "make this more parallel" hypothesis must be measured rather than reasoned about — the benchmarks under `benchmarks/AzureBackup.Benchmarks/` exist precisely for this.
 
-5. **`InMemoryBlobService`** (`src/AzureBackup.Core/Services/InMemoryBlobService.cs`) is a production-quality fake of `IBlobStorageService`. Used by 10 test files and by all 4 backup benchmarks. Constructor takes optional `simulatedLatencyMs` and `failureRate`. Honors deduplication. Tracks `TotalBytesUploaded` / `TotalOperations`. **This is the single biggest enabler of network-free testing in the project.**
+5. **`InMemoryBlobService`** (`src/AzureBackup.Core/Services/InMemoryBlobService.cs`) is a production-quality fake of `IBlobStorageService`. Used by ~10 test files and by all 4 backup benchmarks. Constructor takes optional `simulatedLatencyMs` and `failureRate`. Honors deduplication. Tracks `TotalBytesUploaded` / `TotalOperations`. **This is the single biggest enabler of network-free testing in the project.** Use it instead of inventing a new mock.
 
 6. **`AZBK_USE_SQLITE=1` env var** forces the SQLite backend. Set by benchmark `[GlobalSetup]`. Read once at `LocalDatabaseService.Initialize`; flipping mid-process is a no-op.
 
 7. **`BackupOrchestrator` constructor** signature: `(LocalDatabaseService, EncryptionService, ChunkingService, IBlobStorageService, FileWatcherService)`. The `FileWatcherService` is required even when no folders are watched — it can be constructed without ever being started.
 
+8. **`BackupOrchestrator` parallelism overrides (B25-bench-2 seam):** two optional `int?` properties — `MaxParallelChunkUploadsOverride` (default null → 6) and `MaxParallelFileBackupsOverride` (default null → 8). Read once per backup operation via internal `EffectiveMax*` getters so they cannot change mid-pipeline. Production behavior is unchanged when overrides are unset; the seam exists for the parallelism benchmarks. If you want to change the production *default*, change the constants in `BackupOrchestrator.cs`, not the override.
+
 ---
 
-## Active workstreams (as of 2026-04-24, end of session)
+## Active workstreams (as of 2026-04-24)
 
-### W1 (B25-bench): Backup pipeline benchmarks — IN PROGRESS but suite-complete
+### W1 (potential B26): act on the B25-bench-2 measured findings
 
-Five files now exist under `benchmarks/AzureBackup.Benchmarks/`:
+The B25-bench-2 commit (`171f07e`) added three design-decision benchmarks under `benchmarks/AzureBackup.Benchmarks/`. Headline findings (full numbers in each benchmark file's xmldoc result table — go there for the authoritative data captured at commit time):
 
-| File | Purpose | Status |
-|---|---|---|
-| `BackupBenchmarkBase.cs` | Shared harness (workload generation, peak-WS capture, service teardown) | Done |
-| `BackupThroughputBenchmark.cs` | Baseline / regression detector | Run + numbers in xmldoc |
-| `LargestFirstSchedulingBenchmark.cs` | Tests LPT (sort by size DESC) | Run + numbers in xmldoc |
-| `TwoTierFileSplitBenchmark.cs` | Sweeps file concurrency 8/16/32 (uses `MaxParallelFileBackupsOverride`) | Run + numbers in xmldoc |
-| `AdaptiveChunkConcurrencyBenchmark.cs` | Sweeps per-file chunk concurrency 4/6/12 (uses `MaxParallelChunkUploadsOverride`) | Run + numbers in xmldoc |
+- **Largest-first file scheduling** (`LargestFirstSchedulingBenchmark`): helps `large-skew` workloads but **regresses** `mixed-realistic-1000` and `realistic-large-200`. **Do not ship a blanket sort.** See the benchmark's xmldoc for the regression hypothesis.
+- **File-level concurrency 16-way** (`TwoTierFileSplitBenchmark`): appears Pareto-better than the current 8-way default — biggest win on `uniform-1MB-1000`, no regressions vs 8-way, negligible peak-memory impact. **Defensible to change the production default from 8 to 16.**
+- **File-level concurrency 32-way**: workload-dependent. Wins on small-file workloads, regresses `large-skew-100`. Not a unilateral win.
+- **Per-file chunk concurrency** (`AdaptiveChunkConcurrencyBenchmark`): production default of 6 is close to optimal. Workload-specific wins exist (4-way for small-file workloads, 12-way for large-file workloads) but require true adaptive logic.
 
-**Production code seam added** in `BackupOrchestrator.cs`: two optional `int? *Override` properties (`MaxParallelChunkUploadsOverride`, `MaxParallelFileBackupsOverride`) plus internal `EffectiveMax*` getters that fall back to the production constants. **All call sites switched to the effective getter** (verified via build + 759/759 test pass). Strictly additive — production behavior unchanged when overrides are unset.
+Three follow-up commits are now defensible based on measured data:
 
-**Headline measured findings (i7-9700K, 8 cores, no simulated latency):**
+- **B26a (cheap, high confidence)**: change `MaxParallelFileBackups` constant in `BackupOrchestrator.cs` from 8 to 16. Re-run `BackupThroughputBenchmark` and `TwoTierFileSplitBenchmark` afterward to confirm no regression on the new hardware. Document the choice with a comment citing `TwoTierFileSplitBenchmark.cs`.
+- **B26b (medium effort)**: implement per-file adaptive chunk concurrency in `BackupOrchestrator.BackupFileAsync` that reads the per-file `MaxChunkSize` from the chunker config and scales concurrency inversely. Mirror `RestoreService.ComputeAdaptiveChunkConcurrency` (~20 LOC). Re-run `AdaptiveChunkConcurrencyBenchmark` to confirm both the small-file and large-file wins survive.
+- **B26c (DO NOT DO)**: blanket largest-first sort. Benchmark proved this regresses the typical workload.
 
-- **A — Largest-first sort**: -16% to -25% on `large-skew` workloads BUT **+15% to +17% REGRESSION** on `mixed-realistic-1000` and `realistic-large-200`. **Do not ship a blanket sort.** Hypothesis for the regression: input-order interleaves large+small so steady-state pipelining is preserved; LPT front-loads the long tasks and leaves 7 of 8 workers idle once the small files finish.
-- **B — File concurrency 16-way**: Pareto improvement over 8-way. Biggest win is `uniform-1MB-1000` at -18%, no regressions, +0.6% peak workingSet on average. **Recommend changing the production default from 8 to 16.**
-- **B — File concurrency 32-way**: workload-dependent. Wins on small-file workloads, regresses `large-skew-100` by +10%. Not a unilateral win.
-- **C — Chunk concurrency**: production default of 6 is close to optimal. Workload-specific wins exist (4-way for `mixed-realistic-1000` at -9%, 12-way for `realistic-large-200` at -10%) but require true adaptive logic mirroring `RestoreService.ComputeAdaptiveChunkConcurrency` (~20 LOC). **Recommend either status quo OR implementing per-file adaptive concurrency** based on `config.MaxChunkSize`.
+### W2 (possible future): investigate the LPT regression
 
-**Memory observations validated user concern**: `realistic-large-200` hit **11,194 MB process peak WS** at 8-way file concurrency. Scaling to 32-way only added ~5%. The dominant memory cost is per-file × per-chunk, not file-worker count. ArrayPool reuse + MemoryBudget keep allocations bounded.
+`LargestFirstSchedulingBenchmark` showed that LPT scheduling regresses `mixed-realistic-1000` and `realistic-large-200` against input-order. The current best hypothesis is that input-order interleaves large+small files so steady-state pipelining keeps the SqliteBackend write lock contended at a healthy rate, while LPT front-loads long tasks and leaves most workers idle once the small files finish. Worth investigating only if someone wants to ship a workload-aware scheduler. Otherwise the answer is "leave production scheduling alone and document why."
 
-**What remains in W1 before this is fully landed:**
+---
 
-1. **Working-tree state on this PC has uncommitted edits**: see `git status` — modifications to `BackupOrchestrator.cs`, `BackupOrchestrator.Operations.cs`, `BackupThroughputBenchmark.cs`, plus 4 NEW files (the 3 design benchmarks + the base class), plus benchmark result artifacts. **This needs to be committed as B25-bench-2 before continuing.** Suggested commit message structure (multi `-m`):
-   - Title: `B25-bench-2: design-decision benchmarks for backup parallelism + LPT scheduling`
-   - Para 1: motivation (measure A/B/C from previous discussion)
-   - Para 2: production seam (Override properties, additive, defaults preserve behavior)
-   - Para 3: headline findings (numbers above)
-   - Para 4: build + 759/759 tests pass
+## Completed workstreams (recent)
 
-2. **Unrelated edit in `src/AzureBackup.Core/Services/Backends/SqliteBackend.ChunkFileRefs.cs`**: 3 lines changed by an editor auto-fix (added `?.` operators on `_connection` access at line 365-378). The connection is null-checked upstream so this is unnecessary defensive code. **Decide whether to revert** before committing the benchmarks. Diff:
-   ```
-   -            using (var countCmd = _connection.CreateCommand())
-   +            using (var countCmd = _connection?.CreateCommand())
-   -                countCmd.CommandText = "..."
-   +                countCmd?.CommandText = "..."
-   -                total = Convert.ToInt32(countCmd.ExecuteScalar());
-   +                total = Convert.ToInt32(countCmd?.ExecuteScalar());
-   ```
-   Recommendation: revert. The `?.CommandText =` pattern is a no-op assignment to a discarded value — it doesn't even compile-warn but it's nonsensical.
-
-3. **Unrelated edit in `src/AzureBackup.Core/Services/RestoreService.cs`** also showed in `git status`. Likely the B24 commit (which IS in `git log` already as `e7a1ab1`). Run `git diff src/AzureBackup.Core/Services/RestoreService.cs` to confirm — if it's just whitespace or doc-comment trivia, leave or revert; if it's the actual B24 fix already committed, the `M` is stale (run `git update-index --really-refresh`).
-
-### W2 (potential B26): act on the W1 findings
-
-Three follow-up PRs are now defensible based on measured data:
-
-- **B26a (cheap)**: change `MaxParallelFileBackups` from 8 to 16. One line. Re-run `BackupThroughputBenchmark` and `TwoTierFileSplitBenchmark` after to confirm no regression. Document the choice with a comment citing the benchmark file.
-- **B26b (medium)**: implement per-file adaptive chunk concurrency in `BackupOrchestrator.BackupFileAsync` that reads the chunker's per-file `MaxChunkSize` and scales inversely. Mirror `RestoreService.ComputeAdaptiveChunkConcurrency` (file `RestoreService.cs` line 98). Re-run `AdaptiveChunkConcurrencyBenchmark` to confirm both wins survive.
-- **B26c (DO NOT DO)**: blanket largest-first sort. The benchmark proved this regresses the typical workload.
-
-### W3 (possible future): investigate the LPT regression
-
-The +17% regression of `mixed-realistic-1000` under LPT was unexpected. The most likely root cause is the SqliteBackend write lock losing steady-state pipelining when all small files finish in a burst. **Worth investigating only if** someone wants to ship a workload-aware scheduler. Otherwise, the answer is "leave it alone and document why."
+- **B25-bench-2 (commit `171f07e`, 2026-04-24)**: Added `BackupBenchmarkBase`, `LargestFirstSchedulingBenchmark`, `TwoTierFileSplitBenchmark`, `AdaptiveChunkConcurrencyBenchmark`. Added strictly-additive `MaxParallelChunkUploadsOverride` / `MaxParallelFileBackupsOverride` seams on `BackupOrchestrator`. All 759 tests still pass.
+- **B25-bench (commit `614825a`)**: First end-to-end backup throughput benchmark. Established the `InMemoryBlobService`-based pipeline test pattern.
 
 ---
 
@@ -160,22 +139,40 @@ The +17% regression of `mixed-realistic-1000` under LPT was unexpected. The most
 
 ---
 
-## Local environment quirks
+## Running tests and benchmarks
 
-- **Disk**: dev machine reports ~24-45 GB free on `C:`. Benchmarks honor this — `realistic-large` profile capped at 100 MB max file size to fit. If a future workload-large benchmark is added, check `Get-PSDrive C` first.
-- **CPU**: i7-9700K, 8 logical / 8 physical cores. Coffee Lake. **Not** 32 cores (an earlier draft of this file got that wrong). Significant for interpreting parallelism benchmarks: 16-way and 32-way file concurrency are 2x and 4x oversubscribed.
-- **Tool timeout for `run_command_in_terminal`**: ~10 minutes. Long benchmarks must either run within that window or be split. The workaround used in W1 was to set `--warmupCount 0 --iterationCount 1` to fit a 24-row matrix in ~12 minutes (sometimes succeeds, sometimes times out — the artifacts are written even on tool-side timeout because BDN runs the child processes independently).
-- **BenchmarkDotNet `-p Workload=...` filter is ignored on this version (0.15.8)**. Don't rely on it to subset a run; the full param matrix executes regardless. Plan benchmark cost as if every param combo will run.
+### Tests
+
+`dotnet test tests/AzureBackup.Tests/AzureBackup.Tests.csproj -c Debug` from the repo root. All 759 tests pass deterministically.
+
+If running from inside Visual Studio (which is the typical user environment), the `run_tests` / `get_tests` MCP tools work directly against Test Explorer. Use `Project=AzureBackup.Tests` as the filter.
+
+### Benchmarks
+
+```
+dotnet build benchmarks/AzureBackup.Benchmarks/AzureBackup.Benchmarks.csproj -c Release
+dotnet run -c Release --no-build --project benchmarks/AzureBackup.Benchmarks -- --filter "AzureBackup.Benchmarks.<ClassName>.*"
+```
+
+Each benchmark generates a synthetic workload on disk under the OS temp directory (path of the form `%TEMP%/azbk-backup-bench-<guid>/`) then runs the backup pipeline against `InMemoryBlobService`. The base class `BackupBenchmarkBase` cleans up stale `azbk-backup-bench-*` directories at the top of `[GlobalSetup]` so a previous run's leak (e.g. from a disk-full crash) does not poison the next run.
+
+Results land under `BenchmarkDotNet.Artifacts/results/<BenchmarkClassName>-report-github.md` (markdown table) and `.csv` / `.html` siblings. Per-iteration peak working-set is emitted to the BDN console log under `BenchmarkDotNet.Artifacts/*.log` with the prefix `[peakWS workload=...]` because BDN's built-in `MemoryDiagnoser` reports cumulative allocated bytes, not peak resident.
+
+Notes:
+- BenchmarkDotNet 0.15.8's `-p Workload=<value>` filter is **silently ignored** — the full param matrix runs regardless. Plan benchmark cost as if every (param × iteration) combo will execute.
+- Disk usage scales with workload size. Check the workload definitions in `BackupBenchmarkBase.cs` and lower the file-count or per-file-size caps locally before running on a constrained machine. The `realistic-large-200` workload is the largest of the standard set.
+- Workloads are deterministic (`Random` seeded with `42`) so re-running on different hardware produces identical input bytes. **Absolute timings will vary with CPU/disk; relative deltas between two configurations should be directionally consistent across hardware** — that is the property the benchmarks are designed to measure.
 
 ---
 
 ## Open questions / things future sessions might ask
 
-- "Why didn't largest-first work like theory said it would?" → see W3 above.
-- "Should we change the production default to 16-way file concurrency?" → yes per the data, but pending the B26a commit.
-- "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B26b. ~20 LOC plus a re-benchmark.
-- "The user asked for benchmark results on different hardware" → workloads are deterministic (Random seed 42); results scale with CPU but the deltas should be directionally consistent. If re-running on different hardware, capture the new numbers in the per-benchmark xmldoc tables and date-stamp the row.
-- "Why is there an 11 GB peak workingSet?" → see architectural fact #3 above. Answer: `MemoryBudget` is soft / disabled by default and per-file × per-chunk × file-worker dominates.
+- "Why didn't largest-first work like theory said it would?" → see W2.
+- "Should we change the production default to 16-way file concurrency?" → yes per the data, pending B26a.
+- "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B26b.
+- "Can I re-run the benchmarks on this machine and compare?" → yes, results are under `BenchmarkDotNet.Artifacts/results/`. The committed numbers in each benchmark's xmldoc table are tied to whatever hardware ran them at commit time; a re-run on different hardware may show different absolute values but the deltas between configurations should be directionally consistent. Add a dated note in the maintenance log of this file if the deltas materially differ.
+- "Why does the WPF project fail to build on this machine?" → it's Windows-only. Build `AzureBackup.Core` and `AzureBackup.Benchmarks` instead.
+- "What does `MemoryLimitMB` map to in the UI?" → see `docs/USER_GUIDE.md`. Soft cap on in-flight chunk buffers; disabled by default.
 
 ---
 
@@ -183,6 +180,7 @@ The +17% regression of `mixed-realistic-1000` under LPT was unexpected. The most
 
 | Hash | Message |
 |---|---|
+| `171f07e` | B25-bench-2: design-decision benchmarks for backup parallelism plus AGENT_CONTEXT handoff |
 | `614825a` | B25-bench: add BackupThroughputBenchmark for end-to-end backup pipeline |
 | `e7a1ab1` | B24: discard restore diag on success and on cancellation |
 | `31f467b` | B23: serialize all SqliteBackend reads against the shared connection; fix diag noise from successful and cancelled file backups |
@@ -193,11 +191,12 @@ The +17% regression of `mixed-realistic-1000` under LPT was unexpected. The most
 | `73bfc1f` | B18: harden SqliteBackend against close-during-write race; serialize Close via _writeLock |
 | `c4b8b9d` | B17: fix unbounded List capacity OOM in CleanupStalePendingChanges |
 
-`git log --oneline` for full history. Series numbering goes back to at least B9.
+Run `git log --oneline | Select-Object -First 20` for the latest. Earlier history (153 commits total as of this writing) includes a `C-`series and an unnumbered prefix.
 
 ---
 
 ## Maintenance log for THIS file
 
 - **2026-04-24** — Initial creation. Captures B25-bench-2 in-progress state, all four benchmarks measured, two production seams added, working-tree dirty pending commit. Author: Copilot agent session (Claude Sonnet 4.5).
+- **2026-04-24** — User pointed out that PC-specific data (CPU model, free disk, terminal-tool timeout, hardware-tied benchmark numbers, workstream status that referred to uncommitted edits already long-since committed as `171f07e`) misleads sessions on other machines. Removed all such data. Removed the entire stale "what remains in W1" subsection. Added explicit "never record machine-specific values" rule to the edit policy at the top. Added pointers to `docs/SETUP.md` and `docs/USER_GUIDE.md` in the project-at-a-glance section. Replaced the hardware-tied "Local environment quirks" section with a hardware-neutral "Running tests and benchmarks" section so a fresh agent on a fresh clone knows the entry-point commands. Added an explicit Windows-only note about the WPF project. Added architectural fact #8 covering the new B25-bench-2 override seam on `BackupOrchestrator`. Promoted B25-bench / B25-bench-2 into a "Completed workstreams" section. Renumbered the active W2 (LPT investigation) since the old W2/W3 collapsed. Updated the recent-commit-history table to include `171f07e`. Author: Copilot agent session.
 - _(Add a dated bullet here every session that touches this file. One line per session, summarize what changed in the file.)_
