@@ -121,6 +121,8 @@ These are non-obvious and have caused real bugs when forgotten.
 
 8. **`BackupOrchestrator` parallelism overrides (B25-bench-2 seam):** two optional `int?` properties — `MaxParallelChunkUploadsOverride` (default null → 6) and `MaxParallelFileBackupsOverride` (default null → 8). Read once per backup operation via internal `EffectiveMax*` getters so they cannot change mid-pipeline. Production behavior is unchanged when overrides are unset; the seam exists for the parallelism benchmarks. If you want to change the production *default*, change the constants in `BackupOrchestrator.cs`, not the override.
 
+9. **`RestoreService.SmallFileThresholdBytes` (B26) is the single source of truth for what "small" means.** This `public const long` (currently `16L * 1024 * 1024`, i.e. 16 MB) lives on the `RestoreService` partial in `src/AzureBackup.Core/Services/RestoreService.Batch.cs` and is referenced by **both** the production restore pipeline (which routes files at or below the threshold through a 32-way parallel small-file lane) **and** the desktop UI (which groups the same set of files into the aggregate "Small files" progress row in `ProgressTabViewModel.SmallFileGroupText`, plus three call sites in `MainWindowViewModel.Commands.Backup.cs` / `MainWindowViewModel.Commands.TreeView.cs`). Before B26 the UI hard-coded 100 MB in three places while production used 16 MB, so the progress row mis-grouped a strictly larger set of files than the pipeline actually optimized for. **Do not introduce a new hard-coded copy of this value anywhere.** If you need the threshold in a new file, add `using AzureBackup.Core.Services;` and reference `RestoreService.SmallFileThresholdBytes` directly. The displayed user-facing label interpolates the constant so it tracks any future change automatically.
+
 ---
 
 ## Active workstreams (as of 2026-04-24)
@@ -134,11 +136,11 @@ The B25-bench-2 commit (`171f07e`) added three design-decision benchmarks under 
 - **File-level concurrency 32-way**: workload-dependent. Wins on small-file workloads, regresses `large-skew-100`. Not a unilateral win.
 - **Per-file chunk concurrency** (`AdaptiveChunkConcurrencyBenchmark`): production default of 6 is close to optimal. Workload-specific wins exist (4-way for small-file workloads, 12-way for large-file workloads) but require true adaptive logic.
 
-Three follow-up commits are now defensible based on measured data:
+Three follow-up commits are now defensible based on measured data (renumbered to B27 because the B26 number was consumed by the unrelated small-file-threshold fix in commit `b9d5744`):
 
-- **B26a (cheap, high confidence)**: change `MaxParallelFileBackups` constant in `BackupOrchestrator.cs` from 8 to 16. Re-run `BackupThroughputBenchmark` and `TwoTierFileSplitBenchmark` afterward to confirm no regression on the new hardware. Document the choice with a comment citing `TwoTierFileSplitBenchmark.cs`.
-- **B26b (medium effort)**: implement per-file adaptive chunk concurrency in `BackupOrchestrator.BackupFileAsync` that reads the per-file `MaxChunkSize` from the chunker config and scales concurrency inversely. Mirror `RestoreService.ComputeAdaptiveChunkConcurrency` (~20 LOC). Re-run `AdaptiveChunkConcurrencyBenchmark` to confirm both the small-file and large-file wins survive.
-- **B26c (DO NOT DO)**: blanket largest-first sort. Benchmark proved this regresses the typical workload.
+- **B27a (cheap, high confidence)**: change `MaxParallelFileBackups` constant in `BackupOrchestrator.cs` from 8 to 16. Re-run `BackupThroughputBenchmark` and `TwoTierFileSplitBenchmark` afterward to confirm no regression on the new hardware. Document the choice with a comment citing `TwoTierFileSplitBenchmark.cs`.
+- **B27b (medium effort)**: implement per-file adaptive chunk concurrency in `BackupOrchestrator.BackupFileAsync` that reads the per-file `MaxChunkSize` from the chunker config and scales concurrency inversely. Mirror `RestoreService.ComputeAdaptiveChunkConcurrency` (~20 LOC). Re-run `AdaptiveChunkConcurrencyBenchmark` to confirm both the small-file and large-file wins survive.
+- **B27c (DO NOT DO)**: blanket largest-first sort. Benchmark proved this regresses the typical workload.
 
 ### W2 (possible future): investigate the LPT regression
 
@@ -148,6 +150,7 @@ Three follow-up commits are now defensible based on measured data:
 
 ## Completed workstreams (recent)
 
+- **B26 (commit `b9d5744`, 2026-04-24)**: Unified the small-file threshold across the UI/Core boundary. Promoted the previously private `RestoreService.Batch.cs` constant `SmallFileThreshold = 16L * 1024 * 1024` to a `public const long RestoreService.SmallFileThresholdBytes`. Replaced three independent UI-side hard-codes of `100L * 1024 * 1024` (one in `MainWindowViewModel.Commands.Backup.cs`, two in `MainWindowViewModel.Commands.TreeView.cs`) and the user-visible string `"Small files (≤100 MB)"` in `ProgressTabViewModel.SmallFileGroupText` with references to the public constant. ProgressView now correctly groups files ≤ 16 MB into the "Small files" aggregate row, matching what the production restore pipeline actually treats as small. All 759 tests still pass.
 - **B25-bench-2 (commit `171f07e`, 2026-04-24)**: Added `BackupBenchmarkBase`, `LargestFirstSchedulingBenchmark`, `TwoTierFileSplitBenchmark`, `AdaptiveChunkConcurrencyBenchmark`. Added strictly-additive `MaxParallelChunkUploadsOverride` / `MaxParallelFileBackupsOverride` seams on `BackupOrchestrator`. All 759 tests still pass.
 - **B25-bench (commit `614825a`)**: First end-to-end backup throughput benchmark. Established the `InMemoryBlobService`-based pipeline test pattern.
 
@@ -155,7 +158,7 @@ Three follow-up commits are now defensible based on measured data:
 
 ## Conventions / patterns observed in this codebase
 
-- **Numbered fixes**: every commit message starts with `B<n>:`. The current series is at B25. Pick the next free number when committing a new fix or feature.
+- **Numbered fixes**: every commit message starts with `B<n>:`. The current series is at **B26** (commit `b9d5744`, small-file threshold unification). Pick the next free number (B27 at time of writing) when committing a new fix or feature. Use `git log --oneline | Select-Object -First 1` to confirm the current head before picking a number.
 - **`[Conditional("DIAGNOSTICLOG")]` logging**: services use `Log(string)` methods that are completely no-ops in Release without the `DIAGNOSTICLOG` constant set. The B16 commit also adds a title-bar marker showing whether the build has DEBUG/DIAG on.
 - **Diagnostic events forwarded by name**: services raise `EventHandler<string>? DiagnosticLog` events; `MainWindowViewModel.OnDiagnosticLog` aggregates them all.
 - **Crash-safe atomic operations**: file moves during DB migration use a sentinel `.upgrade-pending` JSON file plus 4-step rename dance. See `LocalDatabaseService.Migration.cs` and `.Migration.Sqlite.cs`. Do not invent new file-rename code without reading those.
@@ -195,8 +198,8 @@ Notes:
 ## Open questions / things future sessions might ask
 
 - "Why didn't largest-first work like theory said it would?" → see W2.
-- "Should we change the production default to 16-way file concurrency?" → yes per the data, pending B26a.
-- "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B26b.
+- "Should we change the production default to 16-way file concurrency?" → yes per the data, pending B27a.
+- "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B27b.
 - "Can I re-run the benchmarks on this machine and compare?" → yes, results are under `BenchmarkDotNet.Artifacts/results/`. The committed numbers in each benchmark's xmldoc table are tied to whatever hardware ran them at commit time; a re-run on different hardware may show different absolute values but the deltas between configurations should be directionally consistent. Add a dated note in the maintenance log of this file if the deltas materially differ.
 - "Why does the WPF project fail to build on this machine?" → trick question. The UI is **Avalonia 11.3.12**, not WPF, and it targets bare `net10.0` so it builds on Windows, macOS, and Linux. If you saw an older AGENT_CONTEXT version claim WPF / Windows-only, that was wrong and is now corrected.
 - "What does `MemoryLimitMB` map to in the UI?" → a toggle plus stepped slider in `SettingsView.axaml` (search for `MemoryLimitEnabled` / `MemoryLimitSliderIndex`). Soft cap on in-flight chunk buffers; **disabled by default**. See `docs/USER_GUIDE.md` "Memory limit" — verified accurate.
@@ -207,6 +210,10 @@ Notes:
 
 | Hash | Message |
 |---|---|
+| `b9d5744` | B26: UI small-file threshold reads RestoreService constant; remove 100 MB hard-code |
+| `fe620d6` | docs: rewrite SETUP and USER_GUIDE against verified source, fix AGENT_CONTEXT errors |
+| `a36db75` | AGENT_CONTEXT and copilot-instructions: never push, treat docs as stale until verified |
+| `68410b5` | AGENT_CONTEXT: remove PC-specific data and stale workstream status |
 | `171f07e` | B25-bench-2: design-decision benchmarks for backup parallelism plus AGENT_CONTEXT handoff |
 | `614825a` | B25-bench: add BackupThroughputBenchmark for end-to-end backup pipeline |
 | `e7a1ab1` | B24: discard restore diag on success and on cancellation |
@@ -215,10 +222,8 @@ Notes:
 | `c0c33fc` | B21: add permanent Copilot instructions for single-line PowerShell and git commit policy |
 | `0ecd72f` | B20: fix Check Now / Cancel / Re-check / Backfill buttons stuck at initial enabled state |
 | `3b4a64f` | B19: stable per-file fileIndex in parallel backup progress; fix Active Files panel + small-file completion counts |
-| `73bfc1f` | B18: harden SqliteBackend against close-during-write race; serialize Close via _writeLock |
-| `c4b8b9d` | B17: fix unbounded List capacity OOM in CleanupStalePendingChanges |
 
-Run `git log --oneline | Select-Object -First 20` for the latest. Earlier history (153 commits total as of this writing) includes a `C-`series and an unnumbered prefix.
+Run `git log --oneline | Select-Object -First 20` for the latest. Earlier history (157 commits total as of this writing) includes a `C-`series and an unnumbered prefix. The four most recent commits in the table above are local-only as of this writing — the user pushes manually, the agent does not.
 
 ---
 
@@ -228,4 +233,5 @@ Run `git log --oneline | Select-Object -First 20` for the latest. Earlier histor
 - **2026-04-24** — User pointed out that PC-specific data (CPU model, free disk, terminal-tool timeout, hardware-tied benchmark numbers, workstream status that referred to uncommitted edits already long-since committed as `171f07e`) misleads sessions on other machines. Removed all such data. Removed the entire stale "what remains in W1" subsection. Added explicit "never record machine-specific values" rule to the edit policy at the top. Added pointers to `docs/SETUP.md` and `docs/USER_GUIDE.md` in the project-at-a-glance section. Replaced the hardware-tied "Local environment quirks" section with a hardware-neutral "Running tests and benchmarks" section so a fresh agent on a fresh clone knows the entry-point commands. Added an explicit Windows-only note about the WPF project. Added architectural fact #8 covering the new B25-bench-2 override seam on `BackupOrchestrator`. Promoted B25-bench / B25-bench-2 into a "Completed workstreams" section. Renumbered the active W2 (LPT investigation) since the old W2/W3 collapsed. Updated the recent-commit-history table to include `171f07e`. Author: Copilot agent session.
 - **2026-04-24** — Added two permanent rules: (1) never run `git push` under any circumstances, pushing is the user's manual job; (2) treat every Markdown doc in the repo as stale until verified against code, and update affected docs in the same commit as the code change that invalidates them. Added a new "Documentation trust policy" subsection under "Hard rules" capturing the second rule explicitly. Reworded the previous (also added today) `docs/SETUP.md` and `docs/USER_GUIDE.md` pointers in the project-at-a-glance section so they no longer treat those files as authoritative; instead they tell the agent to run a real `dotnet build` for setup and read the actual view code for UX questions. Reworded the corresponding `MemoryLimitMB` open-question entry the same way. Same updates applied to `.github/copilot-instructions.md` so a fresh agent reads them before even reaching this file. Author: Copilot agent session.
 - **2026-04-24** — Systematic rewrite of `docs/SETUP.md` and `docs/USER_GUIDE.md`. Verification against source revealed that AGENT_CONTEXT itself was wrong about the GUI framework: it claimed WPF / Windows-only, but the project is Avalonia 11.3.12 targeting bare `net10.0` (cross-platform: Windows, macOS, Linux). Fixed that error in the project-at-a-glance section and the open-questions list. Other corrections caught while verifying the docs: (a) default storage tier for new watched folders is **Hot**, not Cool as both old docs claimed; (b) the app supports **four** storage tiers (Hot/Cool/Cold/Archive), not three as both old docs claimed; (c) the app supports a **portable mode** triggered by a `portable.marker` file next to the EXE, completely undocumented before; (d) the **Data Integrity Check** and **Tier Migration** views existed but were not in the USER_GUIDE TOC; (e) the **Export Bundle** button in Logs and the **Auto-export bundle on failure** option in Data Integrity were undocumented; (f) the per-extension chunk-size config table was undocumented (old SETUP just said "64KB-1MB"); (g) the LiteDB-to-SQLCipher migration path was undocumented; (h) the diagnostic-logging story (runtime UI toggle gated on the `DIAGNOSTICLOG` build constant) was incorrectly described in USER_GUIDE as a generic runtime toggle. Both docs are now flagged in the Documentation trust policy as "verified-current" with an explicit per-commit maintenance protocol listing the categories of change that REQUIRE updating them in the same commit. Author: Copilot agent session.
+- **2026-04-24** — Catch-up update missed by commit `b9d5744` (B26). The B26 commit unified the UI's small-file grouping threshold with production's 16 MB constant in `RestoreService.Batch.cs` but did not touch this file at the time, even though the file's own rules require it. This entry corrects three resulting drifts: (1) the B26 number had been pre-allocated to one of the W1 follow-up tasks in the active workstreams; renamed those tasks to B27a/B27b/B27c so the numbering stays unambiguous, and added an explanation of why the pre-allocated number was consumed by an unrelated fix. (2) Added B26 to the "Completed workstreams" section. (3) Added architectural fact #9 documenting `RestoreService.SmallFileThresholdBytes` as the single cross-boundary source of truth for the "small file" definition, with an explicit "do not introduce a new hard-coded copy" warning so future agents do not re-create the drift the original fix removed. Also refreshed the recent-commit-history table to include all four post-B25-bench-2 commits (`68410b5`, `a36db75`, `fe620d6`, `b9d5744`), updated the conventions-section line that said "current series is at B25" to point at B26, and bumped the cited total commit count from 153 to 157. Lesson recorded: the per-commit AGENT_CONTEXT-maintenance rule applies to every code commit that introduces a new architectural fact or a new architectural seam, not just to commits that change something already documented in the file. Author: Copilot agent session.
 - _(Add a dated bullet here every session that touches this file. One line per session, summarize what changed in the file.)_
