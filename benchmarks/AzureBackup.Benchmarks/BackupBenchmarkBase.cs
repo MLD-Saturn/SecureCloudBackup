@@ -125,6 +125,31 @@ public abstract class BackupBenchmarkBase
         Environment.SetEnvironmentVariable("AZBK_USE_SQLITE", "1");
 
         var (profile, fileCount) = GetWorkload(Workload);
+
+        // B27 disk-space preflight. The original B25-bench-2 runs
+        // crashed mid-IterationSetup when the dev machine ran out of
+        // disk (it had ~28 GB free and the realistic-large profile
+        // at 1000 files would have exceeded that). Big-scale workloads
+        // are explicitly allowed to exceed the original budget; fail
+        // fast with a clear error rather than crashing later.
+        var estimatedBytes = EstimateWorkloadBytes(Workload);
+        if (estimatedBytes > 0)
+        {
+            var drive = new DriveInfo(Path.GetPathRoot(_filesDir) ?? "C:\\");
+            var free = drive.AvailableFreeSpace;
+            var required = (long)(estimatedBytes * 1.5);
+            Mark($"disk preflight: free={free / 1024.0 / 1024 / 1024:N1} GB, " +
+                 $"estimated workload={estimatedBytes / 1024.0 / 1024 / 1024:N1} GB, " +
+                 $"required (1.5x)={required / 1024.0 / 1024 / 1024:N1} GB");
+            if (free < required)
+            {
+                throw new InvalidOperationException(
+                    $"Insufficient disk space for workload '{Workload}'. " +
+                    $"Free: {free / 1024.0 / 1024 / 1024:N1} GB on {drive.Name}, " +
+                    $"required (estimated workload x 1.5): {required / 1024.0 / 1024 / 1024:N1} GB.");
+            }
+        }
+
         Mark($"generating workload: profile={profile}, files={fileCount}");
         FilePaths = GenerateFiles(_filesDir, fileCount, profile);
         var totalBytes = FilePaths.Sum(p => new FileInfo(p).Length);
@@ -145,6 +170,25 @@ public abstract class BackupBenchmarkBase
         _databaseService = new LocalDatabaseService();
         _databaseService.Initialize(_dbPath, "BenchmarkPassword123!");
 
+        // Apply the per-iteration MemoryBudget override (B27 seam).
+        // Production telemetry from 2026-04-23 showed the user running
+        // with memoryBudget=unlimited; the big-scale benchmarks need
+        // to simulate the recommended 16 GB production setting so the
+        // new numbers reflect what users will actually experience.
+        // The orchestrator reads GetConfiguration() at the top of
+        // BackupFilesCoreAsync, so updating the row here is sufficient.
+        // A null override preserves the historical unlimited-budget
+        // behaviour so the pre-B27 small-workload results remain
+        // directly comparable.
+        var mbOverride = MemoryLimitMBOverride;
+        if (mbOverride is int mb)
+        {
+            var cfg = _databaseService.GetConfiguration();
+            cfg.MemoryLimitEnabled = true;
+            cfg.MemoryLimitMB = mb;
+            _databaseService.SaveConfiguration(cfg);
+        }
+
         _encryptionService = new EncryptionService();
         _encryptionService.Initialize(_derivedKey);
 
@@ -163,6 +207,19 @@ public abstract class BackupBenchmarkBase
         // benchmark). Hook for them.
         ConfigureOrchestrator(Orchestrator);
     }
+
+    /// <summary>
+    /// Optional MemoryBudget setting applied via
+    /// <see cref="LocalDatabaseService.SaveConfiguration"/> at the top
+    /// of every iteration. Default <c>null</c> preserves the original
+    /// B25-bench-2 behaviour of unlimited MemoryBudget so the published
+    /// small-workload result tables remain directly comparable.
+    /// Big-scale benchmarks (see <c>ProductionScaleBackupBenchmark</c>
+    /// and the <c>*BigScaleBenchmark</c> classes) return 16384 to mirror
+    /// the recommended production memory limit; the dedicated
+    /// <c>MemoryBudgetBenchmark</c> sweeps the value parametrically.
+    /// </summary>
+    protected virtual int? MemoryLimitMBOverride => null;
 
     /// <summary>
     /// Hook for subclasses to apply per-iteration orchestrator
@@ -281,13 +338,22 @@ public abstract class BackupBenchmarkBase
         "large-skew-200" => ("large-skew", 200),
         "realistic-large-50" => ("realistic-large", 50),
         "realistic-large-200" => ("realistic-large", 200),
+        // B27 big-scale workloads. Gated by the disk preflight above;
+        // these are deliberately larger than the dev machine's previous
+        // ~28 GB disk budget and are the workloads actually required to
+        // answer the design questions at real production scale.
+        "media-library-500" => ("media-library", 500),
+        "production-scale-3000" => ("production-scale", 3000),
+        "huge-outlier-mixed" => ("huge-outlier", 500),
         _ => throw new ArgumentException($"Unknown workload: {workload}", nameof(workload)),
     };
 
     /// <summary>
-    /// All workloads. Subclasses that want the full matrix declare
-    /// <c>[ParamsSource(nameof(AllWorkloads))]</c>; subclasses that
-    /// want a subset declare an explicit <c>[Params(...)]</c>.
+    /// All original (pre-B27) small workloads. Subclasses that want the
+    /// full matrix declare <c>[ParamsSource(nameof(AllWorkloads))]</c>;
+    /// subclasses that want a subset declare an explicit
+    /// <c>[Params(...)]</c>. Does NOT include the big-scale workloads
+    /// added in B27, which live in <see cref="BigWorkloads"/>.
     /// </summary>
     public static IEnumerable<string> AllWorkloads =>
     [
@@ -300,6 +366,61 @@ public abstract class BackupBenchmarkBase
         "realistic-large-50",
         "realistic-large-200",
     ];
+
+    /// <summary>
+    /// B27 big-scale workloads designed to reproduce the user's real
+    /// 2026-04-23 production workload shape. Each requires substantial
+    /// free disk (see <c>EstimateWorkloadBytes</c> for rough sizes)
+    /// and is not included in <see cref="AllWorkloads"/> so the pre-B27
+    /// benchmarks remain directly comparable to their historical
+    /// result tables.
+    /// <list type="bullet">
+    ///   <item><c>media-library-500</c>: 500 files, 10% under 10 MB,
+    ///     50% in 50-200 MB, 40% in 200 MB-2 GB. ~260 GB on disk.
+    ///     Exercises the many-chunks-per-file regime that the fixed
+    ///     100 MB cap in <c>realistic-large</c> could not reach.</item>
+    ///   <item><c>production-scale-3000</c>: 3,000 files mirroring the
+    ///     shape of the 2026-04-23 production log scaled down from
+    ///     7,313 files. ~70 GB on disk. Exercises the SqliteBackend
+    ///     write lock under realistic file count pressure.</item>
+    ///   <item><c>huge-outlier-mixed</c>: 498 small files plus one
+    ///     10 GB file and one 20 GB file. ~32 GB on disk. The textbook
+    ///     LPT case -- the two outliers dominate the makespan by a
+    ///     large margin, so largest-first ought to compress total
+    ///     runtime decisively. If it does not, the W2 hypothesis
+    ///     (production scheduling is bound by steady-state pipelining,
+    ///     not makespan) is refuted.</item>
+    /// </list>
+    /// </summary>
+    public static IEnumerable<string> BigWorkloads =>
+    [
+        "media-library-500",
+        "production-scale-3000",
+        "huge-outlier-mixed",
+    ];
+
+    /// <summary>
+    /// Rough expected-bytes-on-disk for the big-scale workloads, used
+    /// by the disk preflight in <see cref="BaseGlobalSetup"/>. Returns
+    /// 0 for the pre-B27 small workloads (no preflight needed -- they
+    /// fit in single-digit GB and the preflight is noise). Numbers are
+    /// conservative overestimates; the preflight multiplies by 1.5
+    /// again to cover filesystem overhead and the DB + blob-service
+    /// working state that accumulates during the run.
+    /// </summary>
+    protected static long EstimateWorkloadBytes(string workload) => workload switch
+    {
+        // Pre-B27 small workloads: no preflight.
+        "uniform-1MB-100" or "uniform-1MB-1000" or
+        "mixed-realistic-100" or "mixed-realistic-1000" or
+        "large-skew-100" or "large-skew-200" or
+        "realistic-large-50" or "realistic-large-200" => 0,
+        // Big-scale workloads: conservative overestimates in bytes.
+        "media-library-500" => 260L * 1024 * 1024 * 1024,
+        "production-scale-3000" => 80L * 1024 * 1024 * 1024,
+        "huge-outlier-mixed" => 35L * 1024 * 1024 * 1024,
+        _ => 0,
+    };
 
     private static List<string> GenerateFiles(string dir, int count, string profile)
     {
@@ -337,6 +458,10 @@ public abstract class BackupBenchmarkBase
         "mixed-realistic" => MixedRealisticSize(rng),
         "large-skew" => LargeSkewSize(index, count, rng),
         "realistic-large" => RealisticLargeSize(index, count, rng),
+        // B27 big-scale profiles.
+        "media-library" => MediaLibrarySize(rng),
+        "production-scale" => ProductionScaleSize(rng),
+        "huge-outlier" => HugeOutlierSize(index, count, rng),
         _ => throw new ArgumentException($"Unknown size profile: {profile}", nameof(profile)),
     };
 
@@ -379,5 +504,68 @@ public abstract class BackupBenchmarkBase
         if (bucket < 0.10) return rng.Next(64 * 1024, 5 * 1024 * 1024);
         if (bucket < 0.70) return rng.Next(30 * 1024 * 1024, 70 * 1024 * 1024);
         return rng.Next(70 * 1024 * 1024, 100 * 1024 * 1024);
+    }
+
+    /// <summary>
+    /// B27 media-library profile. 500 files total, designed to
+    /// exercise the many-chunks-per-file regime that the pre-B27
+    /// <c>realistic-large</c> profile could not reach because it was
+    /// capped at 100 MB. At 200 MB-2 GB the chunker produces 3-30
+    /// chunks per file under the XXLargeChunkMaskBits path
+    /// (1-64 MB chunks for media extensions), which is the only
+    /// regime where per-file chunk concurrency is a meaningful knob.
+    /// Distribution:
+    ///   10% small (10 KB - 10 MB) for some heterogeneity
+    ///   50% medium (50-200 MB)
+    ///   40% large (200 MB - 2 GB)
+    /// Expected total: ~260 GB on disk.
+    /// </summary>
+    private static long MediaLibrarySize(Random rng)
+    {
+        var bucket = rng.NextDouble();
+        if (bucket < 0.10) return rng.NextInt64(10L * 1024, 10L * 1024 * 1024);
+        if (bucket < 0.60) return rng.NextInt64(50L * 1024 * 1024, 200L * 1024 * 1024);
+        return rng.NextInt64(200L * 1024 * 1024, 2L * 1024 * 1024 * 1024);
+    }
+
+    /// <summary>
+    /// B27 production-scale profile. Mirrors the shape of the
+    /// 2026-04-23 production log (7,313 files total) scaled down
+    /// proportionally to 3,000 files to keep run time bounded.
+    /// Shape derived from the log:
+    ///   89% small (&lt; 5 MB, typically photos, documents, small logs)
+    ///   9% medium (5-100 MB, typical office / source / archive files)
+    ///   1.4% large (100-500 MB, videos, VM images, large archives)
+    ///   0.4% very large (500 MB - 5 GB, long-form video, database dumps)
+    /// Expected total: ~70 GB on disk. The SqliteBackend write lock
+    /// is the suspected production bottleneck; 3,000 files is the
+    /// right scale to reveal whether the lock saturates.
+    /// </summary>
+    private static long ProductionScaleSize(Random rng)
+    {
+        var bucket = rng.NextDouble();
+        if (bucket < 0.89) return rng.NextInt64(4L * 1024, 5L * 1024 * 1024);
+        if (bucket < 0.98) return rng.NextInt64(5L * 1024 * 1024, 100L * 1024 * 1024);
+        if (bucket < 0.996) return rng.NextInt64(100L * 1024 * 1024, 500L * 1024 * 1024);
+        return rng.NextInt64(500L * 1024 * 1024, 5L * 1024 * 1024 * 1024);
+    }
+
+    /// <summary>
+    /// B27 huge-outlier profile. 498 small files (1-5 MB) plus two
+    /// deterministic outliers: one 10 GB file and one 20 GB file.
+    /// This is the textbook LPT case. Under input-order dispatch the
+    /// two outliers land at indices 498 and 499, so 8 workers race
+    /// through the small files then sit idle for many seconds waiting
+    /// for the two outliers to finish. Under largest-first LPT the
+    /// outliers start immediately and the other 7 workers drain the
+    /// small files in parallel. If LPT does NOT win decisively here,
+    /// the W2 hypothesis (production scheduling is bound by
+    /// steady-state pipelining, not makespan) is refuted.
+    /// </summary>
+    private static long HugeOutlierSize(int index, int count, Random rng)
+    {
+        if (index == count - 1) return 20L * 1024 * 1024 * 1024;
+        if (index == count - 2) return 10L * 1024 * 1024 * 1024;
+        return rng.NextInt64(1L * 1024 * 1024, 5L * 1024 * 1024);
     }
 }
