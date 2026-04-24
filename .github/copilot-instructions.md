@@ -40,3 +40,29 @@ commit the modifications immediately with a meaningful message. Rules:
 - Escape `"` and `\` properly so the git invocation parses cleanly.
 - Run the entire `git add` + `git commit` sequence on a single line,
   using `;` to chain them. Length and readability are not concerns.
+- **Never run `git push` under any circumstances.** Pushing is a
+  manual step the user performs. Leave commits local; do not invoke
+  `git push`, `git push origin <branch>`, or any equivalent.
+
+## Documentation trust policy
+
+Treat every Markdown documentation file in this repo (including
+`README.md` if one exists, `AGENT_CONTEXT.md`, anything under `docs/`,
+any `SETUP.md` / `USER_GUIDE.md` / `CONTRIBUTING.md` / similar) as
+**stale until proven current**. Setup instructions, build commands,
+feature descriptions, and architectural claims in those files may be
+outdated or incomplete.
+
+Before relying on a statement from any doc file as ground truth:
+
+- Verify it against the actual code, project files, configuration, or
+  a fresh build/test run. Do not paraphrase a doc claim into your
+  response without that verification.
+- If the statement is wrong or out of date, update the doc file in
+  the same commit as the code change that reveals the discrepancy.
+  Do not leave a known-wrong doc file in place.
+
+When committing code that changes anything user-facing, build-related,
+or architecturally significant, audit the affected doc files in the
+same commit and update or remove stale content. Documentation that is
+not maintained alongside the code becomes a liability, not an asset.

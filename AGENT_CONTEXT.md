@@ -35,8 +35,8 @@ This file is the **persistent memory** for Copilot agent sessions on the AzureBa
   - `src/AzureBackup/` — WPF UI shell (`MainWindowViewModel` + views). **Windows-only.** A non-Windows session can build / test `Core` and `Benchmarks` but cannot build the WPF project.
   - `tests/AzureBackup.Tests/` — xUnit. As of B25-bench-2: 759 tests, all passing.
   - `benchmarks/AzureBackup.Benchmarks/` — BenchmarkDotNet 0.15.8. Release-only, never run in CI. See "Running tests and benchmarks" below.
-- **Setup:** see `docs/SETUP.md` for clone-to-build instructions. NuGet restore handles the SQLCipher native binaries automatically.
-- **User-facing docs:** `docs/USER_GUIDE.md` for the WPF app's UX (memory limit slider, watched folders, restore flow, etc.).
+- **Setup:** `docs/SETUP.md` exists in the repo but is **stale until verified** (see "Documentation trust policy" below). For an authoritative setup path, run `dotnet restore azurebackup.sln; dotnet build azurebackup.sln -c Debug` from the repo root and follow whatever errors surface. NuGet restore handles the SQLCipher native binaries automatically as of the current `.csproj` files.
+- **User-facing docs:** `docs/USER_GUIDE.md` exists but is **stale until verified**. To answer a UX question authoritatively, read the relevant view code under `src/AzureBackup/Views/` and the `MainWindowViewModel` rather than quoting the doc.
 - **Database backend:** SQLCipher-encrypted SQLite (production default since commit `63103b1` = `C-5`). Legacy LiteDB code path still present for migration only.
 - **Authentication:** Argon2id KDF (64 MB, 8 lanes, 3 iterations) for both database key derivation and the `EncryptionService` content key.
 - **Encryption envelope:** AES-256-GCM with `[magic(4) | version(1) | nonce(12) | ciphertext(N) | tag(16) | crc32(4)]`. `EncryptionService.EncryptionOverhead = 37`.
@@ -47,6 +47,19 @@ This file is the **persistent memory** for Copilot agent sessions on the AzureBa
 ## Hard rules (USER PREFERENCES — never violate)
 
 These come from `.github/copilot-instructions.md` and from explicit user instruction during session work. Reproduced here because they apply to every session.
+
+### Documentation trust policy
+
+**Treat every Markdown documentation file in this repo as stale until proven current.** This includes any `README.md`, `AGENT_CONTEXT.md` (yes, even this file — verify its claims before relying on them), anything under `docs/` such as `SETUP.md` / `USER_GUIDE.md` / `stress-test-plan.md` / the `option-c-c3-results-*.md` series, and any `CONTRIBUTING.md` / similar that may appear later.
+
+Before relying on a statement from any doc file as ground truth:
+
+- Verify it against the actual code, project files, configuration, build output, or a fresh test run. Do not paraphrase a doc claim into a response without that verification.
+- If the statement is wrong or out of date, update the doc file in the same commit as the code change that reveals the discrepancy. Do not leave a known-wrong doc file in place.
+
+When committing code that changes anything user-facing, build-related, or architecturally significant, audit the affected doc files in the same commit and update or remove stale content. Documentation that is not maintained alongside the code becomes a liability, not an asset.
+
+This file (`AGENT_CONTEXT.md`) is the one doc that future sessions are *required* to read first, so the bar for keeping it current is correspondingly higher: every commit that invalidates anything in it MUST update it in the same commit, and the maintenance log at the bottom must record the change.
 
 ### Terminal commands
 
@@ -62,7 +75,7 @@ These come from `.github/copilot-instructions.md` and from explicit user instruc
 - **No emoji, no non-ASCII** in commit messages.
 - Escape `"` and `\` properly so the command parses cleanly.
 - Commit message convention in this repo: `B<number>: <imperative summary>` (or the older `C-<number>:`). Pick the next free B-number — see `git log --oneline | Select-Object -First 1`.
-- Push when work reaches a natural review point or when the user is about to switch machines.
+- **Never run `git push` under any circumstances.** Pushing is a manual step the user performs. Leave commits local; do not invoke `git push`, `git push origin <branch>`, or any equivalent. If the user is about to switch machines, remind them to push manually rather than doing it for them.
 
 ### Tool usage
 
@@ -172,7 +185,7 @@ Notes:
 - "Should we implement adaptive chunk concurrency for backup like restore has?" → defensible per the data; see B26b.
 - "Can I re-run the benchmarks on this machine and compare?" → yes, results are under `BenchmarkDotNet.Artifacts/results/`. The committed numbers in each benchmark's xmldoc table are tied to whatever hardware ran them at commit time; a re-run on different hardware may show different absolute values but the deltas between configurations should be directionally consistent. Add a dated note in the maintenance log of this file if the deltas materially differ.
 - "Why does the WPF project fail to build on this machine?" → it's Windows-only. Build `AzureBackup.Core` and `AzureBackup.Benchmarks` instead.
-- "What does `MemoryLimitMB` map to in the UI?" → see `docs/USER_GUIDE.md`. Soft cap on in-flight chunk buffers; disabled by default.
+- "What does `MemoryLimitMB` map to in the UI?" → soft cap on in-flight chunk buffers; disabled by default. The exact UI control and binding live in `src/AzureBackup/Views/` + `MainWindowViewModel`; the `docs/USER_GUIDE.md` description may be stale, verify before quoting.
 
 ---
 
@@ -199,4 +212,5 @@ Run `git log --oneline | Select-Object -First 20` for the latest. Earlier histor
 
 - **2026-04-24** — Initial creation. Captures B25-bench-2 in-progress state, all four benchmarks measured, two production seams added, working-tree dirty pending commit. Author: Copilot agent session (Claude Sonnet 4.5).
 - **2026-04-24** — User pointed out that PC-specific data (CPU model, free disk, terminal-tool timeout, hardware-tied benchmark numbers, workstream status that referred to uncommitted edits already long-since committed as `171f07e`) misleads sessions on other machines. Removed all such data. Removed the entire stale "what remains in W1" subsection. Added explicit "never record machine-specific values" rule to the edit policy at the top. Added pointers to `docs/SETUP.md` and `docs/USER_GUIDE.md` in the project-at-a-glance section. Replaced the hardware-tied "Local environment quirks" section with a hardware-neutral "Running tests and benchmarks" section so a fresh agent on a fresh clone knows the entry-point commands. Added an explicit Windows-only note about the WPF project. Added architectural fact #8 covering the new B25-bench-2 override seam on `BackupOrchestrator`. Promoted B25-bench / B25-bench-2 into a "Completed workstreams" section. Renumbered the active W2 (LPT investigation) since the old W2/W3 collapsed. Updated the recent-commit-history table to include `171f07e`. Author: Copilot agent session.
+- **2026-04-24** — Added two permanent rules: (1) never run `git push` under any circumstances, pushing is the user's manual job; (2) treat every Markdown doc in the repo as stale until verified against code, and update affected docs in the same commit as the code change that invalidates them. Added a new "Documentation trust policy" subsection under "Hard rules" capturing the second rule explicitly. Reworded the previous (also added today) `docs/SETUP.md` and `docs/USER_GUIDE.md` pointers in the project-at-a-glance section so they no longer treat those files as authoritative; instead they tell the agent to run a real `dotnet build` for setup and read the actual view code for UX questions. Reworded the corresponding `MemoryLimitMB` open-question entry the same way. Same updates applied to `.github/copilot-instructions.md` so a fresh agent reads them before even reaching this file. Author: Copilot agent session.
 - _(Add a dated bullet here every session that touches this file. One line per session, summarize what changed in the file.)_
