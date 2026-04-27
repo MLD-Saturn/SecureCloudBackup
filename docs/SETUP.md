@@ -283,6 +283,10 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Local database (production) | SQLCipher-encrypted SQLite (`SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, `Microsoft.Data.Sqlite` 10.x) |
 | Local database (legacy / migration source) | LiteDB 5.x |
 | Chunking | Content-defined, Rabin-style rolling hash (window 48, prime 31), per-extension config |
+| Default file-level concurrency | 16 (`MaxParallelFileBackups`, raised from 8 in B27 based on `TwoTierFileSplitBigScaleBenchmark`) |
+| Default chunk-level concurrency per file | 6 (`MaxParallelChunkUploads`) |
+| Default `MemoryLimitEnabled` | `true` (raised from `false` in B27) |
+| Default `MemoryLimitMB` | `8192` (raised from `2048` in B27 to fit the 16-way file concurrency ceiling) |
 | Azure SDK | `Azure.Storage.Blobs` (see `src/AzureBackup.Core/AzureBackup.Core.csproj` for current pinned version) |
 
 If you need exact version numbers, check the `.csproj` files; this table is updated when those references change but the `.csproj` files are the source of truth.

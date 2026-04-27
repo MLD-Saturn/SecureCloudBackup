@@ -399,8 +399,8 @@ internal sealed partial class SqliteBackend
                 is_entra_id_authenticated INTEGER NOT NULL DEFAULT 0,
                 entra_id_user_name TEXT NULL,
                 config_version INTEGER NOT NULL DEFAULT 3,
-                memory_limit_enabled INTEGER NOT NULL DEFAULT 0,
-                memory_limit_mb INTEGER NOT NULL DEFAULT 2048,
+                memory_limit_enabled INTEGER NOT NULL DEFAULT 1,
+                memory_limit_mb INTEGER NOT NULL DEFAULT 8192,
                 schema_version INTEGER NOT NULL DEFAULT 1
             );
 

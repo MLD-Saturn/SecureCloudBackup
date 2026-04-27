@@ -12,6 +12,27 @@ namespace AzureBackup.Core.Services;
 /// Simulates blob storage behavior including deduplication, metadata storage,
 /// and security validation matching AzureBlobService behavior.
 /// Supports both connection string and Entra ID authentication (simulated).
+///
+/// <para>
+/// <b>Discard mode (B27).</b> When the optional constructor parameter
+/// <c>retainPayloads</c> is <c>false</c>, chunk uploads still record the
+/// blob name and tier in the index (so dedup, BlobExistsAsync, listings
+/// and tier inspection continue to work) but the encrypted byte payload
+/// is replaced with <see cref="Array.Empty{T}()"/> before being stored.
+/// This breaks the RAM ceiling that the default retain-mode imposes on
+/// large workloads -- the AzureBackup B27 big-scale benchmarks use this
+/// mode to back up workloads (e.g. <c>media-library-500</c> at ~260 GB)
+/// that cannot fit their fully encrypted ciphertext in process memory.
+/// Production code never sets this flag; it exists exclusively so the
+/// throughput benchmarks measure the orchestrator pipeline cost rather
+/// than an artefact of the in-memory destination growing unboundedly.
+/// Discard mode short-circuits the dedup-collision verification path
+/// (since the original bytes are no longer present to compare against)
+/// and trusts the hash, matching the optimistic dedup behaviour of real
+/// Azure uploads. <see cref="DownloadChunkAsync"/> /
+/// <see cref="VerifyChunkIntegrityAsync"/> are not supported against a
+/// discard-mode store; restore-style benchmarks must not opt in.
+/// </para>
 /// </summary>
 public class InMemoryBlobService : IBlobStorageService
 {
@@ -19,10 +40,20 @@ public class InMemoryBlobService : IBlobStorageService
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
     private readonly ConcurrentDictionary<string, StorageTier> _blobTiers = new();
     private bool _isConnected;
-    
+
+    // B27: when false, UploadChunk* discard the encrypted payload after
+    // recording the index entry. Default true preserves all pre-B27
+    // behaviour and the production tests' invariants.
+    private readonly bool _retainPayloads;
+
+    // B27: tracks bytes that WOULD have been stored, so TotalStorageUsed
+    // remains accurate in discard mode (where _blobs.Values.Sum would
+    // return ~0 because every value is Array.Empty<byte>).
+    private long _discardModeStorageBytes;
+
     // Simulated latency for more realistic testing (milliseconds)
     private readonly int _simulatedLatencyMs;
-    
+
     // Simulated failure rate for resilience testing (0.0 to 1.0)
     private readonly double _failureRate;
     
@@ -51,19 +82,38 @@ public class InMemoryBlobService : IBlobStorageService
     
     /// <summary>
     /// Gets the total storage used (for test verification).
+    /// In discard mode the per-value byte arrays are empty, so the value
+    /// returned reflects the total bytes that <em>would</em> have been
+    /// stored in retain mode. This keeps benchmark diagnostics meaningful
+    /// without forcing callers to know which mode the service is in.
     /// </summary>
-    public long TotalStorageUsed => _blobs.Values.Sum(b => (long)b.Length);
+    public long TotalStorageUsed => _retainPayloads
+        ? _blobs.Values.Sum(b => (long)b.Length)
+        : Interlocked.Read(ref _discardModeStorageBytes);
 
     /// <summary>D6: see <see cref="IBlobStorageService.OnChunkUploaded"/>.</summary>
     public Action<string, byte[]>? OnChunkUploaded { get; set; }
 
-    public InMemoryBlobService(EncryptionService encryptionService, int simulatedLatencyMs = 0, double failureRate = 0.0)
+    public InMemoryBlobService(
+        EncryptionService encryptionService,
+        int simulatedLatencyMs = 0,
+        double failureRate = 0.0,
+        bool retainPayloads = true)
     {
         ArgumentNullException.ThrowIfNull(encryptionService);
         _encryptionService = encryptionService;
         _simulatedLatencyMs = simulatedLatencyMs;
         _failureRate = Math.Clamp(failureRate, 0.0, 1.0);
+        _retainPayloads = retainPayloads;
     }
+
+    /// <summary>
+    /// Whether this instance retains encrypted payloads on upload
+    /// (the default and only safe mode for production-shaped tests),
+    /// or discards them after recording the index entry (B27 big-scale
+    /// benchmark mode -- see the class summary).
+    /// </summary>
+    public bool RetainsPayloads => _retainPayloads;
 
     #region Connection String Authentication
 
@@ -135,6 +185,16 @@ public class InMemoryBlobService : IBlobStorageService
         // Check for deduplication
         if (_blobs.ContainsKey(blobName))
         {
+            // B27: discard-mode short-circuit. The original bytes are no
+            // longer present to compare against, so we cannot run the
+            // collision verification. Trust the hash (matching real
+            // Azure's optimistic dedup) and return the canonical name.
+            if (!_retainPayloads)
+            {
+                progress?.Report(chunkData.Length);
+                return blobName;
+            }
+
             // Defense-in-depth: Verify the stored chunk actually matches our data
             bool isCollision = false;
             try
@@ -168,8 +228,7 @@ public class InMemoryBlobService : IBlobStorageService
 
         // Encrypt and store
         var encryptedData = _encryptionService.Encrypt(chunkData.Span);
-        _blobs[blobName] = encryptedData;
-        _blobTiers[blobName] = storageTier;
+        StoreChunkBlob(blobName, encryptedData, storageTier);
 
         Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
         Interlocked.Increment(ref _totalOperations);
@@ -178,7 +237,9 @@ public class InMemoryBlobService : IBlobStorageService
         // D6: notify the host so it can persist the upload-time MD5 for
         // the cheap T1 integrity tier. Computed locally to match what
         // the integrity check will see on a future HEAD (which also
-        // computes MD5 over the stored bytes).
+        // computes MD5 over the stored bytes). Computed BEFORE the
+        // payload is potentially discarded by StoreChunkBlob in
+        // discard mode so the caller still sees a real MD5.
         var onUploaded = OnChunkUploaded;
         if (onUploaded != null)
         {
@@ -211,8 +272,7 @@ public class InMemoryBlobService : IBlobStorageService
 
         // Direct upload - no deduplication check (for new files)
         var encryptedData = _encryptionService.Encrypt(chunkData.Span);
-        _blobs[blobName] = encryptedData;
-        _blobTiers[blobName] = storageTier;
+        StoreChunkBlob(blobName, encryptedData, storageTier);
 
         Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
         Interlocked.Increment(ref _totalOperations);
@@ -221,7 +281,9 @@ public class InMemoryBlobService : IBlobStorageService
         // D6: same callback as UploadChunkAsync. Both upload paths must
         // notify or new-file backups would never have an upload-time
         // MD5 persisted (the orchestrator picks UploadChunkDirectAsync
-        // for new files for the API-call savings).
+        // for new files for the API-call savings). Computed BEFORE the
+        // payload is potentially discarded so the caller still sees a
+        // real MD5 in discard mode.
         var onUploaded = OnChunkUploaded;
         if (onUploaded != null)
         {
@@ -707,6 +769,29 @@ public class InMemoryBlobService : IBlobStorageService
     {
         if (!_isConnected)
             throw new InvalidOperationException("Not connected. Call ConnectAsync or ConnectWithEntraIdAsync first.");
+    }
+
+    /// <summary>
+    /// Stores a chunk blob in the index. In retain mode (the default,
+    /// and the only mode used by production tests) the encrypted bytes
+    /// land in <see cref="_blobs"/> verbatim. In discard mode the index
+    /// entry is created with an empty payload and the would-be storage
+    /// cost is recorded in <see cref="_discardModeStorageBytes"/> so
+    /// <see cref="TotalStorageUsed"/> remains a meaningful diagnostic.
+    /// </summary>
+    private void StoreChunkBlob(string blobName, byte[] encryptedData, StorageTier storageTier)
+    {
+        if (_retainPayloads)
+        {
+            _blobs[blobName] = encryptedData;
+        }
+        else
+        {
+            _blobs[blobName] = Array.Empty<byte>();
+            Interlocked.Add(ref _discardModeStorageBytes, encryptedData.Length);
+        }
+
+        _blobTiers[blobName] = storageTier;
     }
 
     private async Task SimulateLatencyAsync(CancellationToken cancellationToken)

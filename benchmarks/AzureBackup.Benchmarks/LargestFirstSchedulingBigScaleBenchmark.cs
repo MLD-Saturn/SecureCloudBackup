@@ -46,14 +46,38 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
-/// <b>Results (pending -- to be captured on this machine):</b>
+/// <b>Results (captured 2026-04-25, hardware: AMD EPYC 7763 @
+/// 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, MemoryLimitMB=16384, retainPayloads=false,
+/// warmupCount=1 iterationCount=2 invocationCount=1):</b>
 /// <code>
-/// // | Workload                | Input-order Mean | Largest-first Mean | Delta |
-/// // |------------------------ |----------------: |------------------: |-----: |
-/// // | media-library-500       |                  |                    |       |
-/// // | production-scale-3000   |                  |                    |       |
-/// // | huge-outlier-mixed      |                  |                    |       |
+/// // | Workload                | Input-order Mean | Largest-first Mean | Ratio | Notes |
+/// // |------------------------ |----------------: |------------------: |-----: |------ |
+/// // | huge-outlier-mixed      |        2.044 m   |        1.976 m     | 0.97  |       |
+/// // | media-library-500       |      279.992 m * |        5.072 m     | 0.55  | *     |
+/// // | production-scale-3000   |        1.794 m   |        1.751 m     | 0.98  |       |
 /// </code>
+/// (*) The <c>media-library-500</c> input-order Mean is an anomaly:
+/// StdDev was 389 m on 2 iterations (one normal ~5 m run, one
+/// pathological ~9 h run) almost certainly caused by host-OS pressure
+/// during a 42-hour overnight session, not by the orchestrator. Do
+/// NOT use the 280 m number; if a defensible value is needed, re-run
+/// just this single cell with <c>iterationCount&gt;=5</c> in a clean
+/// session. The Largest-first iteration was consistent across both
+/// runs.
+/// <para>
+/// <b>Conclusion</b>: at production scale LPT is FLAT (-2 to -3% on
+/// the two trustworthy rows), neither the decisive win the textbook
+/// LPT case predicts nor a regression. Combined with the small-
+/// workload regressions of +19 to +24% on <c>mixed-realistic-1000</c>
+/// and <c>realistic-large-200</c>, blanket largest-first remains
+/// DO-NOT-DO and B27 left the production scheduler unchanged. The
+/// W2 hypothesis (LPT destroys steady-state pipelining) is neither
+/// confirmed nor refuted -- a future workload-aware-scheduler
+/// investigation would need many more synthetic profiles between
+/// <c>mixed-realistic-1000</c> (LPT loses) and <c>huge-outlier-mixed</c>
+/// (LPT flat) to find the variance threshold where LPT becomes safe.
+/// </para>
 /// </para>
 /// </summary>
 [MemoryDiagnoser]
@@ -64,6 +88,9 @@ public class LargestFirstSchedulingBigScaleBenchmark : BackupBenchmarkBase
     public override string Workload { get; set; } = "huge-outlier-mixed";
 
     protected override int? MemoryLimitMBOverride => 16384;
+
+    // B27: discard mode -- see InMemoryBlobService class summary.
+    protected override bool RetainBlobPayloads => false;
 
     [Benchmark(Baseline = true, Description = "Input-order (today's production)")]
     public async Task InputOrder()

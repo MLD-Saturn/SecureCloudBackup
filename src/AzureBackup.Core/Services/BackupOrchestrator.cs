@@ -40,11 +40,19 @@ public partial class BackupOrchestrator : IAsyncDisposable
     private const int MaxParallelChunkUploads = 6;
 
     // File-level parallelism for multi-file operations.
-    // 8 concurrent CDC producers saturate the upload pipeline better than 4 because
-    // each file's CDC pass is sequential and CPU-bound — more files means more producers
-    // feeding the network in parallel. 8 files × 6 chunks = 48 concurrent HTTP uploads max.
-    // The MemoryBudget caps total in-flight memory regardless of file count.
-    private const int MaxParallelFileBackups = 8;
+    // B27 (was 8): bumped to 16 after TwoTierFileSplitBigScaleBenchmark
+    // on the AMD EPYC 7763 / 16-logical-core production hardware showed
+    // 16-way wins -22% on production-scale-3000 and -27% on
+    // media-library-500 against the previous 8-way default, with no
+    // regression on huge-outlier-mixed (where the workload is dominated
+    // by two giant files and file-level parallelism is irrelevant).
+    // 32-way was also measured and was within noise of 16-way, so 16
+    // is the crossover where the gain has stopped paying. The
+    // MemoryBudget still caps total in-flight memory regardless of
+    // file count, and the recommended UI default of MemoryLimitMB=8192
+    // (set in B27) is sized to leave headroom for 16-way at 6 chunks
+    // per file at the 64 MB MaxChunkSize ceiling.
+    private const int MaxParallelFileBackups = 16;
 
     /// <summary>
     /// B25-bench-2: optional per-instance override for

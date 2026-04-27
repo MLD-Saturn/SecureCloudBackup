@@ -73,6 +73,34 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
+/// <b>B27 re-baseline (captured 2026-04-25, hardware: AMD EPYC 7763
+/// @ 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, warmupCount=1 iterationCount=2 invocationCount=1):</b>
+/// <code>
+/// // | Workload                | Input-order | Largest-first | Delta   |
+/// // |------------------------ |-----------: |-------------: |-------: |
+/// // | uniform-1MB-100         |    274 ms   |     275 ms    |   +0%   |
+/// // | uniform-1MB-1000        |  2,886 ms   |   2,918 ms    |   +1%   |
+/// // | mixed-realistic-100     |  1,201 ms   |   1,169 ms    |   -3%   |
+/// // | mixed-realistic-1000    |  7,513 ms   |   8,908 ms    |  +19% ! |
+/// // | large-skew-100          |  3,551 ms   |   3,078 ms    |  -13%   |
+/// // | large-skew-200          |  4,031 ms   |   3,067 ms    |  -24%   |
+/// // | realistic-large-50      |  2,741 ms   |   2,969 ms    |   +8%   |
+/// // | realistic-large-200     | 12,253 ms   |  15,162 ms    |  +24% ! |
+/// </code>
+/// Same shape as the i7-9700K block: LPT wins on the large-skew
+/// outlier workloads (-13 to -24%) and regresses on mid-sized
+/// realistic workloads (+19 to +24% on <c>mixed-realistic-1000</c>
+/// and <c>realistic-large-200</c>). The regressions are reproducible
+/// across hardware -- they are NOT a Coffee Lake artifact.
+/// Combined with the big-scale companion
+/// <see cref="LargestFirstSchedulingBigScaleBenchmark"/> showing LPT
+/// flat at production scale, B27 left the production scheduler
+/// unchanged; a workload-aware scheduler is deferred to a future
+/// investigation.
+/// </para>
+///
+/// <para>
 /// <b>Conclusion: LPT scheduling is NOT a unilateral win and would
 /// REGRESS the most common workloads.</b>
 /// <list type="bullet">

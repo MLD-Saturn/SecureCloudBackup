@@ -130,6 +130,34 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
+/// <b>B27 re-baseline (captured 2026-04-25, hardware: AMD EPYC 7763
+/// @ 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, warmupCount=1 iterationCount=2 invocationCount=1):</b>
+/// <code>
+/// // | Workload                | 8-way Mean | 16-way Mean | 32-way Mean |
+/// // |------------------------ |----------: |-----------: |-----------: |
+/// // | uniform-1MB-100         |    255 ms  |    247 ms   |    249 ms   |
+/// // | uniform-1MB-1000        |  2,925 ms  |  2,698 ms   |  2,601 ms   |
+/// // | mixed-realistic-100     |  1,201 ms  |  1,209 ms   |  1,250 ms   |
+/// // | mixed-realistic-1000    |  7,531 ms  |  5,953 ms   |  6,167 ms   |
+/// // | large-skew-100          |  3,569 ms  |  3,467 ms   |  3,529 ms   |
+/// // | large-skew-200          |  4,120 ms  |  3,798 ms   |  3,983 ms   |
+/// // | realistic-large-50      |  2,677 ms  |  2,294 ms   |  2,293 ms   |
+/// // | realistic-large-200     | 12,432 ms  | 12,226 ms   | 10,969 ms   |
+/// </code>
+/// On this hardware 16-way wins or ties 7 of 8 workloads, with the
+/// large wins on <c>mixed-realistic-1000</c> (-21%) and
+/// <c>realistic-large-50</c> (-14%) carrying the recommendation. The
+/// 32-way column is essentially flat against 16-way, confirming 16
+/// is the crossover. Production default was bumped from 8 to 16 in
+/// commit B27. Per AGENT_CONTEXT same-hardware discipline, the
+/// shipping decision relies on the big-scale companion benchmark
+/// <see cref="TwoTierFileSplitBigScaleBenchmark"/> -- this small
+/// block confirms the direction; the big-scale block confirms the
+/// magnitude at production scale.
+/// </para>
+///
+/// <para>
 /// 32-way is more nuanced: better than 16-way on some workloads
 /// (<c>realistic-large-200</c>, <c>uniform-1MB-100</c>) but worse
 /// on the only large-skew workload (where the makespan is bound

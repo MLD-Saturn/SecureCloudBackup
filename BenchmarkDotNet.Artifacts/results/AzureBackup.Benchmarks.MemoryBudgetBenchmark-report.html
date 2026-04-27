@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>AzureBackup.Benchmarks.MemoryBudgetBenchmark-20260425-194230</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8246/25H2/2025Update/HudsonValley2) (Hyper-V)
+AMD EPYC 7763 2.44GHz, 1 CPU, 16 logical and 8 physical cores
+.NET SDK 10.0.202
+  [Host]     : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+  Job-VWSJFF : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+</code></pre>
+<pre><code>InvocationCount=1  IterationCount=2  RunStrategy=Throughput  
+UnrollFactor=1  WarmupCount=1  
+</code></pre>
+
+<table>
+<thead><tr><th>Method                                            </th><th>Workload   </th><th>MemoryLimitParam</th><th>Mean</th><th>Error</th><th>StdDev</th><th>Gen0 </th><th>Gen1 </th><th>Gen2 </th><th>Allocated</th>
+</tr>
+</thead><tbody><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>0</td><td>4.937 m</td><td>69.7621 m</td><td>0.1550 m</td><td>225000.0000</td><td>149000.0000</td><td>105000.0000</td><td>258.54 GB</td>
+</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>4096</td><td>4.726 m</td><td>0.2185 m</td><td>0.0005 m</td><td>211000.0000</td><td>133000.0000</td><td>91000.0000</td><td>258.27 GB</td>
+</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>8192</td><td>4.744 m</td><td>20.1477 m</td><td>0.0448 m</td><td>215000.0000</td><td>136000.0000</td><td>95000.0000</td><td>257.39 GB</td>
+</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>16384</td><td>4.721 m</td><td>10.9402 m</td><td>0.0243 m</td><td>210000.0000</td><td>136000.0000</td><td>90000.0000</td><td>257.4 GB</td>
+</tr></tbody></table>
+</body>
+</html>

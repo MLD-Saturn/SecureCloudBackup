@@ -53,14 +53,24 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
-/// <b>Results (pending -- to be captured on this machine):</b>
+/// <b>Results (captured 2026-04-25, hardware: AMD EPYC 7763 @
+/// 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, MemoryLimitMB=16384, retainPayloads=false,
+/// warmupCount=1 iterationCount=2 invocationCount=1; pre-B27
+/// orchestrator defaults: MaxParallelChunkUploads=6,
+/// MaxParallelFileBackups=8):</b>
 /// <code>
-/// // | Workload                | Mean (ms) | Allocated (MB) | Peak WS (MB) | Stalls |
-/// // |------------------------ |---------: |--------------: |------------: |------: |
-/// // | media-library-500       |           |                |              |        |
-/// // | production-scale-3000   |           |                |              |        |
-/// // | huge-outlier-mixed      |           |                |              |        |
+/// // | Workload                | Mean    | Allocated  |
+/// // |------------------------ |-------: |---------:  |
+/// // | huge-outlier-mixed      | 2.036 m |  32.76 GB  |
+/// // | media-library-500       | 4.764 m | 256.38 GB  |
+/// // | production-scale-3000   | 1.653 m |  75.13 GB  |
 /// </code>
+/// These are the anchor values that every B27 design-decision
+/// benchmark deltas against. The <c>media-library-500</c> Mean here
+/// matches <see cref="TwoTierFileSplitBigScaleBenchmark"/> 8-way
+/// (4.721 m) within 1%, sanity-checking that both benchmarks measure
+/// the same orchestrator under the same configuration.
 /// </para>
 /// </summary>
 [MemoryDiagnoser]
@@ -77,6 +87,13 @@ public class ProductionScaleBackupBenchmark : BackupBenchmarkBase
     /// observed in the 2026-04-23 log).
     /// </summary>
     protected override int? MemoryLimitMBOverride => 16384;
+
+    // B27: discard mode. The benchmark host would otherwise need to fit
+    // the entire encrypted workload in RAM, which is not possible for
+    // media-library-500 (~260 GB) on any commodity machine. Production
+    // never retains uploaded ciphertext locally either, so this matches
+    // real backup semantics; see the InMemoryBlobService class summary.
+    protected override bool RetainBlobPayloads => false;
 
     [Benchmark(Description = "Production-scale backup, 16 GB memory budget, no overrides")]
     public async Task Backup()

@@ -354,7 +354,7 @@ Folders are added and removed from the **Sync** view (see "Managing watched fold
 
 ### Memory limit
 
-A toggle plus a slider that puts a soft cap on the total bytes the backup pipeline holds in flight at once (chunk buffers in transit between read, encrypt, and upload). When the toggle is **off** (default), the cap is unlimited and the pipeline can hold many GB at once on large workloads. Turn it on if you want bounded memory usage at the cost of throughput on large files.
+A toggle plus a slider that puts a soft cap on the total bytes the backup pipeline holds in flight at once (chunk buffers in transit between read, encrypt, and upload). The toggle defaults to **on** with the slider at **8 GB**. Turn it off only if you have measured a specific throughput problem on your machine and want to fall back to the unlimited-budget behaviour; the default value was chosen because the `MemoryBudgetBenchmark` measurement on production-shaped workloads showed zero throughput cost even at 4 GB, while leaving the cap unlimited would let the pipeline grow to many GB on a single backup.
 
 The slider snaps to a discrete set of values; the live label shows the chosen MB and a status color (green / amber / red) indicating how aggressive the cap is.
 

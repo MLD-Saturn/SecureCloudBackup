@@ -569,6 +569,132 @@ public class BlobServiceTests : IAsyncLifetime
 
     #endregion
 
+    #region B27: Discard mode (retainPayloads = false)
+
+    [Fact]
+    public void RetainsPayloads_DefaultsToTrue()
+    {
+        // Arrange
+        InMemoryBlobService blobService = new(_encryptionService);
+
+        // Assert
+        Assert.True(blobService.RetainsPayloads);
+    }
+
+    [Fact]
+    public void RetainsPayloads_HonorsConstructorArg()
+    {
+        // Arrange
+        InMemoryBlobService retainOff = new(_encryptionService, retainPayloads: false);
+        InMemoryBlobService retainOn = new(_encryptionService, retainPayloads: true);
+
+        // Assert
+        Assert.False(retainOff.RetainsPayloads);
+        Assert.True(retainOn.RetainsPayloads);
+    }
+
+    [Fact]
+    public async Task UploadChunkAsync_DiscardMode_RecordsIndexEntryWithEmptyPayload()
+    {
+        // Arrange
+        InMemoryBlobService blobService = new(_encryptionService, retainPayloads: false);
+        await blobService.ConnectAsync("c", "test");
+        byte[] data = CreateRandomContent(1024);
+        string hash = ComputeHash(data);
+
+        // Act
+        string blobName = await blobService.UploadChunkAsync(data, hash);
+
+        // Assert: index visible to BlobExistsAsync, but raw bytes were discarded.
+        Assert.Equal($"chunks/{hash}", blobName);
+        Assert.True(await blobService.BlobExistsAsync(blobName));
+        byte[]? raw = blobService.GetRawBlob(blobName);
+        Assert.NotNull(raw);
+        Assert.Empty(raw);
+    }
+
+    [Fact]
+    public async Task UploadChunkAsync_DiscardMode_TotalStorageUsedTracksOriginalSize()
+    {
+        // Arrange
+        InMemoryBlobService blobService = new(_encryptionService, retainPayloads: false);
+        await blobService.ConnectAsync("c", "test");
+        byte[] data = CreateRandomContent(2048);
+        string hash = ComputeHash(data);
+
+        // Act
+        await blobService.UploadChunkAsync(data, hash);
+
+        // Assert: TotalStorageUsed reflects the encrypted ciphertext length
+        // (= plaintext + EncryptionService.EncryptionOverhead) even though
+        // the bytes themselves were discarded.
+        long expectedCiphertextLength = data.Length + EncryptionService.EncryptionOverhead;
+        Assert.Equal(expectedCiphertextLength, blobService.TotalStorageUsed);
+        Assert.Equal(expectedCiphertextLength, blobService.TotalBytesUploaded);
+    }
+
+    [Fact]
+    public async Task UploadChunkAsync_DiscardMode_DedupHitShortCircuitsWithoutVerify()
+    {
+        // Arrange: same chunk uploaded twice. In retain mode the second
+        // call would invoke VerifyChunkIntegrityAsync, which in discard
+        // mode would always fail (the original bytes are gone). The
+        // service must short-circuit and dedup on the hash alone.
+        InMemoryBlobService blobService = new(_encryptionService, retainPayloads: false);
+        await blobService.ConnectAsync("c", "test");
+        byte[] data = CreateRandomContent(512);
+        string hash = ComputeHash(data);
+
+        // Act
+        string first = await blobService.UploadChunkAsync(data, hash);
+        string second = await blobService.UploadChunkAsync(data, hash);
+
+        // Assert: same canonical name returned, no exception, no _v2.
+        Assert.Equal(first, second);
+        Assert.Equal($"chunks/{hash}", second);
+        Assert.Single(blobService.StoredBlobNames);
+    }
+
+    [Fact]
+    public async Task UploadChunkDirectAsync_DiscardMode_RecordsIndexEntryWithEmptyPayload()
+    {
+        // Arrange
+        InMemoryBlobService blobService = new(_encryptionService, retainPayloads: false);
+        await blobService.ConnectAsync("c", "test");
+        byte[] data = CreateRandomContent(1024);
+        string hash = ComputeHash(data);
+
+        // Act
+        string blobName = await blobService.UploadChunkDirectAsync(data, hash);
+
+        // Assert
+        Assert.Equal($"chunks/{hash}", blobName);
+        Assert.True(await blobService.BlobExistsAsync(blobName));
+        Assert.Empty(blobService.GetRawBlob(blobName)!);
+    }
+
+    [Fact]
+    public async Task UploadChunkAsync_RetainMode_StillRetainsPayload()
+    {
+        // Arrange: regression guard. The default mode must keep the
+        // existing behaviour exactly so all production tests and the
+        // pre-B27 small-workload benchmarks remain valid.
+        InMemoryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("c", "test");
+        byte[] data = CreateRandomContent(1024);
+        string hash = ComputeHash(data);
+
+        // Act
+        await blobService.UploadChunkAsync(data, hash);
+
+        // Assert: raw blob actually contains the encrypted bytes.
+        byte[]? raw = blobService.GetRawBlob($"chunks/{hash}");
+        Assert.NotNull(raw);
+        Assert.Equal(data.Length + EncryptionService.EncryptionOverhead, raw.Length);
+    }
+
+    #endregion
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)

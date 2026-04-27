@@ -194,7 +194,11 @@ public abstract class BackupBenchmarkBase
 
         _chunkingService = new ChunkingService();
         _fileWatcherService = new FileWatcherService(_databaseService);
-        _blobService = new InMemoryBlobService(_encryptionService);
+        _blobService = new InMemoryBlobService(
+            _encryptionService,
+            simulatedLatencyMs: 0,
+            failureRate: 0.0,
+            retainPayloads: RetainBlobPayloads);
 
         _blobService.ConnectAsync("UseDevelopmentStorage=true", "bench").GetAwaiter().GetResult();
 
@@ -220,6 +224,19 @@ public abstract class BackupBenchmarkBase
     /// <c>MemoryBudgetBenchmark</c> sweeps the value parametrically.
     /// </summary>
     protected virtual int? MemoryLimitMBOverride => null;
+
+    /// <summary>
+    /// Whether the per-iteration <see cref="InMemoryBlobService"/>
+    /// retains uploaded ciphertext (default, matches all pre-B27
+    /// behaviour) or discards it after recording the index entry
+    /// (B27 big-scale mode -- see
+    /// <see cref="InMemoryBlobService"/>'s class summary). Big-scale
+    /// subclasses override this to <c>false</c> so the benchmark host
+    /// does not need to fit the full encrypted workload in process
+    /// memory; small-workload subclasses leave the default so the
+    /// published pre-B27 result tables remain directly comparable.
+    /// </summary>
+    protected virtual bool RetainBlobPayloads => true;
 
     /// <summary>
     /// Hook for subclasses to apply per-iteration orchestrator

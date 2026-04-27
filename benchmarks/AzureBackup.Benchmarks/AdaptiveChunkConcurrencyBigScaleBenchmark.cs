@@ -65,10 +65,23 @@ public class AdaptiveChunkConcurrencyBigScaleBenchmark : BackupBenchmarkBase
     [ParamsSource(nameof(BigWorkloads))]
     public override string Workload { get; set; } = "media-library-500";
 
-    [Params(4, 6, 12, 24)]
+    // B27: 24-way was dropped after the 2026-04-24 run OOM-killed at
+    // [ChunkConcurrency=24, Workload=media-library-500] with peak
+    // working set = 58 GB. The 4/6/12 sweep already in the log shows
+    // no monotone benefit beyond 6 on this hardware, so paying another
+    // ~30 minutes of workload generation for a configuration we have
+    // no theoretical reason to expect would suddenly win is wasteful.
+    [Params(4, 6, 12)]
     public int ChunkConcurrency { get; set; }
 
     protected override int? MemoryLimitMBOverride => 16384;
+
+    // B27: discard mode -- the InMemoryBlobService destination would
+    // otherwise retain ~260 GB of ciphertext in process RAM during a
+    // single iteration of media-library-500, and that destination
+    // memory growth (not the orchestrator pipeline) was the real cause
+    // of the OOM seen on the 2026-04-24 run.
+    protected override bool RetainBlobPayloads => false;
 
     protected override void ConfigureOrchestrator(BackupOrchestrator orchestrator)
     {

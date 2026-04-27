@@ -141,15 +141,38 @@ public class BackupConfiguration
     /// <summary>
     /// Whether the user has enabled a manual memory limit for backup/restore operations.
     /// When false, the application uses automatic memory management.
+    /// <para>
+    /// B27: defaults to <c>true</c> (was previously <c>false</c>). The
+    /// <c>MemoryBudgetBenchmark</c> sweep on the AMD EPYC 7763 production
+    /// hardware showed that even an 8 GB cap has zero throughput cost
+    /// against the worst-case <c>media-library-500</c> workload, while
+    /// the previous unlimited default allowed the orchestrator to hold
+    /// multi-GB working sets on real production backups (see the
+    /// 2026-04-23 production log). Existing users keep whatever value
+    /// they already set; this change only affects fresh installs and
+    /// newly created configuration rows.
+    /// </para>
     /// </summary>
-    public bool MemoryLimitEnabled { get; set; }
+    public bool MemoryLimitEnabled { get; set; } = true;
 
     /// <summary>
     /// The user-selected memory limit in megabytes for backup/restore operations.
     /// Only used when <see cref="MemoryLimitEnabled"/> is true.
     /// Stored as a stepped value (512, 1024, 2048, 4096, 8192, 16384, 32768).
+    /// <para>
+    /// B27: default raised from 2048 MB to 8192 MB. With the B27 bump
+    /// of <c>MaxParallelFileBackups</c> from 8 to 16 the worst-case
+    /// in-flight chunk-buffer pressure becomes 16 files x 6 chunks x
+    /// 64 MB = 6 GB, so the 8 GB default leaves ~2 GB of headroom for
+    /// metadata, GC slack, and short-lived allocations. The
+    /// <c>MemoryBudgetBenchmark</c> sweep showed that 4 GB has zero
+    /// throughput cost on <c>media-library-500</c> at 8-way file
+    /// concurrency, but 4 GB is below the 16-way ceiling so it would
+    /// force stalls under the new default. 8 GB is the smallest value
+    /// that fits without throttling.
+    /// </para>
     /// </summary>
-    public int MemoryLimitMB { get; set; } = 2048;
+    public int MemoryLimitMB { get; set; } = 8192;
 }
 
 /// <summary>

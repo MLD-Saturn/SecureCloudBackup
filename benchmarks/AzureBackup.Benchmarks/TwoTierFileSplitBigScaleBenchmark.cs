@@ -48,14 +48,26 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
-/// <b>Results (pending -- to be captured on this machine):</b>
+/// <b>Results (captured 2026-04-25, hardware: AMD EPYC 7763 @
+/// 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, MemoryLimitMB=16384, retainPayloads=false,
+/// warmupCount=1 iterationCount=2 invocationCount=1):</b>
 /// <code>
-/// // | Workload                | 8-way | 16-way | 32-way | Best | Peak WS @best |
-/// // |------------------------ |-----: |------: |------: |----- |-------------: |
-/// // | media-library-500       |       |        |        |      |               |
-/// // | production-scale-3000   |       |        |        |      |               |
-/// // | huge-outlier-mixed      |       |        |        |      |               |
+/// // | Workload                | 8-way    | 16-way   | 32-way   | Best   | 16 vs 8  |
+/// // |------------------------ |--------: |--------: |--------: |------- |--------: |
+/// // | huge-outlier-mixed      | 2.056 m  | 2.044 m  | 2.024 m  | 32-way |   -0.6%  |
+/// // | media-library-500       | 4.721 m  | 3.431 m  | 3.481 m  | 16-way |  -27.3%  |
+/// // | production-scale-3000   | 1.726 m  | 1.350 m  | 1.287 m  | 32-way |  -21.8%  |
 /// </code>
+/// <b>Conclusion</b>: 16-way is the right default. Wins -22 to -27%
+/// on the two production-shaped workloads, flat on huge-outlier-mixed
+/// (which is dominated by two giant files where file-level
+/// parallelism is irrelevant). 32-way is essentially flat against
+/// 16-way (within 0.05 m on media-library-500), so 16 is the
+/// crossover where the gain has stopped paying. Production default
+/// was bumped from 8 to 16 in commit B27 on the strength of this
+/// table together with <see cref="TwoTierFileSplitBenchmark"/>'s
+/// small-workload data.
 /// </para>
 /// </summary>
 [MemoryDiagnoser]
@@ -69,6 +81,11 @@ public class TwoTierFileSplitBigScaleBenchmark : BackupBenchmarkBase
     public int FileConcurrency { get; set; }
 
     protected override int? MemoryLimitMBOverride => 16384;
+
+    // B27: discard mode -- see InMemoryBlobService class summary.
+    // Without it, media-library-500 cannot fit the encrypted workload
+    // in process RAM at any FileConcurrency value.
+    protected override bool RetainBlobPayloads => false;
 
     protected override void ConfigureOrchestrator(BackupOrchestrator orchestrator)
     {

@@ -106,6 +106,32 @@ namespace AzureBackup.Benchmarks;
 ///     <see cref="LargestFirstSchedulingBenchmark"/> targets.</item>
 /// </list>
 /// </para>
+///
+/// <para>
+/// <b>B27 re-baseline (captured 2026-04-25, hardware: AMD EPYC 7763
+/// @ 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, warmupCount=1 iterationCount=2 invocationCount=1):</b>
+/// <code>
+/// // | Workload                |   Mean      |  Allocated   |
+/// // |------------------------ |------------ |------------- |
+/// // | uniform-1MB-100         |    277 ms   |    207 MB    |
+/// // | uniform-1MB-1000        |  2,910 ms   |  2,068 MB    |
+/// // | mixed-realistic-100     |  1,217 ms   |    340 MB    |
+/// // | mixed-realistic-1000    |  7,371 ms   |  6,531 MB    |
+/// // | large-skew-100          |  3,543 ms   |  1,434 MB    |
+/// // | large-skew-200          |  4,100 ms   |  2,098 MB    |
+/// // | realistic-large-50      |  2,724 ms   |  2,799 MB    |
+/// // | realistic-large-200     | 12,346 ms   | 11,307 MB    |
+/// </code>
+/// Per AGENT_CONTEXT same-hardware discipline, do NOT compare these
+/// numbers cell-by-cell against the i7-9700K block above; the absolute
+/// timings differ for hardware reasons that have nothing to do with
+/// the orchestrator pipeline. The qualitative shape is the same: the
+/// pipeline is roughly linear-in-bytes at the 100-1000 file scale,
+/// the realistic-large workloads dominate the wall clock, and CPU
+/// pressure is modest. This block is the authoritative comparison
+/// point for any future re-run on this same machine.
+/// </para>
 /// </summary>
 [MemoryDiagnoser]
 [SimpleJob(RunStrategy.Throughput, warmupCount: 1, iterationCount: 2, invocationCount: 1)]

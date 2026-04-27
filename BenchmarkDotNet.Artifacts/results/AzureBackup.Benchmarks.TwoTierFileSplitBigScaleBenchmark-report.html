@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8' />
+<title>AzureBackup.Benchmarks.TwoTierFileSplitBigScaleBenchmark-20260426-210957</title>
+
+<style type="text/css">
+	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
+	td, th { padding: 6px 13px; border: 1px solid #ddd; text-align: right; }
+	tr { background-color: #fff; border-top: 1px solid #ccc; }
+	tr:nth-child(even) { background: #f8f8f8; }
+</style>
+</head>
+<body>
+<pre><code>
+BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8246/25H2/2025Update/HudsonValley2) (Hyper-V)
+AMD EPYC 7763 2.44GHz, 1 CPU, 16 logical and 8 physical cores
+.NET SDK 10.0.202
+  [Host]     : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+  Job-VWSJFF : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+</code></pre>
+<pre><code>InvocationCount=1  IterationCount=2  RunStrategy=Throughput  
+UnrollFactor=1  WarmupCount=1  
+</code></pre>
+
+<table>
+<thead><tr><th>Method                                     </th><th>FileConcurrency</th><th>Workload      </th><th>Mean</th><th>Error</th><th>StdDev</th><th>Gen0 </th><th>Gen1 </th><th>Gen2</th><th>Allocated</th>
+</tr>
+</thead><tbody><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>8</td><td>huge-outlier-mixed</td><td>2.056 m</td><td>0.1143 m</td><td>0.0003 m</td><td>34000.0000</td><td>30000.0000</td><td>28000.0000</td><td>32.5 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>8</td><td>media-library-500</td><td>4.721 m</td><td>22.2826 m</td><td>0.0495 m</td><td>205000.0000</td><td>130000.0000</td><td>85000.0000</td><td>258.52 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>8</td><td>produ(...)-3000 [21]</td><td>1.726 m</td><td>44.0305 m</td><td>0.0978 m</td><td>121000.0000</td><td>52000.0000</td><td>24000.0000</td><td>75.24 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>16</td><td>huge-outlier-mixed</td><td>2.044 m</td><td>5.2216 m</td><td>0.0116 m</td><td>38000.0000</td><td>33000.0000</td><td>32000.0000</td><td>32.52 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>16</td><td>media-library-500</td><td>3.431 m</td><td>4.2125 m</td><td>0.0094 m</td><td>186000.0000</td><td>109000.0000</td><td>66000.0000</td><td>256.25 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>16</td><td>produ(...)-3000 [21]</td><td>1.350 m</td><td>4.2285 m</td><td>0.0094 m</td><td>124000.0000</td><td>58000.0000</td><td>27000.0000</td><td>75.24 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>32</td><td>huge-outlier-mixed</td><td>2.024 m</td><td>3.2195 m</td><td>0.0072 m</td><td>35000.0000</td><td>31000.0000</td><td>30000.0000</td><td>32.68 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>32</td><td>media-library-500</td><td>3.481 m</td><td>11.1505 m</td><td>0.0248 m</td><td>158000.0000</td><td>82000.0000</td><td>42000.0000</td><td>256.59 GB</td>
+</tr><tr><td>&#39;Big-scale backup at parametric file concurrency&#39;</td><td>32</td><td>produ(...)-3000 [21]</td><td>1.287 m</td><td>7.3818 m</td><td>0.0164 m</td><td>116000.0000</td><td>53000.0000</td><td>20000.0000</td><td>76 GB</td>
+</tr></tbody></table>
+</body>
+</html>

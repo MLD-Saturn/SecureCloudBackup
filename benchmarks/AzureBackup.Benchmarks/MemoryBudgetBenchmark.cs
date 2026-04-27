@@ -57,15 +57,35 @@ namespace AzureBackup.Benchmarks;
 /// </para>
 ///
 /// <para>
-/// <b>Results (pending -- to be captured on this machine):</b>
+/// <b>Results (captured 2026-04-25, hardware: AMD EPYC 7763 @
+/// 2.44 GHz, 16 logical / 8 physical cores in Hyper-V, .NET 10.0.6,
+/// SQLite backend, retainPayloads=false, MaxParallelFileBackups=8
+/// (pre-B27 default), warmupCount=1 iterationCount=2 invocationCount=1):</b>
 /// <code>
-/// // | MemoryLimitParam | Mean (ms) | Peak WS (MB) | StallCount | vs unlimited |
-/// // |----------------- |---------: |------------: |----------: |------------: |
-/// // | 0 (unlimited)    |           |              |          0 |          +0% |
-/// // | 16384            |           |              |            |              |
-/// // | 8192             |           |              |            |              |
-/// // | 4096             |           |              |            |              |
+/// // | MemoryLimitParam | Mean    | Allocated  | vs unlimited |
+/// // |----------------- |-------: |---------:  |------------: |
+/// // | 0 (unlimited)    | 4.937 m | 258.54 GB  |        +0.0% |
+/// // | 16384            | 4.721 m | 257.40 GB  |        -4.4% |
+/// // | 8192             | 4.744 m | 257.39 GB  |        -3.9% |
+/// // | 4096             | 4.726 m | 258.27 GB  |        -4.3% |
 /// </code>
+/// <b>Conclusion</b>: MemoryBudget does not throttle throughput on
+/// <c>media-library-500</c> at any value tested -- all four
+/// configurations are within 4.5% of each other (well inside the
+/// noise band given N=2). If anything the constrained values run
+/// slightly faster than unlimited, plausibly because the GC has
+/// tighter targets and is more efficient. This validated turning
+/// <c>MemoryLimitEnabled</c> ON by default in B27.
+/// <para>
+/// <b>Choosing the default value</b>: the sweep ran with
+/// <c>MaxParallelFileBackups=8</c> (the pre-B27 default), at which
+/// the worst-case in-flight chunk-buffer ceiling is
+/// 8 files x 6 chunks x 64 MB = 3 GB. With B27's bump to 16-way the
+/// ceiling becomes 6 GB, which means <c>MemoryLimitMB=4096</c> would
+/// force stalls under the new default. <c>8192</c> is the smallest
+/// stepped value that fits the 16-way ceiling without throttling, so
+/// it is the value B27 ships as the new default.
+/// </para>
 /// </para>
 /// </summary>
 [MemoryDiagnoser]
@@ -86,6 +106,12 @@ public class MemoryBudgetBenchmark : BackupBenchmarkBase
 
     protected override int? MemoryLimitMBOverride =>
         MemoryLimitParam == 0 ? null : MemoryLimitParam;
+
+    // B27: discard mode. media-library-500 cannot fit its encrypted
+    // ciphertext in RAM, and the whole point of this sweep is to
+    // measure the orchestrator's MemoryBudget behaviour rather than
+    // the in-memory destination's; see InMemoryBlobService summary.
+    protected override bool RetainBlobPayloads => false;
 
     [Benchmark(Description = "Backup on media-library-500 at parametric MemoryBudget")]
     public async Task Backup()
