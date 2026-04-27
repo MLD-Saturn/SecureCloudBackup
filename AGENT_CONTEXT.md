@@ -226,7 +226,7 @@ Notes:
 
 | Hash | Message |
 |---|---|
-| `<B37_HASH>` | B37: LargeChunkBufferPool, bounded LOH recycler for large chunk buffers |
+| `9cd7d47` | B37: LargeChunkBufferPool, bounded LOH recycler for large chunk buffers |
 | `fc1897a` | B38: fold encrypt-buffer charge into producer-side acquire (prevents deadlock) |
 | `0f11c59` | B30+B33+B34+B36: producer-side budget accounting, exact byte[] for large chunks, tightened oversized admission, periodic memory log |
 | `d3e60d4` | B29: add B29 row to AGENT_CONTEXT recent-commit-history table |
