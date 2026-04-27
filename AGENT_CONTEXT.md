@@ -226,7 +226,7 @@ Notes:
 
 | Hash | Message |
 |---|---|
-| `<B38_HASH>` | B38: fold encrypt-buffer charge into producer-side acquire (prevents deadlock) |
+| `fc1897a` | B38: fold encrypt-buffer charge into producer-side acquire (prevents deadlock) |
 | `0f11c59` | B30+B33+B34+B36: producer-side budget accounting, exact byte[] for large chunks, tightened oversized admission, periodic memory log |
 | `d3e60d4` | B29: add B29 row to AGENT_CONTEXT recent-commit-history table |
 | `aa6fec8` | B29: hardware-aware MemoryLimitMB default (25 percent of physical RAM, capped at 8 GB) |
