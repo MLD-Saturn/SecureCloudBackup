@@ -286,7 +286,7 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Default file-level concurrency | 16 (`MaxParallelFileBackups`, raised from 8 in B27 based on `TwoTierFileSplitBigScaleBenchmark`) |
 | Default chunk-level concurrency per file | 6 (`MaxParallelChunkUploads`) |
 | Default `MemoryLimitEnabled` | `true` (raised from `false` in B27) |
-| Default `MemoryLimitMB` | `8192` (raised from `2048` in B27 to fit the 16-way file concurrency ceiling) |
+| Default `MemoryLimitMB` | hardware-aware: `min(round_down_to_step(0.25 * total_physical_RAM), 8192 MB)` (B29; was a flat `8192` from B27, was `2048` pre-B27). Existing user databases keep whatever value they previously stored; the rule only applies on fresh installs. See `SystemMemoryHelper.GetRecommendedDefaultLimitMB`. |
 | Azure SDK | `Azure.Storage.Blobs` (see `src/AzureBackup.Core/AzureBackup.Core.csproj` for current pinned version) |
 
 If you need exact version numbers, check the `.csproj` files; this table is updated when those references change but the `.csproj` files are the source of truth.

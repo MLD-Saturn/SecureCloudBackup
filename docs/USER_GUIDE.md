@@ -354,7 +354,17 @@ Folders are added and removed from the **Sync** view (see "Managing watched fold
 
 ### Memory limit
 
-A toggle plus a slider that puts a soft cap on the total bytes the backup pipeline holds in flight at once (chunk buffers in transit between read, encrypt, and upload). The toggle defaults to **on** with the slider at **8 GB**. Turn it off only if you have measured a specific throughput problem on your machine and want to fall back to the unlimited-budget behaviour; the default value was chosen because the `MemoryBudgetBenchmark` measurement on production-shaped workloads showed zero throughput cost even at 4 GB, while leaving the cap unlimited would let the pipeline grow to many GB on a single backup.
+A toggle plus a slider that puts a soft cap on the total bytes the backup pipeline holds in flight at once (chunk buffers in transit between read, encrypt, and upload). The toggle defaults to **on**. The slider's default value scales with installed RAM so the cap is always inside the safe band on every hardware tier:
+
+| Installed RAM | Default memory limit |
+|---:|---:|
+| 2 GB | 512 MB |
+| 4 GB | 1 GB |
+| 8 GB | 2 GB |
+| 16 GB | 4 GB |
+| 32 GB or more | 8 GB |
+
+The rule is "25 percent of physical RAM, snapped down to a slider step, capped at 8 GB" so a workstation with 64 GB or 128 GB still defaults to 8 GB; 25 percent of that much RAM would be more memory than the backup pipeline can usefully consume given the existing per-file and per-chunk concurrency limits. Turn the toggle off only if you have measured a specific throughput problem on your machine and want to fall back to the unlimited-budget behaviour; you can also push the slider higher than the auto-default up to total physical RAM if you have measured a benefit. The default was chosen because the `MemoryBudgetBenchmark` measurement on production-shaped workloads showed zero throughput cost even at 4 GB, while leaving the cap unlimited would let the pipeline grow to many GB on a single backup.
 
 The slider snaps to a discrete set of values; the live label shows the chosen MB and a status color (green / amber / red) indicating how aggressive the cap is.
 

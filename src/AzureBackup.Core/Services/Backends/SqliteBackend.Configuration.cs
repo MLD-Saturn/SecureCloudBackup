@@ -60,7 +60,20 @@ internal sealed partial class SqliteBackend
                     config.EntraIdUserName = reader.IsDBNull(11) ? null : reader.GetString(11);
                     config.ConfigVersion = reader.GetInt32(12);
                     config.MemoryLimitEnabled = reader.GetInt32(13) != 0;
-                    config.MemoryLimitMB = reader.GetInt32(14);
+                    // B29: NULL in the schema means "user has not yet
+                    // expressed a preference"; compute the hardware-
+                    // aware default from total physical RAM (25% snapped
+                    // down to a slider detent, capped at 8 GB). Stored
+                    // integers are always returned verbatim, so existing
+                    // user databases that wrote 8192 in B27/B28 keep
+                    // that exact value. The recommended default is NOT
+                    // written back to the DB on read -- the column
+                    // stays NULL until the user explicitly saves a
+                    // value via Settings, which keeps the "hasn't
+                    // chosen yet" state inspectable for diagnostics.
+                    config.MemoryLimitMB = reader.IsDBNull(14)
+                        ? SystemMemoryHelper.GetRecommendedDefaultLimitMB()
+                        : reader.GetInt32(14);
                 }
             }
 

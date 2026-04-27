@@ -1,3 +1,4 @@
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services.Backends;
 using Xunit;
@@ -59,7 +60,16 @@ public class SqliteBackendConfigurationTests : IDisposable
         Assert.Equal(defaults.EntraIdUserName, config.EntraIdUserName);
         Assert.Equal(defaults.ConfigVersion, config.ConfigVersion);
         Assert.Equal(defaults.MemoryLimitEnabled, config.MemoryLimitEnabled);
-        Assert.Equal(defaults.MemoryLimitMB, config.MemoryLimitMB);
+        // B29: MemoryLimitMB on a fresh DB is the hardware-aware
+        // recommended default (NULL column -> SystemMemoryHelper
+        // computes 25% of total physical RAM, snapped down to a
+        // slider step, capped at 8 GB). The C# model default is the
+        // 8 GB cap, so on most CI/dev hosts these will match; on a
+        // 4 GB or 8 GB host they intentionally do NOT match (the
+        // recommended default is smaller). Assert against the helper,
+        // not the model default, so the test is correct on every
+        // hardware tier.
+        Assert.Equal(SystemMemoryHelper.GetRecommendedDefaultLimitMB(), config.MemoryLimitMB);
         Assert.Empty(config.WatchedFolders);
         Assert.Empty(config.GlobalExcludePatterns);
     }

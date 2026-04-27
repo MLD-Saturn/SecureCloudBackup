@@ -400,7 +400,17 @@ internal sealed partial class SqliteBackend
                 entra_id_user_name TEXT NULL,
                 config_version INTEGER NOT NULL DEFAULT 3,
                 memory_limit_enabled INTEGER NOT NULL DEFAULT 1,
-                memory_limit_mb INTEGER NOT NULL DEFAULT 8192,
+                -- B29: NULL = "user has not yet expressed a preference,
+                -- compute a hardware-aware default at read time via
+                -- SystemMemoryHelper.GetRecommendedDefaultLimitMB". A
+                -- non-NULL integer here is always a value the user
+                -- explicitly saved through the Settings UI (or that
+                -- migrated forward from a pre-B29 database). Existing
+                -- B27/B28 databases keep their stored 8192 (or whatever
+                -- the user set) -- DEFAULT only fires for newly
+                -- inserted rows, so no existing user is silently
+                -- re-configured.
+                memory_limit_mb INTEGER NULL DEFAULT NULL,
                 schema_version INTEGER NOT NULL DEFAULT 1
             );
 
