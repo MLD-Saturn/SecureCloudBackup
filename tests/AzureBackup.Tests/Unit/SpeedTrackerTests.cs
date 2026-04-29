@@ -44,7 +44,7 @@ public class SpeedTrackerTests
 
         Assert.True(updated);
         Assert.NotEqual(string.Empty, tracker.Speed);
-        Assert.True(tracker.Speed.EndsWith("/s"));
+        Assert.EndsWith("/s", tracker.Speed);
         Assert.True(tracker.BytesPerSecond > 0);
     }
 

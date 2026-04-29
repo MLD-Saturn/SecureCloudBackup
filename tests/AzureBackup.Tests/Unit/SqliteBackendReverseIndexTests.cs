@@ -297,7 +297,7 @@ public class SqliteBackendReverseIndexTests : IDisposable
 
         // Assert: rebuild completed and refs are queryable.
         Assert.True(_backend.IsReverseChunkIndexBuilt());
-        Assert.Equal(1, _backend.GetChunkEntriesForFile(@"C:\idx\a.bin").Count);
+        Assert.Single(_backend.GetChunkEntriesForFile(@"C:\idx\a.bin"));
 
         // Assert: BOTH indexes were recreated. We open a separate
         // read-only connection (via the C-3 (4a) factory) and query

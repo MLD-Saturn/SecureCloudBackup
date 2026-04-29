@@ -514,7 +514,7 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
 
         // Assert: existing row for C:\reused.txt is replaced; second row is added
         Assert.Equal(2, pending.Count);
-        var reused = Assert.Single(pending.Where(p => p.FilePath == "C:\\reused.txt"));
+        var reused = Assert.Single(pending, p => p.FilePath == "C:\\reused.txt");
         Assert.Equal(FileChangeType.Modified, reused.ChangeType);
         Assert.Contains(pending, p => p.FilePath == "C:\\new.txt");
     }

@@ -281,32 +281,38 @@ public partial class RestoreService
 
             if (sortedChunks.Count > 1)
             {
+                // B41: capture into a non-null local with ?? so flow analysis
+                // can prove non-null at the dereferences below. The pre-B41
+                // shape stored the null-check result in a separate
+                // `ownsMemoryBudget` flag and reassigned `memoryBudget` inside
+                // an if-block, which CS8602 could not follow across the
+                // indirection. The ownership semantics are unchanged: when
+                // the caller passed null we own the lifetime and dispose in
+                // the finally; when the caller passed an instance we leave
+                // disposal to them.
+                //
                 // Use the caller's shared budget when provided (multi-file restores),
                 // otherwise create a per-file budget from config (single-file restore from UI).
                 var ownsMemoryBudget = memoryBudget == null;
-                if (ownsMemoryBudget)
-                {
-                    var restoreConfig = _databaseService.GetConfiguration();
-                    memoryBudget = MemoryBudget.FromConfig(restoreConfig);
-                }
+                var budget = memoryBudget ?? MemoryBudget.FromConfig(_databaseService.GetConfiguration());
 
                 Log($"RestoreFileAsync: Using bounded parallel downloads (adaptive concurrency, " +
-                    $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{memoryBudget.TotalBytes / (1024 * 1024)} MB" : "unlimited")}, " +
+                    $"memoryBudget={(!budget.IsUnlimited ? FormatHelper.FormatBytes(budget.TotalBytes) : "unlimited")}, " +
                     $"shared={!ownsMemoryBudget})");
                 try
                 {
-                // Use bounded producer-consumer pattern with channels
-                // Hash is computed incrementally as chunks are written in order — no file re-read needed
-                        restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
-                            sortedChunks, file, tempPath, memoryBudget, progress, 
-                            p => currentBytes = p, diag, cancellationToken);
-                    }
-                    finally
-                    {
-                        if (ownsMemoryBudget)
-                            memoryBudget.Dispose();
-                    }
+                    // Use bounded producer-consumer pattern with channels
+                    // Hash is computed incrementally as chunks are written in order — no file re-read needed
+                    restoredHash = await RestoreWithBoundedParallelDownloadsAsync(
+                        sortedChunks, file, tempPath, budget, progress, 
+                        p => currentBytes = p, diag, cancellationToken);
                 }
+                finally
+                {
+                    if (ownsMemoryBudget)
+                        budget.Dispose();
+                }
+            }
             else
             {
                 Log("RestoreFileAsync: Single chunk, downloading directly");

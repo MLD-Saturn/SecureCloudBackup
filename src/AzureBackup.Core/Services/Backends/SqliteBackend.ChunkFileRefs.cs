@@ -345,6 +345,16 @@ internal sealed partial class SqliteBackend
         IProgress<(int processed, int total)>? progress,
         CancellationToken cancellationToken)
     {
+        // B41: defensive guard mirrors every other entry point in this file.
+        // The public RebuildReverseChunkIndex caller already guards against
+        // null, but this helper can in principle be reached from a different
+        // path in the future, and the analyzer cannot follow the prior guard
+        // across the InWriteLock(...) lambda boundary anyway. Adding it here
+        // both fixes the CS8602 below and makes the contract local to the
+        // method, matching the file-wide convention.
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
         // B22: this is one of the most expensive backend operations on
         // an upgrade-from-LiteDB code path; pre-B22 it ran in complete
         // silence which made debugging the rebuild feel like the app
