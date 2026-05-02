@@ -499,6 +499,58 @@ public partial class BackupOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
+    /// B50: quarantines a corrupt local catalog database file by
+    /// renaming it (and its companion <c>-wal</c>, <c>-shm</c>,
+    /// <c>-journal</c>, and salt artefacts) to a timestamped
+    /// <c>.quarantine-yyyyMMdd-HHmmss</c> suffix beside the original.
+    /// Stops any running backup, clears in-memory secrets, and lets
+    /// the next unlock create a fresh catalog at the same path.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Distinct from <see cref="ResetApplicationAsync"/>: that
+    /// destroys the catalog because the user explicitly chose to
+    /// start over. Quarantine is the recovery path for an unreadable
+    /// catalog the user did NOT ask to delete; the original bytes
+    /// stay on disk for forensic inspection.
+    /// </para>
+    /// <para>
+    /// The encrypted connection string lives inside the quarantined
+    /// catalog and cannot be recovered without unlocking it. The user
+    /// must re-enter the connection string (and storage account /
+    /// container / watched folders) by hand once the fresh catalog is
+    /// created. The agent treats the encrypted connection string as
+    /// unrecoverable on this path by design.
+    /// </para>
+    /// </remarks>
+    /// <param name="databasePath">Path to the corrupt catalog file.</param>
+    /// <returns>
+    /// Result describing the quarantined main DB path and any
+    /// companion files that could not be moved.
+    /// </returns>
+    public async Task<QuarantineResult> QuarantineCorruptCatalogAsync(string databasePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+
+        if (_isRunning)
+        {
+            await StopAsync();
+        }
+
+        _encryptionService.ClearKey();
+        _credential = null;
+
+        var result = _databaseService.QuarantineAndClose(databasePath);
+
+        StatusChanged?.Invoke(
+            this,
+            $"Catalog quarantined to {result.QuarantinedDatabasePath}. " +
+            "Set a new password and re-enter your Azure connection details to continue.");
+
+        return result;
+    }
+
+    /// <summary>
     /// Starts the backup service.
     /// </summary>
     public void Start()

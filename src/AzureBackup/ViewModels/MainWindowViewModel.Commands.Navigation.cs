@@ -300,7 +300,7 @@ public partial class MainWindowViewModel
 
             AddLog("? Application reset complete. You can now set up a new password and configure Azure connection.");
             AddLog("Enter a new password and your Azure connection details to get started.");
-            
+
             // Switch to Settings view so user can set up fresh
             CurrentView = "Settings";
         }
@@ -314,6 +314,142 @@ public partial class MainWindowViewModel
             IsOperationInProgress = false;
         }
     }
+
+    #region B50 Catalog Quarantine Recovery
+
+    /// <summary>
+    /// B50: starts a quarantine request. Quarantine moves the corrupt
+    /// local catalog database file (and its companion -wal / -shm /
+    /// -journal / .salt artefacts) to a timestamped
+    /// <c>.quarantine-yyyyMMdd-HHmmss</c> suffix beside the original.
+    /// The corrupt bytes are NOT deleted -- they remain on disk for
+    /// forensic inspection and to confirm there is nothing salvageable.
+    /// The next unlock creates a fresh catalog at the same path; the
+    /// user must re-enter their Azure connection string and other
+    /// catalog-stored settings by hand because the encrypted
+    /// connection string is stored inside the quarantined catalog and
+    /// is treated as unrecoverable.
+    /// </summary>
+    [RelayCommand]
+    private void RequestQuarantine()
+    {
+        IsQuarantinePending = true;
+        AddLog("WARNING: Catalog quarantine requested. Click 'Confirm Quarantine' to move the corrupt " +
+               "catalog aside. The bytes will be PRESERVED on disk under a timestamped suffix; you will " +
+               "need to set a new password and re-enter your Azure connection string after this completes.");
+    }
+
+    /// <summary>
+    /// B50: cancels a pending quarantine request.
+    /// </summary>
+    [RelayCommand]
+    private void CancelQuarantine()
+    {
+        IsQuarantinePending = false;
+        AddLog("Quarantine cancelled.");
+    }
+
+    /// <summary>
+    /// B50: confirms and executes the catalog quarantine. The corrupt
+    /// catalog is moved aside (NOT deleted) and the application drops
+    /// every piece of in-memory state that depended on it, so the next
+    /// unlock starts from a fresh catalog. The user must then enter a
+    /// new password and re-enter their Azure connection details.
+    /// </summary>
+    [RelayCommand]
+    private async Task ConfirmQuarantineAsync()
+    {
+        if (!IsQuarantinePending)
+        {
+            AddLog("Please click 'Quarantine Catalog' first.");
+            return;
+        }
+
+        IsOperationInProgress = true;
+        IsQuarantinePending = false;
+
+        try
+        {
+            var dbPath = AppMode.DatabasePath;
+            AddLog($"Quarantining catalog database file at {dbPath}...");
+
+            var result = await _orchestrator.QuarantineCorruptCatalogAsync(dbPath);
+
+            AddLog($"Catalog moved to: {result.QuarantinedDatabasePath}");
+            foreach (var moved in result.MovedFiles.Skip(1))
+            {
+                AddLog($"  Companion moved: {moved}");
+            }
+            foreach (var skipped in result.SkippedFiles)
+            {
+                AddLog($"  WARNING -- companion NOT moved: {skipped}");
+            }
+
+            // Mirror the post-reset UI cleanup so the Settings view
+            // routes the user through first-run setup again.
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                WatchedFolders.Clear();
+                BackedUpFiles.Clear();
+                RestorableFiles.Clear();
+
+                IsInitialized = false;
+                IsBackupRunning = false;
+                HasExistingConfig = false;
+                IsEntraIdAuthenticated = false;
+                EntraIdStatus = "Not signed in";
+                StorageAccountName = string.Empty;
+                ConnectionString = string.Empty;
+                ContainerName = "backup";
+                UseEntraIdAuth = false;
+                Password = string.Empty;
+                PasswordConfirm = string.Empty;
+                TotalFiles = 0;
+                TotalSize = "0 B";
+                PendingChanges = 0;
+
+                FileTreeRoots.Clear();
+                LocalFileTreeRoots.Clear();
+                LocalFilesFlatList.Clear();
+
+                _cachedAzureFilePaths = null;
+                _needsMigration = false;
+
+                OnPropertyChanged(nameof(RestorableFilesEmpty));
+                OnPropertyChanged(nameof(RestorableFilesCount));
+                OnPropertyChanged(nameof(ShowAzureEmptyState));
+                OnPropertyChanged(nameof(HasSelectedFiles));
+                OnPropertyChanged(nameof(SelectedFilesCount));
+                OnPropertyChanged(nameof(SelectedFilesText));
+                OnPropertyChanged(nameof(NeedsConfiguration));
+                OnPropertyChanged(nameof(NeedsUnlock));
+                OnPropertyChanged(nameof(NeedsMigration));
+                OnPropertyChanged(nameof(IsNewUser));
+                OnPropertyChanged(nameof(PasswordSectionTitle));
+                OnPropertyChanged(nameof(InitializeButtonText));
+                OnPropertyChanged(nameof(UnlockAndConnectButtonText));
+                OnPropertyChanged(nameof(BackupStatusText));
+            });
+
+            AddLog("Quarantine complete. Set a new password and re-enter your Azure connection string " +
+                   "to start fresh. Your backed-up files in Azure are unaffected; once you reconnect, " +
+                   "you can use 'Rebuild from Azure' on the Storage Health tab to repopulate the local " +
+                   "catalog from Azure metadata.");
+
+            CurrentView = "Settings";
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Quarantine failed: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"Quarantine error: {ex}");
+        }
+        finally
+        {
+            IsOperationInProgress = false;
+        }
+    }
+
+    #endregion
 
     // Cached Azure file paths from the last successful refresh.
     // Reused by RefreshLocalFilesAsync to avoid a duplicate ListRestorableFilesAsync call.

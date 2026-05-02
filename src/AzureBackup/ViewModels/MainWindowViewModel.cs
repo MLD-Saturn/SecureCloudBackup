@@ -223,6 +223,15 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     [ObservableProperty]
     private bool _isResetPending;
 
+    /// <summary>
+    /// B50: True when a catalog quarantine has been requested and is
+    /// awaiting confirmation. Distinct from <see cref="IsResetPending"/>
+    /// because quarantine preserves the corrupt bytes on disk under a
+    /// timestamped suffix instead of securely deleting them.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isQuarantinePending;
+
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(PasswordMismatch))]

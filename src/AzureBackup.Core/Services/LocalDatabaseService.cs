@@ -353,6 +353,43 @@ public partial class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
+    /// B50: closes the current database connection (if open) and moves
+    /// the catalog file plus its companion <c>-wal</c>, <c>-shm</c>,
+    /// <c>-journal</c>, and salt artefacts aside under a timestamped
+    /// <c>.quarantine-yyyyMMdd-HHmmss</c> suffix. The next call to
+    /// <see cref="Initialize(string, ReadOnlySpan{char})"/> against
+    /// the same path will create a fresh database with a fresh salt.
+    /// </summary>
+    /// <remarks>
+    /// Use this when the catalog cannot be opened or read (e.g.
+    /// <c>SQLITE_CORRUPT</c> on every page) and the user needs a fresh
+    /// catalog to keep working. The original bytes are preserved on
+    /// disk for forensic analysis -- they are NOT securely deleted,
+    /// because the user explicitly chose recovery over destruction.
+    /// </remarks>
+    /// <param name="databasePath">
+    /// Path to the catalog database file to quarantine. Must match
+    /// the path the open connection was created against; passing a
+    /// different path is a programming error and throws.
+    /// </param>
+    /// <returns>
+    /// Result describing the quarantined main database path, every
+    /// companion file moved, and any companion file that could not
+    /// be moved (typically locked by another process).
+    /// </returns>
+    public QuarantineResult QuarantineAndClose(string databasePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
+
+        // Close any live connection BEFORE moving the file. SQLite
+        // holds an exclusive file handle on Windows; File.Move would
+        // fail until the handle is released.
+        Close();
+
+        return QuarantineCorruptDatabase(databasePath);
+    }
+
+    /// <summary>
     /// Closes the current database connection.
     /// Used when migrating to allow reopening with different settings.
     /// </summary>

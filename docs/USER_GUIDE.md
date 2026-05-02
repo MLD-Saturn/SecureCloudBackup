@@ -428,6 +428,25 @@ A slider that scales the whole UI, with a reset button next to it.
 
 Securely deletes all local settings, credentials, and file-tracking data. **Files in Azure Storage are not affected.** Requires explicit confirmation. Use this if you want to start over from scratch on the same machine.
 
+### Danger Zone — Quarantine Catalog (recovery)
+
+If the local catalog database is corrupt and you cannot unlock it (for example the unlock screen keeps reporting `Invalid password` even though the password is correct, or the Storage Health → Verify Database File diagnostic flagged page-level damage that REINDEX cannot fix), the **Quarantine Catalog...** button moves the catalog file (and its companion `-wal`, `-shm`, `-journal`, and `.salt` artefacts) aside under a timestamped `.quarantine-yyyyMMdd-HHmmss` suffix beside the original.
+
+Quarantine is intentionally **non-destructive**:
+
+- The corrupt bytes are **preserved** on disk under the timestamped suffix. They are not securely deleted; you (or a support engineer) can retrieve them later for forensic inspection. Because they remain SQLCipher-encrypted, retaining them is no worse from a secrets-exposure standpoint than the original file was.
+- The next unlock creates a **fresh catalog** at the original path.
+- Your **files in Azure Storage are not affected**.
+
+After confirming, you must:
+
+1. Set a **new password** when the unlock screen reappears.
+2. Re-enter your **Azure connection string** (or storage account / container) in Settings — the encrypted connection string lives inside the quarantined catalog and is treated as **unrecoverable** for this workflow.
+3. Re-add your **watched folders** and any custom **exclusion patterns** — they too lived inside the quarantined catalog.
+4. Once reconnected, use **Storage Health → Rebuild from Azure** to repopulate the local catalog (chunk index plus backed-up file records) from Azure metadata. This restores the link between local files and their existing backups so you do not have to re-upload anything that is already in Azure.
+
+If a companion file cannot be moved (typically because an antivirus scanner is holding it open), the Logs view shows a `WARNING -- companion NOT moved` line for each one. The main database file is always moved first; if its move fails, the operation aborts and surfaces the underlying error.
+
 ---
 
 ## Logs and diagnostic bundles

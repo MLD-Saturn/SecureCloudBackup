@@ -631,4 +631,98 @@ public class SqliteBackendSmokeTests : IDisposable
         var all = backend.GetAllBackedUpFiles();
         Assert.Equal(writerCount * writesPerWorker, all.Count);
     }
+
+    [Fact]
+    public void QuarantineCorruptDatabase_MovesEveryArtefactUnderTimestampedSuffix_AndPreservesBytes()
+    {
+        // B50: quarantine moves the catalog file (and its companion
+        // -wal / -shm / -journal / .salt files) aside under a
+        // timestamped .quarantine-yyyyMMdd-HHmmss suffix. Bytes are
+        // PRESERVED -- this is the recovery path where the user did
+        // NOT ask to delete data; SecureReset is a separate workflow
+        // for that.
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, "QuarantinePassword123!".AsSpan());
+            backend.SaveBackedUpFile(new BackedUpFile
+            {
+                LocalPath = @"C:\quarantine\sample.bin",
+                BlobName = "blob/sample",
+                FileSize = 1024,
+                LastModified = DateTime.UtcNow,
+                FileHash = "qhash",
+                Status = BackupStatus.Completed,
+                BackedUpAt = DateTime.UtcNow,
+            });
+            backend.Checkpoint();
+        }
+
+        // Capture pre-quarantine sizes so we can prove the quarantined
+        // bytes are byte-identical to the originals.
+        var dbSize = new FileInfo(_dbPath).Length;
+        Assert.True(dbSize > 0, "expected non-empty DB before quarantine");
+        var saltPath = _dbPath + ".salt";
+        Assert.True(File.Exists(saltPath), "expected salt sidecar before quarantine");
+        var saltBytes = File.ReadAllBytes(saltPath);
+
+        var result = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+
+        // Originals must be gone (so the next Initialize creates a
+        // fresh DB) but the renamed copies must survive.
+        Assert.False(File.Exists(_dbPath), "original DB must be moved aside");
+        Assert.False(File.Exists(saltPath), "original salt must be moved aside");
+        Assert.True(File.Exists(result.QuarantinedDatabasePath), "quarantined DB must exist on disk");
+        Assert.Contains(".quarantine-", result.QuarantinedDatabasePath, StringComparison.Ordinal);
+        Assert.Equal(dbSize, new FileInfo(result.QuarantinedDatabasePath).Length);
+
+        // Salt must be moved aside too -- the quarantined catalog is
+        // useless without its salt because the Argon2id key derivation
+        // depends on it.
+        var quarantinedSalt = saltPath + result.QuarantinedDatabasePath[_dbPath.Length..];
+        Assert.True(File.Exists(quarantinedSalt), "quarantined salt must exist on disk");
+        Assert.Equal(saltBytes, File.ReadAllBytes(quarantinedSalt));
+
+        Assert.Contains(result.QuarantinedDatabasePath, result.MovedFiles);
+        Assert.Empty(result.SkippedFiles);
+    }
+
+    [Fact]
+    public void QuarantineCorruptDatabase_AllowsFreshInitializeAtSamePath_WithDifferentPassword()
+    {
+        // B50: after quarantine the original path is free, so the
+        // user can initialize a fresh catalog with a brand new
+        // password. The quarantined bytes must remain undisturbed by
+        // the fresh initialize.
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, "OriginalPassword123!".AsSpan());
+        }
+
+        var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+        var quarantinedDbBytes = File.ReadAllBytes(quarantine.QuarantinedDatabasePath);
+
+        using (var fresh = new SqliteBackend())
+        {
+            fresh.Initialize(_dbPath, "DifferentFreshPassword456!".AsSpan());
+            // Sanity: a fresh catalog has zero backed-up files.
+            Assert.Empty(fresh.GetAllBackedUpFiles());
+        }
+
+        // Quarantined file is unchanged after the fresh initialize.
+        Assert.True(File.Exists(quarantine.QuarantinedDatabasePath));
+        Assert.Equal(quarantinedDbBytes, File.ReadAllBytes(quarantine.QuarantinedDatabasePath));
+    }
+
+    [Fact]
+    public void QuarantineCorruptDatabase_OnMissingFile_ThrowsFileNotFoundException()
+    {
+        // B50: quarantining a non-existent file is a programming
+        // error. We surface it as FileNotFoundException so the caller
+        // sees the offending path in the exception message rather
+        // than silently no-op'ing.
+        var missing = Path.Combine(_testDir, "does-not-exist.db");
+        var ex = Assert.Throws<FileNotFoundException>(
+            () => LocalDatabaseService.QuarantineCorruptDatabase(missing));
+        Assert.Equal(missing, ex.FileName);
+    }
 }
