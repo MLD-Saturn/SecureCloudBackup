@@ -295,17 +295,42 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
 
     /// <summary>
     /// Forces any deferred writes (WAL pages) to be persisted into the main
-    /// database file. Idempotent. Safe to call from any thread under the
-    /// LocalDatabaseService write lock.
+    /// database file. Idempotent. Safe to call from any thread.
     /// </summary>
+    /// <remarks>
+    /// B49: serialized through the same write lock used by every other
+    /// writer. Pre-B49 the body called <c>_connection.CreateCommand()</c>
+    /// directly, on the same shared <see cref="SqliteConnection"/> the
+    /// rest of the backend uses. The hourly checkpoint timer wired up by
+    /// <c>MainWindowViewModel.StartCheckpointTimerIfNotRunning</c> fires
+    /// from a thread-pool thread, so during a continuous-backup session
+    /// it could land mid-flight against any of
+    /// <c>SaveBackedUpFile</c> / <c>BulkInsertChunkIndexEntries</c> /
+    /// <c>SaveChunkIndexEntry</c>. The B23 fact (in
+    /// <c>AGENT_CONTEXT.md</c>) records that this kind of racing access
+    /// to the single shared <see cref="SqliteConnection"/> surfaces as
+    /// <c>ArgumentOutOfRangeException</c> from the M.D.Sqlite command
+    /// tracker AND <c>SQLite Error 1: 'cannot start a transaction
+    /// within a transaction'</c>; a torn checkpoint pass against an
+    /// in-flight writer can also leave the WAL in a state the next
+    /// open's recovery cannot reconcile, surfacing on the next unlock
+    /// as <c>SQLite Error 11: 'database disk image is malformed'</c>.
+    /// Routing through <see cref="InWriteLock(Action)"/> matches the
+    /// contract every other writer uses, including the final
+    /// shutdown-time checkpoint that <c>CloseConnectionInternal</c>
+    /// performs from inside the write lock.
+    /// </remarks>
     public void Checkpoint()
     {
         if (_connection == null)
             throw new InvalidOperationException("Backend is not initialized.");
 
-        using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
-        cmd.ExecuteNonQuery();
+        InWriteLock(() =>
+        {
+            using var cmd = _connection!.CreateCommand();
+            cmd.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+            cmd.ExecuteNonQuery();
+        });
     }
 
 

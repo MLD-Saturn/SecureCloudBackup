@@ -534,4 +534,101 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Contains("cipher", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
         Assert.Contains("REINDEX cannot fix", repair.RefusalReason, System.StringComparison.Ordinal);
     }
+
+    [Fact]
+    public async Task Checkpoint_ConcurrentWithWriters_DoesNotProduceDriverOrTransactionErrors()
+    {
+        // B49 regression: pre-B49 SqliteBackend.Checkpoint() ran the
+        // PRAGMA wal_checkpoint(TRUNCATE) statement directly against the
+        // shared SqliteConnection without taking the write lock. The
+        // hourly checkpoint timer wired by
+        // MainWindowViewModel.StartCheckpointTimerIfNotRunning fires
+        // from a thread-pool thread, so during a continuous-backup
+        // session it could land mid-flight against any of
+        // SaveBackedUpFile / BulkInsertChunkIndexEntries /
+        // SaveChunkIndexEntry. The B23 architectural fact records the
+        // two failure shapes: SQLite Error 1 ("cannot start a
+        // transaction within a transaction") and ArgumentOutOfRangeException
+        // from M.D.Sqlite's command tracker. A torn checkpoint pass
+        // against an in-flight writer can also leave the WAL in a
+        // state the next open's recovery cannot reconcile, surfacing
+        // on the next unlock as SQLite Error 11 ("database disk image
+        // is malformed").
+        //
+        // This test fans out 8 writer tasks against the same backend
+        // and concurrently fires Checkpoint() from a separate task in
+        // a tight loop. Pre-B49 this reliably produced one of the two
+        // shapes above within a few hundred iterations; post-B49 the
+        // checkpoint runs through InWriteLock so writers and the
+        // checkpoint pass are strictly serialised.
+        using var backend = new SqliteBackend();
+        backend.Initialize(_dbPath, "CheckpointRacePassword123!".AsSpan());
+
+        const int writerCount = 8;
+        const int writesPerWorker = 100;
+        const int checkpointPasses = 50;
+
+        var exceptions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
+
+        var writers = Enumerable.Range(0, writerCount).Select(workerId =>
+            Task.Run(() =>
+            {
+                for (var i = 0; i < writesPerWorker; i++)
+                {
+                    try
+                    {
+                        backend.SaveBackedUpFile(new BackedUpFile
+                        {
+                            LocalPath = $@"C:\ckpt\w{workerId}\f{i}.bin",
+                            BlobName = $"blob/{workerId}/{i}",
+                            FileSize = 4096,
+                            LastModified = DateTime.UtcNow,
+                            FileHash = $"h-{workerId}-{i}",
+                            Status = BackupStatus.Completed,
+                            BackedUpAt = DateTime.UtcNow,
+                            Chunks =
+                            {
+                                new ChunkInfo
+                                {
+                                    Index = 0,
+                                    Offset = 0,
+                                    Length = 4096,
+                                    Hash = $"chunk-{workerId}-{i}",
+                                    BlobName = $"chunks/{workerId}/{i}",
+                                },
+                            },
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        exceptions.Enqueue(ex);
+                    }
+                }
+            })).ToArray();
+
+        var checkpointer = Task.Run(() =>
+        {
+            for (var i = 0; i < checkpointPasses; i++)
+            {
+                try
+                {
+                    backend.Checkpoint();
+                }
+                catch (Exception ex)
+                {
+                    exceptions.Enqueue(ex);
+                }
+            }
+        });
+
+        await Task.WhenAll(writers.Concat(new[] { checkpointer }));
+
+        Assert.True(exceptions.IsEmpty,
+            "Checkpoint racing writers leaked exceptions (B49 regression): " +
+            string.Join(" | ", exceptions.Select(e => $"{e.GetType().Name}: {e.Message}")));
+
+        // Sanity: every write landed (the checkpoint did not eat any).
+        var all = backend.GetAllBackedUpFiles();
+        Assert.Equal(writerCount * writesPerWorker, all.Count);
+    }
 }

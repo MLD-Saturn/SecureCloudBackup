@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.ApplicationLifetimes;
@@ -18,6 +19,22 @@ public partial class App : Application
     private TrayIcon? _trayIcon;
     private MainWindowViewModel? _viewModel;
     private Window? _mainWindow;
+
+    /// <summary>
+    /// B49: gate for the two-pass <see cref="IClassicDesktopStyleApplicationLifetime.ShutdownRequested"/>
+    /// dance. The first pass cancels the shutdown, awaits
+    /// <see cref="MainWindowViewModel.DisposeAsync"/> (which stops the
+    /// hourly checkpoint timer, runs a final
+    /// <c>PRAGMA wal_checkpoint(TRUNCATE)</c>, and disposes the
+    /// <see cref="LocalDatabaseService"/> / SQLCipher connection), then
+    /// re-issues the shutdown. The second pass observes this flag and
+    /// allows the lifetime to tear down. Without this gate every clean
+    /// exit (tray Exit, last-window-close on platforms with no tray, or
+    /// any other <c>desktop.Shutdown()</c> caller) bypassed view-model
+    /// disposal, leaving the SQLCipher connection un-closed and the WAL
+    /// un-checkpointed.
+    /// </summary>
+    private bool _shutdownDisposeCompleted;
 
     /// <summary>
     /// Whether the system tray is available on this platform.
@@ -45,6 +62,15 @@ public partial class App : Application
             _mainWindow = new MainWindow { DataContext = _viewModel };
             desktop.MainWindow = _mainWindow;
 
+            // B49: every classic-desktop shutdown path (tray Exit,
+            // last-window-close on platforms with no tray, OS-initiated
+            // logoff that lets Avalonia finish its lifetime, etc.) ends
+            // up firing ShutdownRequested. Hooking it here -- BEFORE the
+            // tray-supported branch below -- guarantees the catalog
+            // database is closed cleanly regardless of whether the tray
+            // is configured.
+            desktop.ShutdownRequested += OnShutdownRequested;
+
             if (IsTraySupported)
             {
                 // Keep running when window is closed (minimize to tray)
@@ -55,6 +81,52 @@ public partial class App : Application
         }
 
         base.OnFrameworkInitializationCompleted();
+    }
+
+    /// <summary>
+    /// B49: ensure the catalog database is closed cleanly on every
+    /// shutdown path. The handler runs a two-pass dance because
+    /// <see cref="MainWindowViewModel.DisposeAsync"/> is async and
+    /// <see cref="ShutdownRequestedEventArgs"/> exposes a synchronous
+    /// <see cref="ShutdownRequestedEventArgs.Cancel"/> only. First pass:
+    /// cancel the shutdown, fire-and-forget the dispose continuation
+    /// that re-invokes <c>desktop.Shutdown()</c> when disposal completes.
+    /// Second pass: observe <see cref="_shutdownDisposeCompleted"/> and
+    /// allow the lifetime to tear down.
+    /// </summary>
+    private void OnShutdownRequested(object? sender, ShutdownRequestedEventArgs e)
+    {
+        if (_shutdownDisposeCompleted || _viewModel is null ||
+            sender is not IClassicDesktopStyleApplicationLifetime desktop)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        _ = ShutdownAfterDisposeAsync(desktop);
+    }
+
+    private async Task ShutdownAfterDisposeAsync(IClassicDesktopStyleApplicationLifetime desktop)
+    {
+        try
+        {
+            if (_viewModel is { } vm)
+            {
+                await vm.DisposeAsync().ConfigureAwait(true);
+            }
+        }
+        catch
+        {
+            // Disposal must never block shutdown. Any failure has been
+            // best-effort logged inside DisposeAsync; we still need to
+            // re-issue the shutdown so the user's exit click takes effect.
+        }
+        finally
+        {
+            _shutdownDisposeCompleted = true;
+            _viewModel = null;
+            desktop.Shutdown();
+        }
     }
 
     /// <summary>
