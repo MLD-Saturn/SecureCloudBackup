@@ -230,7 +230,7 @@ If running from inside Visual Studio (which is the typical user environment), th
 
 | Hash | Message |
 |---|---|
-| `<pending>` | B44: catalog-file integrity diagnostic (cipher_integrity_check + integrity_check) on Storage Health; typed DatabaseFileCorruptException on first integrity-run insert; clearer Data Integrity UX when catalog itself is malformed |
+| `935fc02` | B44: catalog-file integrity diagnostic (cipher_integrity_check + integrity_check) on Storage Health; typed DatabaseFileCorruptException on first integrity-run insert; clearer Data Integrity UX when catalog itself is malformed |
 | `<pending>` | B43: throughput field rename (MB/s, pinned JSON key); persist FilesAutoRepaired; integrity auto-repair outcome telemetry; Auto-repair toggle in Data Integrity UI; Force Re-upload Selected in Sync menu |
 | `<pending>` | B42: integrity-check auto-repair (force-reupload then re-check, suppress diag on heal); BackupOrchestrator.BackupFileAsync forceReupload; PerformFullScanAsync now actually re-uploads |
 | `<pending>` | B41: clean build warnings (CS8602 x2, xUnit2009/2013/2031); production guard pattern restored on RebuildReverseChunkIndexCore |
