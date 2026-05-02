@@ -355,16 +355,6 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-5: SQLite is the production default. If the file at
-            // DatabasePath is still a LiteDB database (upgrading user)
-            // EnsureMigratedToSqliteAsync runs the migration with
-            // progress surfaced via AddLog. No-op when the file is
-            // already SQLite or does not exist yet.
-            if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
-            {
-                return;
-            }
-
             // Step 3: Initialize the encrypted database with password
             try
             {
@@ -586,13 +576,6 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-5: detect a LiteDB database left over from a prior
-            // release and migrate to SQLite (no-op on fresh installs).
-            if (!await EnsureMigratedToSqliteAsync(passwordChars.AsMemory()))
-            {
-                return;
-            }
-
             // Step 2: Initialize the encrypted database with password
             try
             {
@@ -797,13 +780,6 @@ public partial class MainWindowViewModel
                 }
             }
 
-            // C-5: detect a LiteDB database left over from a prior
-            // release and migrate to SQLite (no-op on fresh installs).
-            if (!await EnsureMigratedToSqliteAsync(passwordMemory))
-            {
-                return (false, "Migration to SQLite failed - see log for details");
-            }
-
             // Step 2: Initialize the encrypted database with password
             AddLog("Unlock step 2: opening encrypted database...");
             try
@@ -959,128 +935,6 @@ public partial class MainWindowViewModel
         finally
         {
             System.Array.Clear(buffer);
-        }
-    }
-
-    #endregion
-
-    #region SQLite migration (Option C / C-2)
-
-    /// <summary>
-    /// Probes the database file at <see cref="AppMode.DatabasePath"/>
-    /// and runs the LiteDB-to-SQLite migration if needed. Called from
-    /// each of the three login flows BEFORE
-    /// <c>_databaseService.Initialize</c>.
-    /// </summary>
-    /// <param name="passwordMemory">Caller-owned password buffer.
-    /// Used to open both the LiteDB source and the SQLite destination.
-    /// Accepts <see cref="ReadOnlyMemory{T}"/> rather than
-    /// <see cref="ReadOnlySpan{T}"/> because the engine call must run
-    /// on a worker thread (where spans cannot be captured); the two
-    /// existing in-process callers already hold the password as
-    /// either <c>char[]</c> or <see cref="ReadOnlyMemory{T}"/> and
-    /// trivially adapt.</param>
-    /// <returns>
-    /// True if Initialize should proceed normally. False if migration
-    /// failed (caller should bail out without calling Initialize).
-    /// </returns>
-    /// <remarks>
-    /// <para>
-    /// Decision tree (C-5: SQLite is unconditional in production;
-    /// LiteDB only reachable via an AsyncLocal test override):
-    /// </para>
-    /// <list type="bullet">
-    ///   <item>Test override pinning LiteDB -- skip; the test is
-    ///     intentionally working with a LiteDB database.</item>
-    ///   <item>No file at path -- new database; return true.</item>
-    ///   <item>File IS already SQLite (probe true) -- run
-    ///     <see cref="LocalDatabaseService.CleanupStaleLegacyBackup"/>
-    ///     to remove any leftover .litedb-backup from a pre-C-5
-    ///     release, then return true.</item>
-    ///   <item>File is LiteDB (probe false) -- run migration with
-    ///     throttled progress, return true on success. Migration's
-    ///     step 4 deletes the .litedb-backup files.</item>
-    /// </list>
-    ///
-    /// <para>
-    /// Mirrors the shape of <see cref="EnsureReverseChunkIndexBuiltAsync"/>:
-    /// <c>Task.Run</c> wraps the synchronous engine call so the UI
-    /// thread stays responsive, and progress reports are throttled to
-    /// roughly every 5% so the log panel does not flood. Migration is
-    /// non-cancellable from the UI by design (eval doc says forced
-    /// migration; user complaints about a 10-15 s freeze are
-    /// preferable to a half-migrated state on cancel).
-    /// </para>
-    /// </remarks>
-    private async Task<bool> EnsureMigratedToSqliteAsync(ReadOnlyMemory<char> passwordMemory)
-    {
-        // C-5: SQLite is the production default. There is no longer a
-        // backend-choice gate to honour - if there is data on disk and
-        // it is not yet SQLite, we migrate.
-        if (!File.Exists(AppMode.DatabasePath))
-        {
-            // New database: SqliteBackend will create one fresh on
-            // Initialize. Defensive: also tidy any stale .litedb-backup
-            // (edge case - user deleted the live DB but left the
-            // backup behind from a previous install).
-            LocalDatabaseService.CleanupStaleLegacyBackup(AppMode.DatabasePath);
-            return true;
-        }
-
-        if (LocalDatabaseService.IsExistingSqliteDatabase(
-                AppMode.DatabasePath, passwordMemory.Span))
-        {
-            // Already SQLite. Initialize will open it directly.
-            // C-5 cleanup: a user who migrated under the prior
-            // retention policy still has a .litedb-backup on disk.
-            // Delete it now so the data directory ends up containing
-            // only SQLite files.
-            LocalDatabaseService.CleanupStaleLegacyBackup(AppMode.DatabasePath);
-            return true;
-        }
-
-        // The file at the target path opens cleanly as LiteDB but not
-        // SQLite. Run migration.
-        AddLog("Migrating local database to SQLite (one-time upgrade)...");
-        AddLog("  This typically takes 10-30 seconds. Please do not close the app.");
-
-        // Throttle progress reports so we do not spam AddLog at every row.
-        var lastReportedPct = -5;
-        var progress = new Progress<(int processed, int total)>(tuple =>
-        {
-            var (processed, total) = tuple;
-            if (total <= 0) return;
-            var pct = (int)((long)processed * 100 / total);
-            if (pct - lastReportedPct >= 5 || processed == total)
-            {
-                lastReportedPct = pct;
-                AddLog($"  Migration progress: {processed:N0} / {total:N0} rows ({pct}%)");
-            }
-        });
-
-        try
-        {
-            // Engine call is synchronous; offload to a worker thread so
-            // the dispatcher can pump the AddLog progress reports.
-            // Capture passwordMemory by value into the lambda; the
-            // caller owns the underlying buffer and zeros it.
-            await Task.Run(() => LocalDatabaseService.MigrateFromLiteDb(
-                AppMode.DatabasePath, passwordMemory.Span, progress));
-            AddLog("Migration to SQLite complete. Original LiteDB preserved as .litedb-backup.");
-            return true;
-        }
-        catch (AzureBackup.Core.InvalidPasswordException)
-        {
-            // Same surface as the LiteDB-side InvalidPasswordException
-            // each call site already handles below.
-            AddLog("Invalid password - please try again");
-            return false;
-        }
-        catch (Exception ex)
-        {
-            AddLog($"Migration to SQLite failed: {ex.Message}");
-            AddLog("  Your data is unchanged; the LiteDB database is still authoritative.");
-            return false;
         }
     }
 
