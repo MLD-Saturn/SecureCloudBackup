@@ -244,6 +244,9 @@
                             <Button Content="Verify Database File" Command="{Binding VerifyDatabaseFileCommand}"
                                     IsEnabled="{Binding CanRunOperations}"
                                     ToolTip.Tip="Runs PRAGMA cipher_integrity_check (SQLCipher per-page HMAC) and PRAGMA integrity_check (SQLite b-tree structure) and reports the result."/>
+                            <Button Content="Attempt Repair" Command="{Binding AttemptRepairCommand}"
+                                    IsEnabled="{Binding CanAttemptRepair}"
+                                    ToolTip.Tip="B45: only enabled after Verify Database File reports REINDEX-safe index damage. Runs REINDEX on each affected index in place, then re-verifies. Refuses to act on cipher-pragma damage or any unfamiliar finding."/>
                         </StackPanel>
 
                         <Border BorderThickness="1" BorderBrush="{DynamicResource SystemControlForegroundBaseMediumLowBrush}"

@@ -438,4 +438,49 @@ public class SqliteBackendSmokeTests : IDisposable
             string.Join(" | ", result.SqliteIntegrityMessages));
         Assert.True(result.IsHealthy);
     }
+
+    [Fact]
+    public void ReindexCorruptIndexes_OnHealthyDatabase_RefusesAndDoesNotRunReindex()
+    {
+        // B45: the repair path is gated on the diagnosis NOT being
+        // healthy. Calling it on a fresh DB must refuse cleanly with
+        // an explanatory message rather than silently reindexing
+        // every healthy index. This is the contract the Storage
+        // Health view's CanAttemptRepair gate relies on.
+        using var backend = new SqliteBackend();
+        backend.Initialize(_dbPath, "RepairPassword123!".AsSpan());
+
+        var diagnosis = backend.CheckDatabaseFileIntegrity();
+        Assert.True(diagnosis.IsHealthy);
+
+        var repair = backend.ReindexCorruptIndexes(diagnosis);
+
+        Assert.False(repair.WasAttempted);
+        Assert.Empty(repair.AttemptedIndexes);
+        Assert.Empty(repair.SucceededIndexes);
+        Assert.Empty(repair.FailedIndexes);
+        Assert.Null(repair.PostRepairDiagnosis);
+        Assert.Contains("healthy", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ReindexCorruptIndexes_OnCipherDamage_RefusesBeforeTouchingAnyIndex()
+    {
+        // B45: a synthetic diagnosis with cipher failures must short-
+        // circuit BEFORE any REINDEX runs. We do not need to actually
+        // corrupt the file; the repair API takes the diagnosis as
+        // input so we can construct the failure shape directly.
+        using var backend = new SqliteBackend();
+        backend.Initialize(_dbPath, "RepairPassword123!".AsSpan());
+
+        var fakeCipherFailure = new DatabaseFileIntegrityResult(
+            CipherIntegrityMessages: new[] { "page 7 corrupted" },
+            SqliteIntegrityMessages: System.Array.Empty<string>());
+
+        var repair = backend.ReindexCorruptIndexes(fakeCipherFailure);
+
+        Assert.False(repair.WasAttempted);
+        Assert.Contains("cipher", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("REINDEX cannot fix", repair.RefusalReason, System.StringComparison.Ordinal);
+    }
 }

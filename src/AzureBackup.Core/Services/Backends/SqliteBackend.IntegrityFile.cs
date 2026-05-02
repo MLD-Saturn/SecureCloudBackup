@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Text.RegularExpressions;
 
 namespace AzureBackup.Core.Services.Backends;
 
@@ -70,6 +71,318 @@ internal sealed partial class SqliteBackend
         }
         return messages;
     }
+
+    /// <summary>
+    /// B45: attempts an in-place repair of the catalog file by running
+    /// <c>REINDEX</c> against every index that <see cref="CheckDatabaseFileIntegrity"/>
+    /// flagged as damaged in a way <c>REINDEX</c> can fix.
+    ///
+    /// <para>
+    /// The repair is intentionally narrow: it only acts on a strict
+    /// whitelist of <c>integrity_check</c> failure shapes that are known
+    /// to be index-only damage (see
+    /// <see cref="DatabaseRepairClassifier.TryClassify"/>). Anything else
+    /// -- cipher-pragma failures, page-level damage, freelist damage,
+    /// or messages the classifier doesn't recognise -- aborts the
+    /// repair attempt and returns a result whose
+    /// <see cref="DatabaseRepairResult.WasAttempted"/> is <c>false</c>
+    /// with an explanation.
+    /// </para>
+    ///
+    /// <para>
+    /// <c>REINDEX</c> rewrites an index from the underlying table data.
+    /// It cannot make the database worse: if the table itself is intact
+    /// the resulting index is correct; if the table is also damaged
+    /// the <c>REINDEX</c> fails cleanly with no partial write to the
+    /// index page. Each <c>REINDEX</c> runs in its own implicit
+    /// transaction so a failure on one index does not roll back
+    /// successful repairs of others -- partial recovery is strictly
+    /// better than no recovery, and the post-repair re-verification
+    /// makes any remaining damage visible.
+    /// </para>
+    /// </summary>
+    /// <param name="diagnosis">
+    /// The result of a prior <see cref="CheckDatabaseFileIntegrity"/>
+    /// call. The repair refuses to run on a stale or healthy diagnosis.
+    /// </param>
+    public DatabaseRepairResult ReindexCorruptIndexes(DatabaseFileIntegrityResult diagnosis)
+    {
+        ArgumentNullException.ThrowIfNull(diagnosis);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        EmitDiag("ReindexCorruptIndexes: enter");
+
+        // Refuse on cipher-level damage. REINDEX cannot help when the
+        // page bytes themselves do not decrypt; attempting the repair
+        // would just race the same bad pages.
+        if (!diagnosis.CipherOk)
+        {
+            EmitDiag("ReindexCorruptIndexes: aborted - cipher pragma reported failures");
+            return DatabaseRepairResult.NotAttempted(
+                "Repair refused: PRAGMA cipher_integrity_check reported failures, " +
+                "which means the database FILE BYTES are damaged on disk. " +
+                "REINDEX cannot fix page-level ciphertext damage. Restore the " +
+                "catalog from a backup, or rebuild the chunk index from Azure metadata.");
+        }
+
+        if (diagnosis.IsHealthy)
+        {
+            EmitDiag("ReindexCorruptIndexes: aborted - diagnosis reported healthy");
+            return DatabaseRepairResult.NotAttempted(
+                "Repair not needed: the supplied diagnosis reports the database is healthy.");
+        }
+
+        var classification = DatabaseRepairClassifier.TryClassify(diagnosis.SqliteIntegrityMessages);
+        if (!classification.AllRepairable)
+        {
+            EmitDiag(
+                "ReindexCorruptIndexes: aborted - one or more findings are outside the REINDEX-safe whitelist " +
+                $"(unrepairableCount={classification.UnrepairableMessages.Count})");
+            return DatabaseRepairResult.NotAttempted(
+                "Repair refused: at least one integrity_check finding is outside " +
+                "the set of damage shapes REINDEX can safely fix. The unrepairable " +
+                "findings are:" + Environment.NewLine + Environment.NewLine +
+                string.Join(Environment.NewLine, classification.UnrepairableMessages));
+        }
+
+        if (classification.RepairableIndexNames.Count == 0)
+        {
+            EmitDiag("ReindexCorruptIndexes: aborted - classifier extracted zero index names");
+            return DatabaseRepairResult.NotAttempted(
+                "Repair refused: integrity_check reported failures but the classifier " +
+                "could not extract any specific index names to repair. This indicates " +
+                "an unfamiliar message format; please file a support request with the " +
+                "verification report.");
+        }
+
+        return InWriteLock(() =>
+        {
+            // Validate every name against sqlite_master BEFORE issuing
+            // the REINDEX so a poisoned message (e.g. an injected
+            // index name) cannot push arbitrary SQL through the loop.
+            // sqlite_master.name comes back parameterized; the name we
+            // emit into the REINDEX statement is the value we just
+            // confirmed exists as type='index'.
+            var knownIndexNames = ReadAllIndexNames();
+            var attempted = new List<string>();
+            var succeeded = new List<string>();
+            var failed = new List<string>();
+
+            foreach (var name in classification.RepairableIndexNames)
+            {
+                if (!knownIndexNames.Contains(name))
+                {
+                    failed.Add($"{name}: not present in sqlite_master (skipped, not reindexed)");
+                    continue;
+                }
+
+                attempted.Add(name);
+                try
+                {
+                    using var cmd = _connection!.CreateCommand();
+                    // Identifier quoting via double-quotes is the SQLite
+                    // standard for identifiers; the embedded "" escape
+                    // is defence-in-depth even though we already
+                    // confirmed the name came from sqlite_master.
+                    cmd.CommandText = $"REINDEX \"{name.Replace("\"", "\"\"")}\";";
+                    cmd.ExecuteNonQuery();
+                    succeeded.Add(name);
+                    EmitDiag($"ReindexCorruptIndexes: REINDEX {name} succeeded");
+                }
+                catch (SqliteException ex)
+                {
+                    failed.Add($"{name}: SQLite Error {ex.SqliteErrorCode}: {ex.Message}");
+                    EmitDiag($"ReindexCorruptIndexes: REINDEX {name} failed: {ex.Message}");
+                }
+            }
+
+            // Re-run BOTH pragmas inside the same write lock so the
+            // before/after comparison is taken without any other
+            // writer in between. Calling the public method would
+            // re-enter the (non-recursive) write lock and deadlock,
+            // so run the helpers directly here.
+            var postCipher = RunPragmaIntegrityCheck("cipher_integrity_check");
+            var postSqlite = RunPragmaIntegrityCheck("integrity_check");
+            var postDiagnosis = new DatabaseFileIntegrityResult(postCipher, postSqlite);
+
+            EmitDiag(
+                "ReindexCorruptIndexes: complete " +
+                $"(attempted={attempted.Count}, succeeded={succeeded.Count}, failed={failed.Count}, " +
+                $"postIsHealthy={postDiagnosis.IsHealthy})");
+
+            return DatabaseRepairResult.Attempted(
+                attemptedIndexes: attempted,
+                succeededIndexes: succeeded,
+                failedIndexes: failed,
+                postRepairDiagnosis: postDiagnosis);
+        });
+    }
+
+    private HashSet<string> ReadAllIndexNames()
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        using var cmd = _connection!.CreateCommand();
+        // Both real and auto-indexes (sqlite_autoindex_*) appear in
+        // sqlite_master with type='index'; both are valid REINDEX
+        // targets. NULL names (extremely rare; partial-write) are
+        // skipped so we never try to quote a null.
+        cmd.CommandText = "SELECT name FROM sqlite_master WHERE type = 'index' AND name IS NOT NULL;";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            if (reader.IsDBNull(0)) continue;
+            names.Add(reader.GetString(0));
+        }
+        return names;
+    }
+}
+
+/// <summary>
+/// B45: classifies <c>PRAGMA integrity_check</c> output rows into
+/// "REINDEX can fix this" vs "REINDEX cannot fix this".
+///
+/// <para>
+/// The whitelist is deliberately narrow. Each pattern below corresponds
+/// to a documented SQLite integrity_check message shape that names a
+/// specific index and describes index-only damage. Page-level damage,
+/// freelist damage, table-row damage, and any unfamiliar message all
+/// route to the unrepairable bucket so a future change to SQLite's
+/// message text cannot silently widen the repair surface.
+/// </para>
+/// </summary>
+public static class DatabaseRepairClassifier
+{
+    // "wrong # of entries in index ix_name"
+    private static readonly Regex WrongEntryCountRegex = new(
+        @"^wrong\s+#\s+of\s+entries\s+in\s+index\s+(?<name>\S+)\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // "row N missing from index ix_name"
+    private static readonly Regex RowMissingFromIndexRegex = new(
+        @"^row\s+\d+\s+missing\s+from\s+index\s+(?<name>\S+)\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // "non-unique entry in index ix_name"
+    private static readonly Regex NonUniqueEntryRegex = new(
+        @"^non-unique\s+entry\s+in\s+index\s+(?<name>\S+)\s*$",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Categorises every line of an integrity_check result. A line is
+    /// "repairable" only if it matches one of the known index-only
+    /// damage patterns. The literal <c>"ok"</c> row is treated as
+    /// neither repairable nor unrepairable (it just means the rest of
+    /// the structure is fine).
+    /// </summary>
+    public static DatabaseRepairClassification TryClassify(IReadOnlyList<string> integrityCheckMessages)
+    {
+        ArgumentNullException.ThrowIfNull(integrityCheckMessages);
+
+        var repairableIndexes = new List<string>();
+        var unrepairable = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var raw in integrityCheckMessages)
+        {
+            var line = raw?.Trim() ?? string.Empty;
+            if (line.Length == 0) continue;
+
+            // The literal "ok" row from a healthy DB is informational,
+            // not a finding. (It also means we should never have been
+            // called, but be tolerant.)
+            if (string.Equals(line, "ok", StringComparison.Ordinal))
+                continue;
+
+            var match = WrongEntryCountRegex.Match(line);
+            if (!match.Success) match = RowMissingFromIndexRegex.Match(line);
+            if (!match.Success) match = NonUniqueEntryRegex.Match(line);
+
+            if (match.Success)
+            {
+                var name = match.Groups["name"].Value;
+                if (seen.Add(name))
+                    repairableIndexes.Add(name);
+            }
+            else
+            {
+                unrepairable.Add(line);
+            }
+        }
+
+        return new DatabaseRepairClassification(
+            RepairableIndexNames: repairableIndexes,
+            UnrepairableMessages: unrepairable);
+    }
+}
+
+/// <summary>
+/// Result of <see cref="DatabaseRepairClassifier.TryClassify"/>.
+/// </summary>
+/// <param name="RepairableIndexNames">
+/// Distinct index names extracted from index-only-damage messages.
+/// </param>
+/// <param name="UnrepairableMessages">
+/// Verbatim integrity_check rows that the classifier did NOT recognise
+/// as REINDEX-safe. Non-empty means the repair must be refused.
+/// </param>
+public sealed record DatabaseRepairClassification(
+    IReadOnlyList<string> RepairableIndexNames,
+    IReadOnlyList<string> UnrepairableMessages)
+{
+    public bool AllRepairable => UnrepairableMessages.Count == 0;
+}
+
+/// <summary>
+/// Result of <see cref="SqliteBackend.ReindexCorruptIndexes"/>.
+/// </summary>
+public sealed record DatabaseRepairResult
+{
+    /// <summary>
+    /// <c>false</c> when the repair was refused before any REINDEX ran
+    /// (e.g. cipher damage, unrepairable findings, healthy diagnosis).
+    /// In that case <see cref="RefusalReason"/> explains why.
+    /// </summary>
+    public bool WasAttempted { get; init; }
+
+    /// <summary>
+    /// Human-readable explanation when <see cref="WasAttempted"/> is
+    /// <c>false</c>; empty otherwise.
+    /// </summary>
+    public string RefusalReason { get; init; } = string.Empty;
+
+    public IReadOnlyList<string> AttemptedIndexes { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> SucceededIndexes { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> FailedIndexes { get; init; } = Array.Empty<string>();
+
+    /// <summary>
+    /// Result of re-running both pragmas after the repair attempt.
+    /// <c>null</c> when the repair was refused before running.
+    /// </summary>
+    public DatabaseFileIntegrityResult? PostRepairDiagnosis { get; init; }
+
+    public bool PostRepairIsHealthy => PostRepairDiagnosis?.IsHealthy ?? false;
+
+    public static DatabaseRepairResult NotAttempted(string refusalReason) =>
+        new()
+        {
+            WasAttempted = false,
+            RefusalReason = refusalReason,
+        };
+
+    public static DatabaseRepairResult Attempted(
+        IReadOnlyList<string> attemptedIndexes,
+        IReadOnlyList<string> succeededIndexes,
+        IReadOnlyList<string> failedIndexes,
+        DatabaseFileIntegrityResult postRepairDiagnosis) =>
+        new()
+        {
+            WasAttempted = true,
+            AttemptedIndexes = attemptedIndexes,
+            SucceededIndexes = succeededIndexes,
+            FailedIndexes = failedIndexes,
+            PostRepairDiagnosis = postRepairDiagnosis,
+        };
 }
 
 /// <summary>

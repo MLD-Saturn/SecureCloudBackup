@@ -50,6 +50,7 @@ public partial class StorageHealthViewModel : ViewModelBase
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanRunOperations))]
+    [NotifyPropertyChangedFor(nameof(CanAttemptRepair))]
     private bool _isOperationInProgress;
 
     [ObservableProperty]
@@ -476,6 +477,33 @@ public partial class StorageHealthViewModel : ViewModelBase
     public bool HasDatabaseFileReport => !string.IsNullOrEmpty(DatabaseFileReport);
 
     /// <summary>
+    /// B45: cached classification of the most recent verification run.
+    /// Drives <see cref="CanAttemptRepair"/> so the Attempt Repair
+    /// button only enables after a verification that produced
+    /// REINDEX-safe findings.
+    /// </summary>
+    private AzureBackup.Core.Services.Backends.DatabaseRepairClassification? _lastClassification;
+
+    /// <summary>
+    /// B45: cached diagnosis from the most recent verification run.
+    /// Passed straight into <see cref="LocalDatabaseService.RepairDatabaseIndexes"/>
+    /// when the user clicks Attempt Repair so the repair operates on
+    /// the diagnosis the user actually saw.
+    /// </summary>
+    private AzureBackup.Core.Services.Backends.DatabaseFileIntegrityResult? _lastDiagnosis;
+
+    /// <summary>
+    /// B45: <c>true</c> only after a verification that produced at
+    /// least one REINDEX-safe finding AND zero unrepairable findings
+    /// AND zero cipher-pragma failures. Drives both the button enabled
+    /// state and the <c>CanExecute</c> on the repair command.
+    /// </summary>
+    public bool CanAttemptRepair =>
+        CanRunOperations
+        && _lastDiagnosis is { CipherOk: true }
+        && _lastClassification is { AllRepairable: true, RepairableIndexNames.Count: > 0 };
+
+    /// <summary>
     /// B44: runs SQLCipher's <c>cipher_integrity_check</c> and SQLite's
     /// <c>integrity_check</c> against the local catalog database file
     /// and reports the result. Use this when an operation against the
@@ -496,6 +524,13 @@ public partial class StorageHealthViewModel : ViewModelBase
         IsOperationInProgress = true;
         StatusMessage = "Verifying local catalog database file...";
         DatabaseFileReport = string.Empty;
+        // B45: clear any prior classification so the Attempt Repair
+        // button cannot fire on stale state if the new verification
+        // throws before reaching the success path.
+        _lastDiagnosis = null;
+        _lastClassification = null;
+        OnPropertyChanged(nameof(CanAttemptRepair));
+        AttemptRepairCommand.NotifyCanExecuteChanged();
 
         try
         {
@@ -506,9 +541,21 @@ public partial class StorageHealthViewModel : ViewModelBase
             var result = await Task.Run(() => _databaseService.CheckDatabaseFileIntegrity());
 
             DatabaseFileReport = FormatDatabaseFileReport(result);
+            _lastDiagnosis = result;
+            // Only classify when the SQLite pragma actually reported
+            // findings; a healthy DB has nothing to classify.
+            _lastClassification = result.IsHealthy
+                ? null
+                : AzureBackup.Core.Services.Backends.DatabaseRepairClassifier
+                    .TryClassify(result.SqliteIntegrityMessages);
+            OnPropertyChanged(nameof(CanAttemptRepair));
+            AttemptRepairCommand.NotifyCanExecuteChanged();
+
             StatusMessage = result.IsHealthy
                 ? "Catalog database file is healthy (cipher_integrity_check and integrity_check both reported ok)."
-                : "Catalog database file reported problems -- see report below.";
+                : CanAttemptRepair
+                    ? "Catalog database file reported repairable index damage -- click Attempt Repair to run REINDEX in place."
+                    : "Catalog database file reported problems -- see report below.";
         }
         catch (NotSupportedException ex)
         {
@@ -525,6 +572,88 @@ public partial class StorageHealthViewModel : ViewModelBase
                 $"from a recent backup, or rebuild it from Azure metadata via the " +
                 $"\"Rebuild Index\" action above.";
             StatusMessage = $"Verification failed: {ex.Message}";
+        }
+        finally
+        {
+            IsOperationInProgress = false;
+        }
+    }
+
+    /// <summary>
+    /// B45: attempts an in-place REINDEX-based repair of the indexes
+    /// flagged by the most recent <see cref="VerifyDatabaseFileAsync"/>
+    /// run. Disabled until a verification produces REINDEX-safe
+    /// findings; see <see cref="CanAttemptRepair"/> for the gate.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanAttemptRepair))]
+    private async Task AttemptRepairAsync()
+    {
+        // Snapshot the diagnosis the user actually saw. CanAttemptRepair
+        // proves this is non-null but the local copy keeps the rest of
+        // the method readable and forecloses a race with a concurrent
+        // verification that could null the field mid-run.
+        var diagnosis = _lastDiagnosis;
+        if (diagnosis is null)
+        {
+            StatusMessage = "Repair refused: run Verify Database File first.";
+            return;
+        }
+
+        IsOperationInProgress = true;
+        StatusMessage = "Repairing catalog indexes (REINDEX)...";
+
+        try
+        {
+            var repair = await Task.Run(() => _databaseService.RepairDatabaseIndexes(diagnosis));
+
+            DatabaseFileReport = FormatRepairReport(repair);
+
+            if (!repair.WasAttempted)
+            {
+                StatusMessage = "Repair was not attempted -- see report below.";
+            }
+            else if (repair.PostRepairIsHealthy)
+            {
+                StatusMessage =
+                    $"Repair succeeded: {repair.SucceededIndexes.Count} index(es) rewritten and " +
+                    "the database now reports healthy.";
+            }
+            else
+            {
+                StatusMessage =
+                    $"Repair partially complete: {repair.SucceededIndexes.Count} succeeded, " +
+                    $"{repair.FailedIndexes.Count} failed. See report below.";
+            }
+
+            // Refresh the cached state from the post-repair diagnosis
+            // so a follow-up click re-evaluates against the new shape
+            // (typically: classification empty -> button disables).
+            if (repair.PostRepairDiagnosis is not null)
+            {
+                _lastDiagnosis = repair.PostRepairDiagnosis;
+                _lastClassification = repair.PostRepairDiagnosis.IsHealthy
+                    ? null
+                    : AzureBackup.Core.Services.Backends.DatabaseRepairClassifier
+                        .TryClassify(repair.PostRepairDiagnosis.SqliteIntegrityMessages);
+            }
+            OnPropertyChanged(nameof(CanAttemptRepair));
+            AttemptRepairCommand.NotifyCanExecuteChanged();
+        }
+        catch (NotSupportedException ex)
+        {
+            DatabaseFileReport = ex.Message;
+            StatusMessage = "Repair not supported on this backend.";
+        }
+        catch (Exception ex)
+        {
+            DatabaseFileReport =
+                $"Repair failed: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}" +
+                $"{Environment.NewLine}" +
+                $"REINDEX itself threw before completing. The catalog may be in the " +
+                $"same state as before the attempt -- re-run Verify Database File to " +
+                $"confirm. Restore from a recent backup or rebuild the chunk index from " +
+                $"Azure metadata if the problem persists.";
+            StatusMessage = $"Repair failed: {ex.Message}";
         }
         finally
         {
@@ -562,6 +691,41 @@ public partial class StorageHealthViewModel : ViewModelBase
             {
                 sb.AppendLine(msg);
             }
+        }
+        return sb.ToString();
+    }
+
+    private static string FormatRepairReport(
+        AzureBackup.Core.Services.Backends.DatabaseRepairResult repair)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("--- B45 REINDEX repair attempt ---");
+        if (!repair.WasAttempted)
+        {
+            sb.AppendLine(repair.RefusalReason);
+            return sb.ToString();
+        }
+
+        sb.AppendLine($"Indexes attempted: {repair.AttemptedIndexes.Count}");
+        foreach (var name in repair.AttemptedIndexes) sb.AppendLine($"  - {name}");
+        sb.AppendLine();
+        sb.AppendLine($"Succeeded: {repair.SucceededIndexes.Count}");
+        foreach (var name in repair.SucceededIndexes) sb.AppendLine($"  - {name}");
+        if (repair.FailedIndexes.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine($"Failed: {repair.FailedIndexes.Count}");
+            foreach (var line in repair.FailedIndexes) sb.AppendLine($"  - {line}");
+        }
+        sb.AppendLine();
+        sb.AppendLine("--- Post-repair re-verification ---");
+        if (repair.PostRepairDiagnosis is not null)
+        {
+            sb.Append(FormatDatabaseFileReport(repair.PostRepairDiagnosis));
+        }
+        else
+        {
+            sb.AppendLine("(no post-repair diagnosis captured)");
         }
         return sb.ToString();
     }

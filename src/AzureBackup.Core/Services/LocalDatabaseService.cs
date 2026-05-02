@@ -907,6 +907,33 @@ public partial class LocalDatabaseService : IDisposable
     }
 
     /// <summary>
+    /// B45: attempts an in-place REINDEX-based repair of indexes that the
+    /// supplied <paramref name="diagnosis"/> identified as REINDEX-safe
+    /// damage. Returns a structured result indicating whether the repair
+    /// was attempted, which indexes were rewritten, and the post-repair
+    /// integrity-pragma output.
+    ///
+    /// <para>
+    /// This is a NARROW repair: it only touches index pages and refuses
+    /// to act on cipher-pragma damage, page-level damage, or any
+    /// integrity_check finding the classifier doesn't recognise as
+    /// safe. See <see cref="Backends.DatabaseRepairClassifier"/> for the
+    /// whitelist.
+    /// </para>
+    /// </summary>
+    /// <exception cref="NotSupportedException">
+    /// Thrown when the active backend is not SQLite.
+    /// </exception>
+    public DatabaseRepairResult RepairDatabaseIndexes(DatabaseFileIntegrityResult diagnosis)
+    {
+        ArgumentNullException.ThrowIfNull(diagnosis);
+        if (_sqliteBackend != null) return _sqliteBackend.ReindexCorruptIndexes(diagnosis);
+        throw new NotSupportedException(
+            "Database repair requires the SQLite backend. " +
+            "The LiteDB legacy backend does not expose REINDEX.");
+    }
+
+    /// <summary>
     /// D6: persists the upload-time encrypted-blob MD5 for a chunk so
     /// the cheap T1 integrity tier can compare against the live
     /// Azure-side ContentHash.

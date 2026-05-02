@@ -310,6 +310,7 @@ The **Catalog Database File** card runs a low-level diagnostic against the encry
 | Action | What it does |
 |---|---|
 | Verify Database File | Runs `PRAGMA cipher_integrity_check` (SQLCipher per-page HMAC) and `PRAGMA integrity_check` (SQLite b-tree structure) against the open catalog and shows the report below the button. |
+| Attempt Repair | Only enabled after Verify Database File reports REINDEX-safe index damage. Runs `REINDEX` against each affected index in place, then re-runs both pragmas and shows the before/after report. Refuses to act on cipher-pragma damage or any unfamiliar finding. |
 
 When to use it:
 
@@ -319,7 +320,8 @@ When to use it:
 How to read the report:
 
 - A healthy catalog shows `ok (no failing pages)` for the cipher pragma and a single `ok` row for the SQLite pragma. SQLCipher emits zero rows on success, so the empty-list shape is what "healthy" looks like.
-- Any other lines describe the affected page or b-tree node. Copy the report into a support request and treat the catalog as untrustworthy until repaired (restore it from a recent backup, or rebuild the chunk index from Azure metadata via **Rebuild from Azure** above).
+- Any other lines describe the affected page or b-tree node. If every finding is an index-only message (`wrong # of entries in index …`, `row N missing from index …`, `non-unique entry in index …`) the **Attempt Repair** button enables and can rewrite the affected indexes in place.
+- For any other shape (cipher-pragma failures, page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until repaired by restoring it from a recent backup or rebuilding the chunk index from Azure metadata via **Rebuild from Azure** above.
 
 ---
 
