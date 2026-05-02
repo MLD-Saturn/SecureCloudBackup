@@ -164,6 +164,17 @@ public partial class ChunkIndexService
     {
         Log("Rebuilding chunk index from Azure metadata...");
 
+        // B46: clear the backed-up-file catalog (files + file_chunks via FK
+        // cascade) before clearing chunk_index / chunk_file_refs. Pre-B46
+        // the rebuild only restored the chunk index, leaving stale or
+        // empty `files` and `file_chunks` tables behind - the catalog
+        // would forget which local paths had been backed up, breaking
+        // Sync, Data Integrity, and any other consumer that reads
+        // GetBackedUpFile / GetAllBackedUpFiles after a recovery. Order
+        // matters only on SQLite (FK cascade); on LiteDB the two clears
+        // are independent.
+        _databaseService.ClearBackedUpFiles();
+
         // Clear existing index
         _databaseService.ClearChunkIndex();
 
@@ -379,9 +390,20 @@ public partial class ChunkIndexService
         _databaseService.BulkInsertChunkFileRefs(reverseRows);
         _databaseService.SetIndexMetadata("ReverseIndexBuiltAt", now);
 
+        // B46: repopulate the backed-up-file catalog so subsequent
+        // GetBackedUpFile / GetAllBackedUpFiles calls return the same
+        // BackedUpFile graph that the user had before the rebuild.
+        // Only valid (complete) metadata is persisted: incomplete
+        // entries were already deleted from Azure above and must not
+        // resurface in the catalog.
+        progress?.Report((0, 1, $"Saving {validMetadata.Count} file records..."));
+        var rebuiltFiles = validMetadata.Select(m => m.file).ToList();
+        _databaseService.BulkInsertBackedUpFiles(rebuiltFiles);
+
         _databaseService.SetIndexMetadata("LastFullRebuildAt", now);
         Log($"Index rebuild complete: {processed} valid files indexed, " +
             $"{indexEntries.Count} unique chunks, " +
+            $"{rebuiltFiles.Count} files repopulated in catalog, " +
             $"{missingChunkHashes.Count} missing chunks detected");
 
         // Backup the newly rebuilt index

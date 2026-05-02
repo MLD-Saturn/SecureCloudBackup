@@ -500,6 +500,66 @@ public partial class LocalDatabaseService : IDisposable
         return InReadLock(() => _filesCollection!.FindAll().ToList());
     }
 
+    /// <summary>
+    /// B46: bulk-inserts <see cref="BackedUpFile"/> rows (with their full
+    /// chunk lists) used by the "Rebuild from Azure" recovery path to
+    /// repopulate the catalog from authoritative Azure metadata. The
+    /// caller MUST clear the catalog first via
+    /// <see cref="ClearBackedUpFiles"/>; this method assumes a clean
+    /// Files set and uses plain inserts so a UNIQUE clash on
+    /// <c>local_path</c> indicates a programmer error.
+    /// </summary>
+    public void BulkInsertBackedUpFiles(IEnumerable<BackedUpFile> files)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        if (_sqliteBackend != null) { _sqliteBackend.BulkInsertBackedUpFiles(files); return; }
+        EnsureInitialized();
+
+        InWriteLock(() =>
+        {
+            _database!.BeginTrans();
+            try
+            {
+                _filesCollection!.InsertBulk(files);
+                _database.Commit();
+            }
+            catch
+            {
+                _database.Rollback();
+                throw;
+            }
+        });
+    }
+
+    /// <summary>
+    /// B46: removes every backed-up-file row (and on SQLite the
+    /// cascaded <c>file_chunks</c> and <c>chunk_file_refs</c> rows) so
+    /// the "Rebuild from Azure" recovery path can repopulate the
+    /// catalog from a known-empty Files set rather than upserting on
+    /// top of stale rows that may reference paths that no longer exist
+    /// on disk.
+    /// </summary>
+    public void ClearBackedUpFiles()
+    {
+        if (_sqliteBackend != null) { _sqliteBackend.ClearBackedUpFiles(); return; }
+        EnsureInitialized();
+
+        InWriteLock(() =>
+        {
+            _database!.BeginTrans();
+            try
+            {
+                _filesCollection!.DeleteAll();
+                _database.Commit();
+            }
+            catch
+            {
+                _database.Rollback();
+                throw;
+            }
+        });
+    }
+
     #endregion
 
     #region Pending Changes Queue

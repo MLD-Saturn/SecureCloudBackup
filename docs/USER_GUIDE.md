@@ -275,7 +275,7 @@ The **Storage Health** view gives visibility into your chunk-level storage and t
 | Orphaned | Chunks no longer referenced by any file (wasted space) |
 | Deduplicated | Chunks shared by multiple files (storage saved) |
 
-The card also shows the timestamp of the last index rebuild and the last Azure sync.
+The card also shows the timestamp of the last catalog rebuild and the last Azure sync.
 
 ### Storage tier breakdown
 
@@ -301,7 +301,7 @@ Orphaned chunks are blobs in Azure that no file references. They waste storage.
 |---|---|
 | Backup to Azure | Upload the chunk index to Azure for disaster recovery |
 | Restore from Azure | Download the index from Azure (e.g. after reinstalling) |
-| Rebuild from Azure | Rebuild the index by scanning all metadata blobs in Azure. Use this if the index is corrupted or out of sync. |
+| Rebuild from Azure | Rebuild the entire local catalog from Azure metadata. Repopulates the chunk index, the reverse index, and the backed-up file records (paths, sizes, hashes, chunk graph). Use this if the catalog is corrupted, was deleted and recreated from scratch, or has drifted out of sync with Azure. Files whose metadata blob exists in Azure but whose chunks are missing are deleted from Azure during the rebuild and are not carried into the rebuilt catalog. |
 
 ### Catalog database file
 
@@ -321,7 +321,7 @@ How to read the report:
 
 - A healthy catalog shows `ok (no failing pages)` for the cipher pragma and a single `ok` row for the SQLite pragma. SQLCipher emits zero rows on success, so the empty-list shape is what "healthy" looks like.
 - Any other lines describe the affected page or b-tree node. If every finding is an index-only message (`wrong # of entries in index …`, `row N missing from index …`, `non-unique entry in index …`) the **Attempt Repair** button enables and can rewrite the affected indexes in place.
-- For any other shape (cipher-pragma failures, page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until repaired by restoring it from a recent backup or rebuilding the chunk index from Azure metadata via **Rebuild from Azure** above.
+- For any other shape (cipher-pragma failures, page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until either restored from a recent backup or rebuilt from Azure via **Rebuild from Azure** above. **Rebuild from Azure** repopulates the chunk index, the reverse index, and the backed-up file records, so the rebuilt catalog matches what Azure actually holds; it is the recommended recovery path after a damaged catalog file is deleted and recreated.
 
 ---
 

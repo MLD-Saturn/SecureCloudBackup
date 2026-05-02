@@ -24,9 +24,9 @@
                     <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemSpacing="8" LineSpacing="6">
                         <Button Content="Refresh" Command="{Binding RefreshSummaryCommand}"
                                 ToolTip.Tip="Refresh index statistics"/>
-                        <Button Content="Rebuild Index" Command="{Binding RebuildIndexCommand}"
+                        <Button Content="Rebuild Catalog" Command="{Binding RebuildIndexCommand}"
                                 IsEnabled="{Binding CanRunOperations}"
-                                ToolTip.Tip="Rebuild chunk index from Azure metadata"/>
+                                ToolTip.Tip="Rebuild the local catalog (chunk index plus backed-up file records) from Azure metadata"/>
                         <Button Content="Check Data Integrity" Command="{Binding CheckDataIntegrityCommand}"
                                 IsEnabled="{Binding CanRunOperations}"
                                 ToolTip.Tip="Open the Data Integrity tab to verify backed-up files against Azure storage. The tab persists for the rest of the session so you can return to historical results."/>
@@ -217,17 +217,17 @@
                                     <Button Content="Backup to Azure" Command="{Binding BackupIndexCommand}"
                                             IsEnabled="{Binding CanRunOperations}"/>
                                     <Button Content="Restore from Azure" Command="{Binding RestoreIndexCommand}"
-                                            IsEnabled="{Binding CanRunOperations}"/>
-                                </StackPanel>
-                            </StackPanel>
+                                                             IsEnabled="{Binding CanRunOperations}"/>
+                                                </StackPanel>
+                                            </StackPanel>
 
-                            <StackPanel Grid.Column="1" Spacing="8" Margin="16,0,0,0">
-                                <TextBlock Text="Rebuild Index" FontWeight="SemiBold"/>
-                                <TextBlock Text="Rebuild the index by scanning all metadata blobs in Azure. Use this if the index is corrupted or out of sync."
-                                           TextWrapping="Wrap" Opacity="0.6" FontSize="11"/>
-                                <Button Content="Rebuild from Azure" Command="{Binding RebuildIndexCommand}"
-                                        IsEnabled="{Binding CanRunOperations}"/>
-                            </StackPanel>
+                                            <StackPanel Grid.Column="1" Spacing="8" Margin="16,0,0,0">
+                                                <TextBlock Text="Rebuild Catalog" FontWeight="SemiBold"/>
+                                                <TextBlock Text="Rebuild the entire local catalog (chunk index plus backed-up file records) by scanning all metadata blobs in Azure. Use this if the catalog is corrupted, out of sync, or was recreated from scratch."
+                                                           TextWrapping="Wrap" Opacity="0.6" FontSize="11"/>
+                                                <Button Content="Rebuild from Azure" Command="{Binding RebuildIndexCommand}"
+                                                        IsEnabled="{Binding CanRunOperations}"/>
+                                            </StackPanel>
                         </Grid>
                     </StackPanel>
                 </Border>

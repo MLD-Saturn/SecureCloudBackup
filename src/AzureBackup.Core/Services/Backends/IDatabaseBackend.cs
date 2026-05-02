@@ -122,6 +122,26 @@ internal interface IDatabaseBackend : IDisposable
     /// </summary>
     List<BackedUpFile> GetAllBackedUpFiles();
 
+    /// <summary>
+    /// Bulk-inserts many <see cref="BackedUpFile"/> rows (each with its
+    /// full chunk list) in a single transaction. Used by the B46
+    /// "Rebuild from Azure" recovery path to repopulate <c>files</c> and
+    /// <c>file_chunks</c> from the authoritative Azure metadata blobs
+    /// after the local catalog has been wiped or recreated. Existing
+    /// rows with matching <c>local_path</c> are upserted and their chunk
+    /// list replaced.
+    /// </summary>
+    void BulkInsertBackedUpFiles(IEnumerable<BackedUpFile> files);
+
+    /// <summary>
+    /// Removes every row from <c>files</c> and (via FK cascade)
+    /// <c>file_chunks</c> in a single transaction. Used by the B46
+    /// "Rebuild from Azure" recovery path so the rebuild starts from
+    /// a known-empty Files set rather than upserting on top of stale
+    /// rows that may reference paths that no longer exist on disk.
+    /// </summary>
+    void ClearBackedUpFiles();
+
     // ---- ChunkIndex ---------------------------------------------------------
 
     /// <summary>

@@ -84,6 +84,11 @@ internal sealed class LiteDbBackend : IDatabaseBackend
 
     public List<BackedUpFile> GetAllBackedUpFiles() => _service.GetAllBackedUpFiles();
 
+    public void BulkInsertBackedUpFiles(IEnumerable<BackedUpFile> files)
+        => _service.BulkInsertBackedUpFiles(files);
+
+    public void ClearBackedUpFiles() => _service.ClearBackedUpFiles();
+
     // ---- ChunkIndex ---------------------------------------------------------
 
     public ChunkIndexEntry? GetChunkIndexEntry(string chunkHash)

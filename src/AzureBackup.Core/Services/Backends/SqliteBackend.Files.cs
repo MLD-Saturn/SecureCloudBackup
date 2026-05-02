@@ -417,6 +417,156 @@ internal sealed partial class SqliteBackend
     }
 
     /// <summary>
+    /// B46: bulk-inserts <see cref="BackedUpFile"/> rows (with their full
+    /// chunk lists) into <c>files</c> and <c>file_chunks</c> in a single
+    /// transaction. Used by the "Rebuild from Azure" recovery path to
+    /// repopulate the catalog from authoritative Azure metadata after
+    /// the local Files set has been wiped via
+    /// <see cref="ClearBackedUpFiles"/>.
+    ///
+    /// <para>
+    /// Differs from the migration-only <see cref="BulkInsertFiles"/>:
+    /// this method does NOT write <c>chunk_file_refs</c>. The rebuild
+    /// path is responsible for the reverse index via the canonical
+    /// <c>BulkInsertChunkFileRefs</c> writer, which keeps the SQLite
+    /// and LiteDB rebuild shapes identical and avoids double-inserting
+    /// reverse-index rows (the table has no unique key, so duplicates
+    /// would silently inflate counts).
+    /// </para>
+    ///
+    /// <para>
+    /// Caller MUST clear <c>files</c> first; this method does plain
+    /// INSERTs and a UNIQUE clash on <c>local_path</c> would abort the
+    /// whole transaction.
+    /// </para>
+    /// </summary>
+    public void BulkInsertBackedUpFiles(IEnumerable<BackedUpFile> files)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        var fileList = files as IList<BackedUpFile> ?? files.ToList();
+        EmitDiag($"BulkInsertBackedUpFiles: enter ({fileList.Count} files)");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            InWriteLock(() =>
+            {
+                using var tx = _connection.BeginTransaction();
+
+                using var fileInsert = _connection.CreateCommand();
+                fileInsert.Transaction = tx;
+                fileInsert.CommandText = """
+                    INSERT INTO files (local_path, blob_name, file_size, last_modified,
+                                       file_hash, status, backed_up_at, metadata_version)
+                    VALUES ($local_path, $blob_name, $file_size, $last_modified,
+                            $file_hash, $status, $backed_up_at, $metadata_version)
+                    RETURNING id;
+                    """;
+                var fp_path = fileInsert.Parameters.Add("$local_path", SqliteType.Text);
+                var fp_blob = fileInsert.Parameters.Add("$blob_name", SqliteType.Text);
+                var fp_size = fileInsert.Parameters.Add("$file_size", SqliteType.Integer);
+                var fp_modified = fileInsert.Parameters.Add("$last_modified", SqliteType.Text);
+                var fp_hash = fileInsert.Parameters.Add("$file_hash", SqliteType.Text);
+                var fp_status = fileInsert.Parameters.Add("$status", SqliteType.Integer);
+                var fp_backed = fileInsert.Parameters.Add("$backed_up_at", SqliteType.Text);
+                var fp_meta = fileInsert.Parameters.Add("$metadata_version", SqliteType.Integer);
+
+                using var chunkInsert = _connection.CreateCommand();
+                chunkInsert.Transaction = tx;
+                chunkInsert.CommandText = """
+                    INSERT INTO file_chunks
+                        (file_id, chunk_order, chunk_index, offset, length, hash, blob_name)
+                    VALUES ($file_id, $chunk_order, $chunk_index, $offset, $length, $hash, $blob_name);
+                    """;
+                var cp_fileId = chunkInsert.Parameters.Add("$file_id", SqliteType.Integer);
+                var cp_order = chunkInsert.Parameters.Add("$chunk_order", SqliteType.Integer);
+                var cp_index = chunkInsert.Parameters.Add("$chunk_index", SqliteType.Integer);
+                var cp_offset = chunkInsert.Parameters.Add("$offset", SqliteType.Integer);
+                var cp_length = chunkInsert.Parameters.Add("$length", SqliteType.Integer);
+                var cp_hash = chunkInsert.Parameters.Add("$hash", SqliteType.Text);
+                var cp_blob = chunkInsert.Parameters.Add("$blob_name", SqliteType.Text);
+
+                foreach (var file in fileList)
+                {
+                    fp_path.Value = file.LocalPath;
+                    fp_blob.Value = file.BlobName ?? string.Empty;
+                    fp_size.Value = file.FileSize;
+                    fp_modified.Value = FormatUtc(file.LastModified);
+                    fp_hash.Value = file.FileHash ?? string.Empty;
+                    fp_status.Value = (int)file.Status;
+                    fp_backed.Value = FormatUtc(file.BackedUpAt);
+                    fp_meta.Value = file.MetadataVersion;
+
+                    var fileId = (long)fileInsert.ExecuteScalar()!;
+                    cp_fileId.Value = fileId;
+
+                    for (var i = 0; i < file.Chunks.Count; i++)
+                    {
+                        var chunk = file.Chunks[i];
+                        cp_order.Value = i;
+                        cp_index.Value = chunk.Index;
+                        cp_offset.Value = chunk.Offset;
+                        cp_length.Value = chunk.Length;
+                        cp_hash.Value = chunk.Hash ?? string.Empty;
+                        cp_blob.Value = (object?)chunk.BlobName ?? string.Empty;
+                        chunkInsert.ExecuteNonQuery();
+                    }
+                }
+
+                tx.Commit();
+            });
+            EmitDiag($"BulkInsertBackedUpFiles: commit OK ({fileList.Count} files in {sw.ElapsedMilliseconds} ms)");
+        }
+        catch (Exception ex)
+        {
+            EmitDiag($"BulkInsertBackedUpFiles: FAILED with {ex.GetType().Name}: {ex.Message} after {sw.ElapsedMilliseconds} ms ({fileList.Count} files)");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// B46: truncates <c>files</c> in a single transaction. The matching
+    /// <c>file_chunks</c> rows are removed via the
+    /// <c>ON DELETE CASCADE</c> FK declared on <c>file_chunks.file_id</c>
+    /// and <c>foreign_keys=ON</c> (set in <c>ApplyPragmas</c>). Does NOT
+    /// touch <c>chunk_file_refs</c>; the rebuild path clears that table
+    /// via <see cref="ClearChunkIndex"/>, which already deletes both the
+    /// chunk_index and chunk_file_refs rows in one transaction.
+    /// </summary>
+    public void ClearBackedUpFiles()
+    {
+        if (_connection == null)
+            throw new InvalidOperationException("Backend is not initialized.");
+
+        EmitDiag("ClearBackedUpFiles: enter");
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+
+        try
+        {
+            InWriteLock(() =>
+            {
+                using var tx = _connection.BeginTransaction();
+                using (var cmd = _connection.CreateCommand())
+                {
+                    cmd.Transaction = tx;
+                    cmd.CommandText = "DELETE FROM files;";
+                    cmd.ExecuteNonQuery();
+                }
+                tx.Commit();
+            });
+            EmitDiag($"ClearBackedUpFiles: commit OK in {sw.ElapsedMilliseconds} ms");
+        }
+        catch (Exception ex)
+        {
+            EmitDiag($"ClearBackedUpFiles: FAILED with {ex.GetType().Name}: {ex.Message} after {sw.ElapsedMilliseconds} ms");
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Benchmark-only: drops every row from <c>chunk_file_refs</c> and
     /// clears the <c>ReverseIndexBuiltAt</c> sentinel so a subsequent
     /// <see cref="RebuildReverseChunkIndex"/> call has work to do.

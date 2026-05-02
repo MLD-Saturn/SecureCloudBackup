@@ -341,14 +341,17 @@ public partial class StorageHealthViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Rebuilds the chunk index from Azure metadata.
+    /// Rebuilds the local catalog from Azure metadata. B46: this now
+    /// repopulates both the chunk index AND the backed-up-file tables
+    /// (<c>files</c> + <c>file_chunks</c>) so the catalog is fully
+    /// restored after a recovery, not just the chunk-level summary.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanRunOperations))]
     private async Task RebuildIndexAsync()
     {
         IsOperationInProgress = true;
         var ct = BeginOperation();
-        StatusMessage = "Rebuilding chunk index from Azure...";
+        StatusMessage = "Rebuilding catalog from Azure...";
 
         try
         {
@@ -361,7 +364,7 @@ public partial class StorageHealthViewModel : ViewModelBase
             await _chunkIndexService.RebuildIndexFromAzureAsync(progress, ct);
 
             await RefreshSummaryAsync();
-            StatusMessage = "Index rebuild complete";
+            StatusMessage = "Catalog rebuild complete";
         }
         catch (OperationCanceledException)
         {
