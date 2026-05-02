@@ -42,7 +42,7 @@ public class ThroughputMetricsTests : IDisposable
             ChunkMin = 1024,
             ChunkMax = 1024,
             ElapsedSeconds = 1.5,
-            ThroughputMbps = 0.65,
+            ThroughputMBps = 0.65,
             NewChunks = 1,
             DedupChunks = 0,
             Tier = "Hot"
@@ -55,7 +55,7 @@ public class ThroughputMetricsTests : IDisposable
             Succeeded = 1,
             Bytes = 1024,
             ElapsedSeconds = 1.5,
-            ThroughputMbps = 0.65
+            ThroughputMBps = 0.65
         });
 
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
@@ -81,7 +81,7 @@ public class ThroughputMetricsTests : IDisposable
             ChunkMin = 33_554_432,
             ChunkMax = 33_554_432,
             ElapsedSeconds = 9.1,
-            ThroughputMbps = 28.1,
+            ThroughputMBps = 28.1,
             EffectiveConcurrency = 8,
             BudgetStalls = 3,
             Retries = 1,
@@ -95,7 +95,7 @@ public class ThroughputMetricsTests : IDisposable
             Succeeded = 1,
             Bytes = 268_435_456,
             ElapsedSeconds = 9.1,
-            ThroughputMbps = 28.1
+            ThroughputMBps = 28.1
         });
 
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
@@ -119,7 +119,7 @@ public class ThroughputMetricsTests : IDisposable
             Succeeded = 5,
             Bytes = 10_000,
             ElapsedSeconds = 2.0,
-            ThroughputMbps = 4.77
+            ThroughputMBps = 4.77
         });
 
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
@@ -197,5 +197,44 @@ public class ThroughputMetricsTests : IDisposable
 
         Assert.False(File.Exists(oldFile));
         Assert.True(File.Exists(recentFile));
+    }
+
+    /// <summary>
+    /// B43 regression guard. The C# property is <c>ThroughputMBps</c> and
+    /// the JSON key is pinned via <c>[JsonPropertyName]</c> to
+    /// <c>throughput_mbytes_per_sec</c>. A future rename that drops the
+    /// attribute would let the configured snake_case naming policy fall
+    /// back to <c>throughput_m_bps</c> (or, worse, restore the historically
+    /// wrong <c>throughput_mbps</c>) and silently re-introduce the
+    /// MB/s-vs-Mbps label bug. This test fails noisily if either happens.
+    /// </summary>
+    [Fact]
+    public void WhenThroughputMBpsSerialisedThenJsonKeyIsThroughputMBytesPerSec()
+    {
+        using var metrics = new ThroughputMetrics(_testDir);
+
+        metrics.RecordFile(new FileMetrics
+        {
+            Operation = "backup",
+            Path = "label-check.bin",
+            Bytes = 1_048_576,
+            ElapsedSeconds = 1.0,
+            ThroughputMBps = 1.0
+        });
+
+        metrics.RecordOperationAndFlush(new OperationMetrics
+        {
+            Operation = "backup",
+            Files = 1,
+            Succeeded = 1,
+            Bytes = 1_048_576,
+            ElapsedSeconds = 1.0,
+            ThroughputMBps = 1.0
+        });
+
+        var content = File.ReadAllText(Directory.GetFiles(_testDir, "throughput-*.jsonl")[0]);
+        Assert.Contains("\"throughput_mbytes_per_sec\":1", content);
+        Assert.DoesNotContain("\"throughput_mbps\"", content);
+        Assert.DoesNotContain("\"throughput_m_bps\"", content);
     }
 }

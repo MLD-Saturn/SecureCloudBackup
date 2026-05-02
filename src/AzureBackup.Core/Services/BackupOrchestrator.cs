@@ -566,7 +566,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     public Task<bool> BackupFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, cancellationToken);
+        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, forceReupload: false, cancellationToken);
     }
 
     /// <summary>
@@ -582,7 +582,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
         CancellationToken cancellationToken = default)
-        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, cancellationToken);
+        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, forceReupload: false, cancellationToken);
 
     /// <summary>
     /// B37 overload: as above, plus an optional
@@ -592,12 +592,24 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// pressure that B36 surfaced after B30/B33/B34 landed. Pass
     /// <c>null</c> to keep the pre-B37 GC-managed behaviour for tests
     /// and ad-hoc single-file callers.
+    /// <para>
+    /// B42: pass <paramref name="forceReupload"/>=<c>true</c> to bypass
+    /// the metadata-skip fast path AND the per-chunk dedup filter, so
+    /// every chunk in the file is re-encrypted and re-uploaded with
+    /// overwrite semantics. This is the contract used by
+    /// <c>IntegrityCheckService</c>'s auto-repair path and the manual
+    /// Repair / Force Full Scan UI commands. Production hot paths
+    /// (file watcher, MirrorSyncToAzureAsync, normal scheduled backups)
+    /// MUST keep this <c>false</c> -- forcing re-upload defeats dedup
+    /// and re-encrypts every byte of every file.
+    /// </para>
     /// </summary>
     public async Task<bool> BackupFileAsync(
         string filePath,
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
         LargeChunkBufferPool? largeChunkPool,
+        bool forceReupload = false,
         CancellationToken cancellationToken = default)
     {
         var diag = new FileOperationDiagnostics(filePath, "Backup", DiagnosticsDirectory);
@@ -639,7 +651,11 @@ public partial class BackupOrchestrator : IAsyncDisposable
 
             // Quick metadata check: skip expensive file reads if size and timestamp match.
             // For unchanged files this avoids reading the entire file just to hash it.
-            if (existingFile != null && existingFile.Status == BackupStatus.Completed &&
+            // B42: forceReupload bypasses this fast path so the integrity-check auto-repair
+            // and the manual Repair command can re-upload bytes that the local DB believes
+            // are present but Azure has lost or corrupted.
+            if (!forceReupload &&
+                existingFile != null && existingFile.Status == BackupStatus.Completed &&
                 existingFile.FileSize == fileInfo.Length &&
                 Math.Abs((fileInfo.LastWriteTimeUtc - existingFile.LastModified).TotalSeconds) < 2)
             {
@@ -659,10 +675,17 @@ public partial class BackupOrchestrator : IAsyncDisposable
             }
             // Determine which chunks need uploading using existing backup's chunk hashes
             var existingChunks = existingFile?.Chunks ?? [];
-            var existingHashes = existingChunks.Select(c => c.Hash).ToHashSet(StringComparer.Ordinal);
+            // B42: when forceReupload is true, treat every chunk as new so the chunker
+            // streams all chunks (not just deltas) and the per-chunk dedup filter below
+            // becomes a pass-through.
+            var existingHashes = forceReupload
+                ? new HashSet<string>(StringComparer.Ordinal)
+                : existingChunks.Select(c => c.Hash).ToHashSet(StringComparer.Ordinal);
 
             // For new files (no existing backup), skip existence checks - all chunks are new
-            var isNewFile = existingFile == null;
+            // B42: forceReupload also takes the new-file path so UploadChunkDirectAsync is
+            // used unconditionally, overwriting any stale Azure-side blob.
+            var isNewFile = existingFile == null || forceReupload;
 
             // Get the storage tier based on the watched folder configuration
             var storageTier = GetStorageTierForFile(filePath);
@@ -937,7 +960,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 ChunkMin = chunks.Min(c => c.Length),
                 ChunkMax = chunks.Max(c => c.Length),
                 ElapsedSeconds = fileElapsed,
-                ThroughputMbps = fileElapsed > 0 ? totalFileSize / fileElapsed / (1024 * 1024) : 0,
+                ThroughputMBps = fileElapsed > 0 ? totalFileSize / fileElapsed / (1024 * 1024) : 0,
                 NewChunks = chunksToUpload.Count,
                 DedupChunks = chunks.Count - chunksToUpload.Count,
                 Tier = storageTier.ToString()

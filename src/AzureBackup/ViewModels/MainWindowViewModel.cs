@@ -788,6 +788,43 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             SessionId = Program.Logger?.SessionId ?? Guid.Empty
 #endif
         };
+
+        // B42: wire the auto-repair callback so a missing/corrupt blob
+        // discovered by an integrity check is transparently re-uploaded
+        // and re-checked. The callback uses forceReupload=true to bypass
+        // the metadata-skip and chunk-dedup paths so even files the
+        // local DB believes are present get a fresh upload. Returning
+        // false on exception ensures a re-upload failure surfaces the
+        // ORIGINAL integrity failures normally instead of swallowing
+        // them.
+        _integrityService.RepairCallback = async (filePath, ct) =>
+        {
+            try
+            {
+                AddLog($"Auto-repair: re-uploading {System.IO.Path.GetFileName(filePath)}");
+                var ok = await _orchestrator.BackupFileAsync(
+                    filePath,
+                    progress: null,
+                    memoryBudget: null,
+                    largeChunkPool: null,
+                    forceReupload: true,
+                    ct);
+                if (ok)
+                    AddLog($"Auto-repair: re-uploaded {System.IO.Path.GetFileName(filePath)}");
+                else
+                    AddLog($"Auto-repair: re-upload returned false for {System.IO.Path.GetFileName(filePath)}");
+                return ok;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                AddLog($"Auto-repair: re-upload threw {ex.GetType().Name} for {System.IO.Path.GetFileName(filePath)}: {ex.Message}");
+                return false;
+            }
+        };
         // B14: removed the duplicate _integrityService.DiagnosticLog ->
         // Program.Logger.Log wire that previously bypassed OnDiagnosticLog.
         // The wire below at the "Wire up diagnostic logging events" block
@@ -1391,9 +1428,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
             vm.CheckCompleted += (_, e) =>
             {
                 var totalFailures = e.Result.Run.FilesFailedT1 + e.Result.Run.FilesFailedT2 + e.Result.Run.FilesFailedT3;
+                var repaired = e.Result.Run.FilesAutoRepaired;
+                // B42: include auto-repair tally so the user sees the
+                // engine actually re-uploaded N files even when the
+                // final result reads as clean.
+                var repairTag = repaired > 0 ? $" ({repaired} auto-repaired)" : string.Empty;
                 var summary = totalFailures == 0
-                    ? $"Integrity check OK -- {e.Result.Run.FilesChecked} files passed."
-                    : $"Integrity check found {totalFailures} failures across {e.Result.Run.FilesChecked} files.";
+                    ? $"Integrity check OK -- {e.Result.Run.FilesChecked} files passed{repairTag}."
+                    : $"Integrity check found {totalFailures} failures across {e.Result.Run.FilesChecked} files{repairTag}.";
                 AddLog(summary);
                 StatusMessage = summary;
                 CurrentView = "DataIntegrity";

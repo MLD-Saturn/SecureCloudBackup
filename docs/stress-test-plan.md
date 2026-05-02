@@ -50,10 +50,19 @@ When `MemoryBudget` is **unlimited** (disabled in settings):
 | Type | When Written | Key Fields |
 |---|---|---|
 | `ctx` | Start of backup/restore/mirror operations | `processors`, `total_ram_mb`, `memory_budget_mb`, `memory_budget_enabled`, `is_64_bit`, `os` |
-| `file` (backup) | Each file that actually uploads | `chunks`, `chunk_min`, `chunk_max`, `new_chunks`, `dedup_chunks`, `tier`, `throughput_mbps` |
-| `file` (restore) | Each file downloaded (single-chunk and multi-chunk) | `effective_concurrency`, `budget_stalls`, `retries`, `reorder_max`, `throughput_mbps` |
-| `op` | End of each batch operation | `files`, `succeeded`, `failed`, `bytes`, `elapsed_seconds`, `throughput_mbps`, `file_concurrency`, `memory_budget_mb`, `budget_stalls` |
+| `file` (backup) | Each file that actually uploads | `chunks`, `chunk_min`, `chunk_max`, `new_chunks`, `dedup_chunks`, `tier`, `throughput_mbytes_per_sec` |
+| `file` (restore) | Each file downloaded (single-chunk and multi-chunk) | `effective_concurrency`, `budget_stalls`, `retries`, `reorder_max`, `throughput_mbytes_per_sec` |
+| `op` | End of each batch operation | `files`, `succeeded`, `failed`, `bytes`, `elapsed_seconds`, `throughput_mbytes_per_sec`, `file_concurrency`, `memory_budget_mb`, `budget_stalls` |
 | `corruption` | Each corrupted recovery event | `total_chunks`, `recovered_chunks`, `unrecoverable_chunks`, `trigger_error`, `diag_file` |
+
+> **Throughput field rename (B43).** Prior to B43 the JSON key was
+> `throughput_mbps`. The label was wrong: the field has always been computed
+> as `bytes / elapsed_seconds / 1048576`, i.e. **megabytes per second** (MB/s),
+> not megabits per second (Mbps). The on-disk key is now
+> `throughput_mbytes_per_sec` and the C# property is `ThroughputMBps`. Any
+> historical JSONL files written before B43 contain the old `throughput_mbps`
+> key but the same MB/s values; no value conversion is needed for trend
+> analysis, only a key rename in the consumer.
 
 ### Fields in `.diag.jsonl` (per-chunk records)
 
@@ -97,7 +106,7 @@ skipped_files = op.succeeded - uploaded_files
 - Each `file` record shows `chunks`, `chunk_min`, `chunk_max` — uneven
   distribution means CDC boundaries may need tuning.
 - `dedup_chunks > 0` on first backup means chunk hash collisions (unexpected).
-- `throughput_mbps` variance across file sizes reveals bottleneck boundaries.
+- `throughput_mbytes_per_sec` variance across file sizes reveals bottleneck boundaries.
 - Compare count of `file` records vs `op.succeeded` to see how many files were
   skipped as unchanged.
 
@@ -124,7 +133,7 @@ skipped_files = op.succeeded - uploaded_files
 - `effective_concurrency` values — do they match expectations from
   `ComputeAdaptiveChunkConcurrency`? (Formula: `384 MB / maxChunkSize`,
   clamped to 4–24.)
-- Compare restore `throughput_mbps` against backup — restore should be faster
+- Compare restore `throughput_mbytes_per_sec` against backup — restore should be faster
   (no CDC, no encryption) unless memory budget is the bottleneck.
 
 ---
@@ -148,7 +157,7 @@ zero stalls when the budget is disabled.
 - `effective_concurrency` should be at maximum for small chunks (24) and
   moderate for large chunks (4–8) — the adaptive formula is independent of
   memory budget.
-- `throughput_mbps` should be the highest of all restore scenarios — this is
+- `throughput_mbytes_per_sec` should be the highest of all restore scenarios — this is
   the ceiling.
 - Monitor system memory via Task Manager during the run. Peak memory should be
   roughly `MaxParallelFileRestores × effectiveConcurrency × 2 × maxChunkSize`.
@@ -216,7 +225,7 @@ zero stalls when the budget is disabled.
 standalone backup/restore and achieve comparable throughput.
 
 1. Backup 50+ files using **Backup Selected Local Files**.
-2. Note the `op` record's `throughput_mbps` and `file_concurrency`.
+2. Note the `op` record's `throughput_mbytes_per_sec` and `file_concurrency`.
 3. Delete the backup from the database (reset).
 4. Mirror the same folder to Azure using **Mirror Sync to Azure**.
 5. Compare the `op` records side by side.
@@ -366,10 +375,10 @@ referenced files alongside each prompt.
 > performance as their standalone equivalents:
 >
 > 1. Does mirror-to-azure show `file_concurrency` matching
->    `MaxParallelFileBackups` (8)? Compare its `throughput_mbps` against the
+>    `MaxParallelFileBackups` (8)? Compare its `throughput_mbytes_per_sec` against the
 >    standalone backup.
 > 2. Does mirror-to-local show the two-tier parallelism in the log? Compare its
->    `throughput_mbps` against the standalone restore.
+>    `throughput_mbytes_per_sec` against the standalone restore.
 > 3. Do both mirror operations have `ctx` records with correct
 >    `memory_budget_mb`?
 > 4. Are corruption metrics recorded during mirror-to-local the same way as

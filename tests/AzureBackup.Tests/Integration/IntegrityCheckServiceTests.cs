@@ -801,6 +801,105 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         Assert.Contains(result.Failures, f => f.FailureReason == "missing-file-record");
     }
 
+    [Fact]
+    public async Task AutoRepair_MissingBlob_ReuploadFixesIt_NoFailureRecordedNoDiag()
+    {
+        // B42: when RepairCallback is wired and the failure is repairable
+        // (missing-blob is on the whitelist), the engine should
+        // 1) re-upload the file via the callback, 2) re-run the per-file
+        // check, 3) suppress the failure entirely if the second pass is
+        // clean -- no .diag, no integrity_check_failures row, and the
+        // run summary shows FilesAutoRepaired = 1.
+        var f = await SeedOneFileAsync("repair-missing.bin", RandomBytes(4096));
+        var firstChunkBlob = $"chunks/{f.Chunks[0].Hash}";
+        await _blobService.DeleteBlobAsync(firstChunkBlob);
+
+        var repairCalls = 0;
+        _integrityService.RepairCallback = async (path, ct) =>
+        {
+            repairCalls++;
+            // forceReupload=true is required: the local DB still records
+            // this file as Completed with an unchanged size+timestamp, so
+            // the metadata-skip fast path would otherwise keep the
+            // missing blob missing.
+            return await _orchestrator.BackupFileAsync(
+                path, progress: null, memoryBudget: null, largeChunkPool: null,
+                forceReupload: true, ct);
+        };
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "Test: auto-repair missing-blob",
+            AutoExportBundleOnFailure = false
+        });
+
+        Assert.Equal(1, repairCalls);
+        Assert.Equal(1, result.Run.FilesChecked);
+        Assert.Equal(1, result.Run.FilesPassed);
+        Assert.Equal(0, result.Run.FilesFailedT1 + result.Run.FilesFailedT2 + result.Run.FilesFailedT3);
+        Assert.Equal(1, result.Run.FilesAutoRepaired);
+        Assert.Empty(result.Failures);
+        // Successful auto-repair leaves no .diag breadcrumb on disk.
+        Assert.Empty(Directory.GetFiles(_diagDir, "*.diag"));
+    }
+
+    [Fact]
+    public async Task AutoRepair_Disabled_FailureStillReported()
+    {
+        // B42: AutoRepairOnFailure=false reverts to the pre-B42 behaviour
+        // even when a callback is wired. Verifies the option actually
+        // gates the repair attempt.
+        var f = await SeedOneFileAsync("repair-disabled.bin", RandomBytes(4096));
+        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+
+        var repairCalls = 0;
+        _integrityService.RepairCallback = (path, ct) =>
+        {
+            repairCalls++;
+            return Task.FromResult(true);
+        };
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "Test: auto-repair disabled",
+            AutoExportBundleOnFailure = false,
+            AutoRepairOnFailure = false
+        });
+
+        Assert.Equal(0, repairCalls);
+        Assert.Equal(1, result.Run.FilesFailedT1);
+        Assert.Equal(0, result.Run.FilesAutoRepaired);
+        Assert.NotEmpty(result.Failures);
+    }
+
+    [Fact]
+    public async Task AutoRepair_CallbackReturnsFalse_OriginalFailureReported()
+    {
+        // B42: when the repair callback signals failure, the engine must
+        // NOT suppress the original integrity failure -- the user has to
+        // see it. Also the .diag is written so audit evidence exists.
+        var f = await SeedOneFileAsync("repair-cb-fail.bin", RandomBytes(4096));
+        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+
+        _integrityService.RepairCallback = (path, ct) => Task.FromResult(false);
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "Test: auto-repair callback failed",
+            AutoExportBundleOnFailure = false
+        });
+
+        Assert.Equal(1, result.Run.FilesFailedT1);
+        Assert.Equal(0, result.Run.FilesAutoRepaired);
+        var failure = Assert.Single(result.Failures);
+        Assert.Equal("missing-blob", failure.FailureReason);
+        Assert.NotNull(failure.DiagFilePath);
+        Assert.True(File.Exists(failure.DiagFilePath!));
+    }
+
     private static byte[] RandomBytes(int size)
     {
         var b = new byte[size];

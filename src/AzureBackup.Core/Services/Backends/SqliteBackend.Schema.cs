@@ -527,6 +527,7 @@ internal sealed partial class SqliteBackend
                 files_failed_t2 INTEGER NOT NULL DEFAULT 0,
                 files_failed_t3 INTEGER NOT NULL DEFAULT 0,
                 files_warning INTEGER NOT NULL DEFAULT 0,
+                files_auto_repaired INTEGER NOT NULL DEFAULT 0,
                 cancelled INTEGER NOT NULL DEFAULT 0,
                 parent_run_id INTEGER NULL,
                 diag_bundle_path TEXT NULL
@@ -569,6 +570,27 @@ internal sealed partial class SqliteBackend
                 EmitDiag("CreateSchema: D6 backfill -- adding expected_encrypted_md5 column to chunk_index");
                 using var alterCmd = _connection.CreateCommand();
                 alterCmd.CommandText = "ALTER TABLE chunk_index ADD COLUMN expected_encrypted_md5 BLOB NULL;";
+                alterCmd.ExecuteNonQuery();
+            }
+        }
+
+        // B43 backfill: idempotently add files_auto_repaired to
+        // integrity_check_runs for databases created before B43. Default
+        // 0 reflects the historical truth: pre-B43 runs had no
+        // auto-repair counter to record (B42 introduced auto-repair but
+        // only stored the count in-memory on the IntegrityCheckRun
+        // returned to the caller). Existing rows therefore correctly
+        // report 0 auto-repaired files; only B43+ runs persist a real
+        // count.
+        using (var probeCmd = _connection.CreateCommand())
+        {
+            probeCmd.CommandText = "SELECT 1 FROM pragma_table_info('integrity_check_runs') WHERE name='files_auto_repaired';";
+            var present = probeCmd.ExecuteScalar();
+            if (present == null)
+            {
+                EmitDiag("CreateSchema: B43 backfill -- adding files_auto_repaired column to integrity_check_runs");
+                using var alterCmd = _connection.CreateCommand();
+                alterCmd.CommandText = "ALTER TABLE integrity_check_runs ADD COLUMN files_auto_repaired INTEGER NOT NULL DEFAULT 0;";
                 alterCmd.ExecuteNonQuery();
             }
         }

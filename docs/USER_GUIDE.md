@@ -155,6 +155,8 @@ The watcher waits up to **5 minutes** for files that are temporarily locked by a
 | Item | What it does |
 |---|---|
 | Backup Selected | Upload checked files to Azure |
+| Force Re-upload Selected (B43) | Re-upload checked files even when nothing changed; bypasses dedup AND the metadata-skip fast path. Use after an integrity-check non-repairable failure or when remote bytes are suspected of being corrupt for a known-good local file. The Preview Dialog still runs so you can confirm the byte volume. |
+| Mirror Sync to Azure | Mirror the selected single watched root to Azure (single-root selection only) |
 | Add Watched Folder... | Add a new folder to the watch list |
 | Remove from Watch List | Remove the selected folder (does not delete from Azure) |
 | Select All / Deselect All | Bulk selection |
@@ -321,7 +323,16 @@ Key controls:
 - **Run** button — start the check; the progress text shows current file and chunk.
 - **History expander** — last 10 runs, click a row to see its failures.
 - **Auto-export bundle on failure** checkbox — when enabled, the first failure in a run automatically writes a diagnostic ZIP to the data directory. The bundle excludes the encrypted database and salt files (sensitive material is redacted), so it is safe to share in a bug report.
+- **Auto-repair on failure** checkbox (B43) — defaults to **on**. When enabled, the engine silently re-uploads and re-checks any file that fails for a repairable reason (missing-blob, wrong-size, md5-mismatch, crc-mismatch, decrypt-failed, byte-differ). Disable it for a forensic run that needs to see the un-repaired failure shape (the failure row and `.diag` file are then preserved exactly as the first pass produced them).
 - Per-file `.diag` files for failures can be opened in your default editor or revealed in the file manager via right-click.
+
+### Automatic repair on failure (B42)
+
+When the integrity check finds a repairable failure (missing blob, wrong size, MD5 mismatch, CRC mismatch, decryption failure, or byte-for-byte mismatch against your local file), it automatically forces a re-upload of the affected file and re-runs the check on it. If the second pass succeeds, **no `.diag` file is written** and **no failure row is recorded** — the run reports the file as passing. The run summary line shows how many files were transparently repaired (e.g. `Integrity check OK -- 1043 files passed (3 auto-repaired).`), and the History expander annotates affected runs with `[auto-repaired N]` so you can see at a glance that the run was not a no-op.
+
+The repair retry is one-shot. If the re-upload fails or the second integrity pass still fails, the failures are reported normally with a `.diag` file flushed (the summary suffix is `(post-auto-repair)` so you can tell it was the post-repair shape, not the original). Failures that re-uploading cannot fix (e.g. local file missing, engine error) are not retried.
+
+This behaviour can be useful to confirm explicitly: delete a chunk via Storage Explorer, run a check, observe a clean result with `auto-repaired 1`. The auto-repair count is persisted on the run row (B43), so the History expander still shows `[auto-repaired N]` after restarting the app. Pre-B43 historical runs always read 0 because the count was not recorded at the time.
 
 ---
 

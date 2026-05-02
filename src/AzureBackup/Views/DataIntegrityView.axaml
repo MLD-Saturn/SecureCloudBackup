@@ -33,6 +33,10 @@
                               IsChecked="{Binding AutoExportBundleOnFailure}"
                               ToolTip.Tip="When any failure occurs, automatically write a diagnostic bundle ZIP next to the data directory. Encrypted DB, salt, and other sensitive files are redacted from the bundle."
                               VerticalAlignment="Center"/>
+                    <CheckBox Content="Auto-repair on failure"
+                              IsChecked="{Binding AutoRepairOnFailure}"
+                              ToolTip.Tip="When a file fails with a repairable reason (missing-blob, wrong-size, md5-mismatch, crc-mismatch, decrypt-failed, byte-differ), force a re-upload and re-check that one file. If the second pass is clean, suppress the failure entirely (no diag, no row in failures). Disable for a forensic run that needs to see the un-repaired failure shape."
+                              VerticalAlignment="Center"/>
                     <Button Content="_Check Now"
                             Command="{Binding CheckNowCommand}"/>
                     <Button Content="Cancel"

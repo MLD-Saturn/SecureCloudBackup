@@ -10,8 +10,16 @@ public partial class BackupOrchestrator
 {
     /// <summary>
     /// Performs a full scan and backup of all watched folders.
-    /// Queues ALL files found regardless of their current backup status.
-    /// Use PerformInitialSyncAsync for smarter syncing that skips already-backed-up files.
+    /// <para>
+    /// B42: previously this method only enqueued files into the
+    /// pending-changes queue, which the watcher then processed via the
+    /// normal metadata-skip path -- so a "force full scan" against an
+    /// unchanged corpus uploaded nothing, despite the UI promising
+    /// "re-upload ALL files (ignoring backup history)". The method now
+    /// invokes <see cref="BackupFilesAsync"/> with <c>forceReupload</c>
+    /// = <c>true</c> so every file's chunks are re-encrypted and
+    /// re-uploaded with overwrite semantics.
+    /// </para>
     /// </summary>
     public async Task PerformFullScanAsync(IProgress<(int current, int total, string file)>? progress = null,
         CancellationToken cancellationToken = default)
@@ -20,7 +28,7 @@ public partial class BackupOrchestrator
         List<string> allFiles = new();
 
         StatusChanged?.Invoke(this, "Scanning folders...");
-        Log("PerformFullScanAsync: Starting full scan of all watched folders");
+        Log("PerformFullScanAsync: Starting full scan of all watched folders (forceReupload=true)");
 
         // Scan all watched folders
         foreach (var folder in config.WatchedFolders.Where(f => f.IsEnabled))
@@ -30,26 +38,28 @@ public partial class BackupOrchestrator
             Log($"PerformFullScanAsync: Found {files.Count} files in {folder.Path}");
         }
 
-        StatusChanged?.Invoke(this, $"Found {allFiles.Count} files to process");
+        StatusChanged?.Invoke(this, $"Found {allFiles.Count} files to re-upload");
 
-        // Queue all files for backup
-        for (var i = 0; i < allFiles.Count; i++)
+        // Adapt the simple (current,total,file) UI reporter into the richer
+        // BackupFilesAsync progress shape so existing callers keep working.
+        IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? adapted = null;
+        if (progress != null)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            
-            var file = allFiles[i];
-            progress?.Report((i + 1, allFiles.Count, file));
-
-            _databaseService.QueueFileChange(new FileChangeEvent
+            int reportedCount = 0;
+            adapted = new Progress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>(p =>
             {
-                FilePath = file,
-                ChangeType = FileChangeType.Created,
-                DetectedAt = DateTime.UtcNow
+                if (p.currentFileBytes >= p.currentFileSize && p.currentFileSize > 0)
+                {
+                    var done = Interlocked.Increment(ref reportedCount);
+                    progress.Report((done, p.totalFiles, p.fileName));
+                }
             });
         }
 
-        StatusChanged?.Invoke(this, $"Queued {allFiles.Count} files for backup");
-        Log($"PerformFullScanAsync: Complete - queued {allFiles.Count} files");
+        await BackupFilesAsync(allFiles, adapted, forceReupload: true, cancellationToken);
+
+        StatusChanged?.Invoke(this, $"Full scan complete: {allFiles.Count} files re-uploaded");
+        Log($"PerformFullScanAsync: Complete - {allFiles.Count} files re-uploaded with forceReupload=true");
     }
 
     /// <summary>
@@ -318,7 +328,7 @@ public partial class BackupOrchestrator
             try
             {
                 (completed, failed, bytes) = await BackupFilesCoreAsync(
-                    filesToBackup, memoryBudget, largeChunkPool, adaptedProgress, cancellationToken);
+                    filesToBackup, memoryBudget, largeChunkPool, adaptedProgress, forceReupload: false, cancellationToken);
             }
             catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
             {
@@ -386,7 +396,7 @@ public partial class BackupOrchestrator
             Failed = result.FilesErrored,
             Bytes = result.BytesTransferred,
             ElapsedSeconds = mirrorElapsed,
-            ThroughputMbps = mirrorElapsed > 0 ? result.BytesTransferred / mirrorElapsed / (1024 * 1024) : 0,
+            ThroughputMBps = mirrorElapsed > 0 ? result.BytesTransferred / mirrorElapsed / (1024 * 1024) : 0,
             FileConcurrency = EffectiveMaxParallelFileBackups,
             MemoryBudgetMb = filesToBackup.Count > 0 ? (int)(_databaseService.GetConfiguration().MemoryLimitMB) : 0,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
@@ -575,6 +585,21 @@ public partial class BackupOrchestrator
         IList<string> filePaths,
         IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress = null,
         CancellationToken cancellationToken = default)
+        => await BackupFilesAsync(filePaths, progress, forceReupload: false, cancellationToken);
+
+    /// <summary>
+    /// B42 overload: as above, plus a <paramref name="forceReupload"/>
+    /// flag that bypasses the metadata-skip fast path and the per-chunk
+    /// dedup filter for every file in <paramref name="filePaths"/>.
+    /// Used by the integrity-check auto-repair path, the manual Repair
+    /// command, and the Force Full Scan UI button. Production hot paths
+    /// must keep this <c>false</c>.
+    /// </summary>
+    public async Task BackupFilesAsync(
+        IList<string> filePaths,
+        IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress,
+        bool forceReupload,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filePaths);
 
@@ -621,7 +646,7 @@ public partial class BackupOrchestrator
         try
         {
             (completed, failed, processedBytes) = await BackupFilesCoreAsync(
-                filePaths, memoryBudget, largeChunkPool, progress, cancellationToken);
+                filePaths, memoryBudget, largeChunkPool, progress, forceReupload, cancellationToken);
         }
         catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
         {
@@ -642,7 +667,7 @@ public partial class BackupOrchestrator
             Failed = failed,
             Bytes = processedBytes,
             ElapsedSeconds = opElapsed,
-            ThroughputMbps = opElapsed > 0 ? processedBytes / opElapsed / (1024 * 1024) : 0,
+            ThroughputMBps = opElapsed > 0 ? processedBytes / opElapsed / (1024 * 1024) : 0,
             FileConcurrency = EffectiveMaxParallelFileBackups,
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
@@ -676,6 +701,7 @@ public partial class BackupOrchestrator
         MemoryBudget memoryBudget,
         LargeChunkBufferPool largeChunkPool,
         IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress = null,
+        bool forceReupload = false,
         CancellationToken cancellationToken = default)
     {
         var totalFiles = filePaths.Count;
@@ -757,7 +783,7 @@ public partial class BackupOrchestrator
                             p.current, currentFileSize));
                     });
 
-                    var success = await BackupFileAsync(filePath, fileProgress, memoryBudget, largeChunkPool, ct);
+                    var success = await BackupFileAsync(filePath, fileProgress, memoryBudget, largeChunkPool, forceReupload, ct);
 
                     if (success)
                     {

@@ -81,6 +81,46 @@ public sealed class IntegrityCheckService
     public Guid SessionId { get; set; }
 
     /// <summary>
+    /// B42: optional callback invoked by the integrity-check engine when
+    /// a file fails its first-pass check with at least one repairable
+    /// reason. The callback should re-upload the file with overwrite
+    /// semantics (i.e. <c>BackupFileAsync(..., forceReupload: true, ...)</c>)
+    /// and return <c>true</c> when the re-upload succeeded.
+    /// <para>
+    /// The engine wires this to <see cref="BackupOrchestrator.BackupFileAsync"/>
+    /// at composition time. Tests that want to exercise the un-repaired
+    /// failure shape leave it null OR set
+    /// <see cref="IntegrityCheckOptions.AutoRepairOnFailure"/> = false.
+    /// </para>
+    /// <para>
+    /// Contract: the callback must NOT throw on a failed re-upload --
+    /// it should catch and return <c>false</c> so the engine can fall
+    /// through to reporting the original failure normally.
+    /// </para>
+    /// </summary>
+    public Func<string, CancellationToken, Task<bool>>? RepairCallback { get; set; }
+
+    /// <summary>
+    /// B42: failure reasons that <see cref="RepairCallback"/> can plausibly
+    /// fix by re-uploading the file. Reasons NOT in this set
+    /// (<c>local-file-missing</c>, <c>local-short-read</c>,
+    /// <c>missing-file-record</c>, <c>invalid-chunk-length</c>,
+    /// <c>engine-error</c>, <c>size-disagreement</c>) describe local-side
+    /// or DB-side problems that re-uploading cannot help, so the engine
+    /// skips auto-repair when ALL failures are non-repairable.
+    /// </summary>
+    private static readonly HashSet<string> RepairableReasons = new(StringComparer.Ordinal)
+    {
+        "missing-blob",
+        "wrong-size",
+        "md5-mismatch",
+        "crc-mismatch",
+        "decrypt-failed",
+        "byte-differ",
+        "download-error"
+    };
+
+    /// <summary>
     /// Event for per-line debug log forwarding to <c>CrashSafeLogger</c>.
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
@@ -153,6 +193,7 @@ public sealed class IntegrityCheckService
         var failuresLock = new object();
         int filesPassed = 0, filesFailedT1 = 0, filesFailedT2 = 0, filesFailedT3 = 0, filesWarning = 0;
         int filesProcessed = 0;
+        int filesAutoRepaired = 0;
         var totalFiles = options.FileIds.Count;
 
         Log($"RunAsync: starting (files={totalFiles}, scope='{options.ScopeSummary}', runId={runId})");
@@ -196,8 +237,12 @@ public sealed class IntegrityCheckService
                 },
                 async (fileId, ct) =>
                 {
-                    var fileFailures = await CheckOneFileAsync(fileId, runId, corpus, t1Sem, t2Sem, ct);
+                    var (fileFailures, autoRepaired) = await CheckOneFileAsync(
+                        fileId, runId, corpus, t1Sem, t2Sem,
+                        options.AutoRepairOnFailure,
+                        ct);
                     var processed = Interlocked.Increment(ref filesProcessed);
+                    if (autoRepaired) Interlocked.Increment(ref filesAutoRepaired);
 
                     int t1 = 0, t2 = 0, t3 = 0, warn = 0;
                     foreach (var f in fileFailures)
@@ -254,6 +299,7 @@ public sealed class IntegrityCheckService
         run.FilesFailedT2 = filesFailedT2;
         run.FilesFailedT3 = filesFailedT3;
         run.FilesWarning = filesWarning;
+        run.FilesAutoRepaired = filesAutoRepaired;
 
         var anyFailure = filesFailedT1 + filesFailedT2 + filesFailedT3 > 0;
         if (anyFailure && options.AutoExportBundleOnFailure && DiagnosticsDirectory is { } dir)
@@ -287,7 +333,8 @@ public sealed class IntegrityCheckService
         });
 
         Log($"RunAsync: complete in {elapsed:F1}s -- passed={filesPassed}, " +
-            $"T1={filesFailedT1}, T2={filesFailedT2}, T3={filesFailedT3}, warn={filesWarning}, cancelled={run.Cancelled}");
+            $"T1={filesFailedT1}, T2={filesFailedT2}, T3={filesFailedT3}, warn={filesWarning}, " +
+            $"autoRepaired={filesAutoRepaired}, cancelled={run.Cancelled}");
 
         return new IntegrityCheckResult
         {
@@ -408,28 +455,196 @@ public sealed class IntegrityCheckService
 
     /// <summary>
     /// T1 + T2 + T3 escalation for a single file. Returns the failures
-    /// produced; an empty list means the file is clean.
+    /// produced (empty list = file is clean) and whether the file was
+    /// transparently repaired by the B42 auto-repair path.
     /// </summary>
-    private async Task<List<IntegrityCheckFailure>> CheckOneFileAsync(
+    /// <remarks>
+    /// B42 auto-repair flow:
+    /// <list type="number">
+    ///   <item>Run the chunk-loop into a per-attempt failures list.</item>
+    ///   <item>If the list is non-empty, <paramref name="autoRepair"/>
+    ///     is true, <see cref="RepairCallback"/> is wired, and at least
+    ///     one failure has a reason in <see cref="RepairableReasons"/>:
+    ///     discard the first-pass diag, invoke the callback to force a
+    ///     re-upload of the entire file, and run the chunk-loop a
+    ///     second time into a fresh failures list.</item>
+    ///   <item>If the second pass is clean, return an empty list with
+    ///     <c>autoRepaired</c> = true. No .diag is flushed; no row is
+    ///     persisted in <c>integrity_check_failures</c>.</item>
+    ///   <item>If the second pass still fails, return its failures
+    ///     normally (with the second-pass diag flushed) so the user
+    ///     sees the post-repair shape.</item>
+    /// </list>
+    /// The retry is one-shot -- no recursion, no escalating retry
+    /// budget. A re-upload that itself produces corruption (or a
+    /// transient Azure outage that re-fails immediately) will surface
+    /// the second-pass failures the way the pre-B42 engine surfaced
+    /// the first-pass ones.
+    /// </remarks>
+    private async Task<(List<IntegrityCheckFailure> failures, bool autoRepaired)> CheckOneFileAsync(
         int fileId, int runId,
         IReadOnlyDictionary<int, BackedUpFile> corpus,
+        SemaphoreSlim t1Sem, SemaphoreSlim t2Sem,
+        bool autoRepair,
+        CancellationToken cancellationToken)
+    {
+        if (!corpus.TryGetValue(fileId, out var fileFromDb))
+        {
+            return (new List<IntegrityCheckFailure>
+            {
+                new()
+                {
+                    RunId = runId,
+                    FileId = fileId,
+                    LocalPath = $"<unknown file id {fileId}>",
+                    FailureTier = 1,
+                    FailureReason = "missing-file-record",
+                    Detail = "{}"
+                }
+            }, false);
+        }
+
+        // First pass.
+        var firstPass = await RunOnePassAsync(fileFromDb, fileId, runId, t1Sem, t2Sem, cancellationToken);
+
+        // Decide whether auto-repair is in play and worth attempting.
+        var canRepair = autoRepair
+            && RepairCallback != null
+            && firstPass.Failures.Any(f => RepairableReasons.Contains(f.FailureReason));
+
+        if (!canRepair)
+        {
+            FlushPassDiag(firstPass.Diag, firstPass.Failures, summarySuffix: null);
+            return (firstPass.Failures, false);
+        }
+
+        // Discard the first-pass diag -- if the repair succeeds we want
+        // ZERO trace of the original failure on disk, matching the
+        // documented contract that successful auto-repair is silent.
+        firstPass.Diag?.Discard();
+
+        Log($"CheckOneFileAsync: '{fileFromDb.LocalPath}' has " +
+            $"{firstPass.Failures.Count} repairable failure(s); attempting auto-repair");
+        Metrics?.RecordDecision("integrity-check-auto-repair", new Dictionary<string, object?>
+        {
+            ["file"] = fileFromDb.LocalPath,
+            ["firstPassFailures"] = firstPass.Failures.Count,
+            ["reasons"] = string.Join(",", firstPass.Failures.Select(f => f.FailureReason).Distinct())
+        });
+
+        bool repairOk;
+        try
+        {
+            repairOk = await RepairCallback!(fileFromDb.LocalPath, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Defensive: callback contract says it must not throw, but
+            // surface the original failures normally if it does.
+            Log($"CheckOneFileAsync: RepairCallback threw {ex.GetType().Name}: {ex.Message} -- reporting original failures");
+            return (firstPass.Failures, false);
+        }
+
+        if (!repairOk)
+        {
+            Log($"CheckOneFileAsync: auto-repair returned false for '{fileFromDb.LocalPath}' -- reporting original failures");
+            Metrics?.RecordDecision("integrity-check-auto-repair-outcome", new Dictionary<string, object?>
+            {
+                ["file"] = fileFromDb.LocalPath,
+                ["firstPassFailures"] = firstPass.Failures.Count,
+                ["outcome"] = "callback-false"
+            });
+            // Re-create + flush the first-pass diag so the user has a record.
+            ReplayFailuresToDiag(fileFromDb, firstPass.Failures);
+            return (firstPass.Failures, false);
+        }
+
+        // Re-read the file's metadata from the DB -- the re-upload will
+        // have replaced the chunk hash list, so the next pass must use
+        // the fresh chunks (otherwise we re-check the OLD hashes that
+        // the backup has just superseded and the check would still
+        // appear failed).
+        var refreshed = _databaseService.GetBackedUpFile(fileFromDb.LocalPath);
+        if (refreshed == null)
+        {
+            Log($"CheckOneFileAsync: file disappeared from DB after repair: '{fileFromDb.LocalPath}'");
+            ReplayFailuresToDiag(fileFromDb, firstPass.Failures);
+            return (firstPass.Failures, false);
+        }
+
+        var secondPass = await RunOnePassAsync(refreshed, fileId, runId, t1Sem, t2Sem, cancellationToken);
+
+        if (secondPass.Failures.Count == 0)
+        {
+            // Silent self-heal: discard the second-pass diag too (no
+            // failures to record) and report the file as clean.
+            secondPass.Diag?.Discard();
+            Log($"CheckOneFileAsync: auto-repair OK for '{fileFromDb.LocalPath}' -- failure suppressed");
+            Metrics?.RecordDecision("integrity-check-auto-repair-outcome", new Dictionary<string, object?>
+            {
+                ["file"] = fileFromDb.LocalPath,
+                ["firstPassFailures"] = firstPass.Failures.Count,
+                ["outcome"] = "healed"
+            });
+            return (new List<IntegrityCheckFailure>(), true);
+        }
+
+        // Second pass still failed -- return THOSE failures (the
+        // post-repair shape, which is the actionable one).
+        Log($"CheckOneFileAsync: auto-repair did not heal '{fileFromDb.LocalPath}' -- " +
+            $"{secondPass.Failures.Count} failure(s) remain after re-upload");
+        Metrics?.RecordDecision("integrity-check-auto-repair-outcome", new Dictionary<string, object?>
+        {
+            ["file"] = fileFromDb.LocalPath,
+            ["firstPassFailures"] = firstPass.Failures.Count,
+            ["secondPassFailures"] = secondPass.Failures.Count,
+            ["outcome"] = "still-failing"
+        });
+        FlushPassDiag(secondPass.Diag, secondPass.Failures, summarySuffix: " (post-auto-repair)");
+        return (secondPass.Failures, false);
+    }
+
+    /// <summary>
+    /// B42: flush a per-pass diag (created by <see cref="RunOnePassAsync"/>)
+    /// to disk and stamp the resulting path onto each failure row's
+    /// <see cref="IntegrityCheckFailure.DiagFilePath"/>. Mirrors the
+    /// pre-B42 inline flush that lived inside <c>CheckOneFileAsync</c>.
+    /// </summary>
+    private static void FlushPassDiag(FileOperationDiagnostics? diag, List<IntegrityCheckFailure> failures, string? summarySuffix)
+    {
+        if (diag == null) return;
+        var summary = failures.Count == 0
+            ? null
+            : $"{failures.Count} failures{summarySuffix ?? string.Empty}: " +
+              string.Join(", ", failures.Select(f => $"{f.FailureReason}@T{f.FailureTier}").Distinct());
+        var diagPath = diag.Flush(summary);
+        foreach (var f in failures.Where(f => f.DiagFilePath == null))
+        {
+            f.DiagFilePath = diagPath;
+        }
+    }
+
+    /// <summary>
+    /// B42: re-runs a single per-file chunk-loop. Returns the failure
+    /// list and a (possibly null) <see cref="FileOperationDiagnostics"/>
+    /// instance that has been Flushed to disk if any failures occurred.
+    /// The caller is responsible for calling <c>Discard()</c> on the
+    /// returned diag when it wants to suppress the .diag (auto-repair
+    /// success path) -- but note that <see cref="FileOperationDiagnostics.Discard"/>
+    /// after a Flush is a no-op, so this method actually returns the
+    /// PRE-flush instance and the caller decides whether to flush or
+    /// discard. See the <c>flushOnFailure</c> argument.
+    /// </summary>
+    private async Task<(List<IntegrityCheckFailure> Failures, FileOperationDiagnostics? Diag)> RunOnePassAsync(
+        BackedUpFile fileFromDb, int fileId, int runId,
         SemaphoreSlim t1Sem, SemaphoreSlim t2Sem,
         CancellationToken cancellationToken)
     {
         var failures = new List<IntegrityCheckFailure>();
-        if (!corpus.TryGetValue(fileId, out var fileFromDb))
-        {
-            failures.Add(new IntegrityCheckFailure
-            {
-                RunId = runId,
-                FileId = fileId,
-                LocalPath = $"<unknown file id {fileId}>",
-                FailureTier = 1,
-                FailureReason = "missing-file-record",
-                Detail = "{}"
-            });
-            return failures;
-        }
 
         // Per-file diag is created lazily so a clean file produces no .diag
         // (option b from the design discussion). It IS created for every
@@ -455,19 +670,17 @@ public sealed class IntegrityCheckService
                 await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, t1Sem, t2Sem, cancellationToken);
             }
 
-            // Always flush the diag if it was created (i.e., any failure).
-            if (diag != null)
-            {
-                var summary = failures.Count == 0
-                    ? null
-                    : $"{failures.Count} failures: " +
-                      string.Join(", ", failures.Select(f => $"{f.FailureReason}@T{f.FailureTier}").Distinct());
-                var diagPath = diag.Flush(summary);
-                foreach (var f in failures.Where(f => f.DiagFilePath == null))
-                {
-                    f.DiagFilePath = diagPath;
-                }
-            }
+            // Flush the diag if it was created (i.e., any failure). The
+            // B42 auto-repair path may later Discard if it succeeds in
+            // healing the file -- but Discard after Flush is a no-op, so
+            // we DEFER flushing for the first pass when the caller can
+            // still discard. Resolution: only flush here when there ARE
+            // failures, and let the auto-repair caller call Discard
+            // BEFORE the file is written.
+            // Actually, FileOperationDiagnostics.Flush writes to disk
+            // immediately, so we must NOT call Flush in the inner pass
+            // and instead let the caller decide. Return the unflushed
+            // diag so the auto-repair path can Discard it.
         }
         catch (OperationCanceledException)
         {
@@ -477,7 +690,7 @@ public sealed class IntegrityCheckService
         catch (Exception ex)
         {
             // Engine-level failure on a single file shouldn't abort the run.
-            Log($"CheckOneFileAsync: {fileFromDb.LocalPath}: {ex.GetType().Name}: {ex.Message}");
+            Log($"RunOnePassAsync: {fileFromDb.LocalPath}: {ex.GetType().Name}: {ex.Message}");
             if (diag != null)
             {
                 diag.RecordError("CheckOneFileAsync", ex);
@@ -492,10 +705,36 @@ public sealed class IntegrityCheckService
                     Detail = Detail(("exception", ex.GetType().Name), ("message", ex.Message)),
                     DiagFilePath = diagPath
                 });
+                // Return null diag so caller doesn't try to flush again.
+                return (failures, null);
             }
         }
 
-        return failures;
+        return (failures, diag);
+    }
+
+    /// <summary>
+    /// B42: when auto-repair was attempted but failed (callback returned
+    /// false or threw), we still need to write a .diag for the original
+    /// failure so the user has audit evidence. This helper recreates the
+    /// diag from the failure list (one chunk record per failure) and
+    /// flushes it to disk, mirroring the pre-B42 behaviour.
+    /// </summary>
+    private void ReplayFailuresToDiag(BackedUpFile file, List<IntegrityCheckFailure> failures)
+    {
+        if (failures.Count == 0) return;
+        var diag = new FileOperationDiagnostics(file.LocalPath, "IntegrityCheck", DiagnosticsDirectory);
+        foreach (var f in failures)
+        {
+            diag.Record($"[T{f.FailureTier}] {f.FailureReason} chunk={f.ChunkHash} detail={f.Detail}");
+        }
+        var summary = $"{failures.Count} failures (auto-repair attempted but did not heal): " +
+                      string.Join(", ", failures.Select(f => $"{f.FailureReason}@T{f.FailureTier}").Distinct());
+        var diagPath = diag.Flush(summary);
+        foreach (var f in failures.Where(f => f.DiagFilePath == null))
+        {
+            f.DiagFilePath = diagPath;
+        }
     }
 
     /// <summary>

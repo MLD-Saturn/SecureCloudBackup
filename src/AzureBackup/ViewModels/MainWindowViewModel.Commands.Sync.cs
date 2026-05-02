@@ -280,6 +280,41 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
+    /// B43: Forces a re-upload of the selected local files, bypassing
+    /// the metadata-skip fast path AND per-chunk dedup. Use this when
+    /// remote bytes are suspected of being corrupt or missing for a
+    /// known-good local file (e.g. after an integrity check failed for
+    /// a non-repairable reason, or after manual blob tampering during
+    /// testing). The preview confirmation still runs so the user can
+    /// see the byte volume that is about to be re-uploaded.
+    /// </summary>
+    [RelayCommand]
+    private async Task ForceReuploadSelectedLocalFilesAsync()
+    {
+        if (!IsInitialized)
+        {
+            AddLog("Please initialize first");
+            return;
+        }
+
+        if (!_blobService.IsConnected)
+        {
+            AddLog("Not connected to Azure Storage. Please check your connection settings.");
+            return;
+        }
+
+        var selectedFiles = GetSelectedLocalFiles().ToList();
+        if (selectedFiles.Count == 0)
+        {
+            AddLog("No local files selected for force re-upload");
+            return;
+        }
+
+        AddLog($"Preparing to FORCE RE-UPLOAD {selectedFiles.Count} selected file(s) (bypassing dedup and metadata-skip)...");
+        await ConfirmAndExecuteBackupAsync(selectedFiles.Select(f => f.FullPath).ToList(), forceReupload: true);
+    }
+
+    /// <summary>
     /// Returns true when a single root watched folder is selected on the left pane,
     /// enabling the Mirror Sync to Azure operation.
     /// </summary>
@@ -462,7 +497,7 @@ public partial class MainWindowViewModel
 
                 if (backupResult.HasValue)
                 {
-                    await ExecuteBackupAsync(backupResult.Value.files, backupResult.Value.preview, _operationCts.Token);
+                    await ExecuteBackupAsync(backupResult.Value.files, backupResult.Value.preview, forceReupload: false, _operationCts.Token);
                 }
                 else
                 {

@@ -28,10 +28,12 @@ internal sealed partial class SqliteBackend
                         (started_utc, finished_utc, session_id, scope_summary,
                          files_checked, files_passed, files_failed_t1,
                          files_failed_t2, files_failed_t3, files_warning,
+                         files_auto_repaired,
                          cancelled, parent_run_id, diag_bundle_path)
                     VALUES
                         ($started, $finished, $session, $scope,
                          $checked, $passed, $f1, $f2, $f3, $warn,
+                         $autorepaired,
                          $cancelled, $parent, $bundle);
                     SELECT last_insert_rowid();
                     """;
@@ -45,6 +47,7 @@ internal sealed partial class SqliteBackend
                 cmd.Parameters.AddWithValue("$f2", run.FilesFailedT2);
                 cmd.Parameters.AddWithValue("$f3", run.FilesFailedT3);
                 cmd.Parameters.AddWithValue("$warn", run.FilesWarning);
+                cmd.Parameters.AddWithValue("$autorepaired", run.FilesAutoRepaired);
                 cmd.Parameters.AddWithValue("$cancelled", run.Cancelled ? 1 : 0);
                 cmd.Parameters.AddWithValue("$parent", (object?)run.ParentRunId ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("$bundle", (object?)run.DiagBundlePath ?? DBNull.Value);
@@ -83,6 +86,7 @@ internal sealed partial class SqliteBackend
                         files_failed_t2 = $f2,
                         files_failed_t3 = $f3,
                         files_warning = $warn,
+                        files_auto_repaired = $autorepaired,
                         cancelled = $cancelled,
                         diag_bundle_path = $bundle
                     WHERE id = $id;
@@ -94,6 +98,7 @@ internal sealed partial class SqliteBackend
                 cmd.Parameters.AddWithValue("$f2", run.FilesFailedT2);
                 cmd.Parameters.AddWithValue("$f3", run.FilesFailedT3);
                 cmd.Parameters.AddWithValue("$warn", run.FilesWarning);
+                cmd.Parameters.AddWithValue("$autorepaired", run.FilesAutoRepaired);
                 cmd.Parameters.AddWithValue("$cancelled", run.Cancelled ? 1 : 0);
                 cmd.Parameters.AddWithValue("$bundle", (object?)run.DiagBundlePath ?? DBNull.Value);
                 cmd.Parameters.AddWithValue("$id", run.Id);
@@ -159,7 +164,8 @@ internal sealed partial class SqliteBackend
                 SELECT id, started_utc, finished_utc, session_id, scope_summary,
                        files_checked, files_passed, files_failed_t1,
                        files_failed_t2, files_failed_t3, files_warning,
-                       cancelled, parent_run_id, diag_bundle_path
+                       cancelled, parent_run_id, diag_bundle_path,
+                       files_auto_repaired
                 FROM integrity_check_runs
                 ORDER BY started_utc DESC
                 LIMIT $limit;
@@ -265,7 +271,8 @@ internal sealed partial class SqliteBackend
             FilesWarning = reader.GetInt32(10),
             Cancelled = reader.GetInt32(11) != 0,
             ParentRunId = reader.IsDBNull(12) ? null : reader.GetInt32(12),
-            DiagBundlePath = reader.IsDBNull(13) ? null : reader.GetString(13)
+            DiagBundlePath = reader.IsDBNull(13) ? null : reader.GetString(13),
+            FilesAutoRepaired = reader.GetInt32(14)
         };
     }
 

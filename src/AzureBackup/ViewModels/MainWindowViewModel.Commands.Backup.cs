@@ -278,7 +278,13 @@ public partial class MainWindowViewModel
     /// Full backup lifecycle: preview → confirm → filter exclusions → execute with progress → cleanup.
     /// All file-based backup entry points delegate to this method for consistent behavior.
     /// </summary>
-    private async Task ConfirmAndExecuteBackupAsync(List<string> filePaths)
+    /// <param name="forceReupload">B43: when true, the orchestrator bypasses
+    /// the metadata-skip fast path and the per-chunk dedup filter for every
+    /// file in the input list. Used by the Sync tab's Force re-upload
+    /// command to recover files whose remote bytes are corrupt or missing
+    /// without re-checking via integrity-check first. Default false matches
+    /// the historical Backup Selected behaviour.</param>
+    private async Task ConfirmAndExecuteBackupAsync(List<string> filePaths, bool forceReupload = false)
     {
         IsOperationInProgress = true;
         CreateOperationCts();
@@ -288,7 +294,7 @@ public partial class MainWindowViewModel
             var result = await ConfirmAndFilterBackupFilesAsync(filePaths, _operationCts!.Token);
             if (result is null) return;
 
-            await ExecuteBackupAsync(result.Value.files, result.Value.preview, _operationCts.Token);
+            await ExecuteBackupAsync(result.Value.files, result.Value.preview, forceReupload, _operationCts.Token);
 
             RefreshStatistics();
         }
@@ -382,6 +388,7 @@ public partial class MainWindowViewModel
     private async Task ExecuteBackupAsync(
         List<string> filePaths,
         OperationPreview preview,
+        bool forceReupload,
         CancellationToken cancellationToken)
     {
         var totalFiles = preview.IncludedCreateCount + preview.IncludedOverwriteCount;
@@ -485,7 +492,7 @@ public partial class MainWindowViewModel
             }
         });
 
-        await _orchestrator.BackupFilesAsync(filePaths, progress, cancellationToken);
+        await _orchestrator.BackupFilesAsync(filePaths, progress, forceReupload, cancellationToken);
 
         // Show completion summary
         ProgressTab.CompleteOperation(completedFiles.Count, totalFiles - completedFiles.Count, 0, totalBytes);

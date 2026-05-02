@@ -422,7 +422,7 @@ public partial class RestoreService
                     ChunkMin = sortedChunks[0].Length,
                     ChunkMax = sortedChunks[0].Length,
                     ElapsedSeconds = singleElapsed,
-                    ThroughputMbps = singleElapsed > 0 ? file.FileSize / singleElapsed / (1024 * 1024) : 0,
+                    ThroughputMBps = singleElapsed > 0 ? file.FileSize / singleElapsed / (1024 * 1024) : 0,
                     EffectiveConcurrency = 1
                 });
             }
@@ -958,7 +958,7 @@ public partial class RestoreService
             ChunkMin = sortedChunks.Min(c => c.Length),
             ChunkMax = maxChunkBytes,
             ElapsedSeconds = fileElapsed,
-            ThroughputMbps = fileElapsed > 0 ? file.FileSize / fileElapsed / (1024 * 1024) : 0,
+            ThroughputMBps = fileElapsed > 0 ? file.FileSize / fileElapsed / (1024 * 1024) : 0,
             EffectiveConcurrency = effectiveConcurrency,
             BudgetStalls = (int)(memoryBudget.StallCount - stallCountBaseline),
             Retries = Volatile.Read(ref metricRetries),

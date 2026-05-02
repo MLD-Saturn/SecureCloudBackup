@@ -53,6 +53,24 @@ public sealed class IntegrityCheckOptions
     /// column. The tester then has a single attachment to share.
     /// </summary>
     public bool AutoExportBundleOnFailure { get; init; } = true;
+
+    /// <summary>
+    /// B42: when true (the default) and a file fails the integrity
+    /// check with at least one repairable reason (missing-blob,
+    /// wrong-size, md5-mismatch, crc-mismatch, decrypt-failed,
+    /// byte-differ), AND <see cref="IntegrityCheckService.RepairCallback"/>
+    /// is wired up, the engine transparently triggers a forced
+    /// re-upload of the file and re-runs the per-file check. If the
+    /// second pass is clean the failure is suppressed: no .diag is
+    /// written for it and no row is persisted in
+    /// <c>integrity_check_failures</c>. If the second pass still fails,
+    /// the post-repair failures are reported normally.
+    /// <para>
+    /// Set to false in tests that want to assert the un-repaired
+    /// failure shape, or in CI runs where re-uploading is undesirable.
+    /// </para>
+    /// </summary>
+    public bool AutoRepairOnFailure { get; init; } = true;
 }
 
 /// <summary>
@@ -122,6 +140,23 @@ public sealed class IntegrityCheckRun
     /// Path to a diagnostic bundle ZIP if one was auto-generated, else null.
     /// </summary>
     public string? DiagBundlePath { get; set; }
+
+    /// <summary>
+    /// B42: number of files in this run that were transparently repaired
+    /// by the integrity-check auto-repair path. These files had at least
+    /// one failure on the first pass, but a forced re-upload + re-check
+    /// produced a clean result so the failure was suppressed (no .diag,
+    /// no row in integrity_check_failures). The figure is informational
+    /// only; it is reported in the run summary and surfaced in the UI
+    /// status line so the user knows the run wasn't a no-op.
+    /// <para>
+    /// B43: now persisted to the <c>integrity_check_runs.files_auto_repaired</c>
+    /// SQL column, so historical rows shown in the History expander
+    /// retain the value across app restarts. Pre-B43 rows backfill to 0
+    /// (which is the historical truth: the count was not recorded).
+    /// </para>
+    /// </summary>
+    public int FilesAutoRepaired { get; set; }
 }
 
 /// <summary>

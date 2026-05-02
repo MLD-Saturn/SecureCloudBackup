@@ -250,8 +250,22 @@ public sealed class FileMetrics : MetricsRecord
     /// <summary>Wall-clock time for this file in seconds.</summary>
     public double ElapsedSeconds { get; set; }
 
-    /// <summary>Effective throughput in MB/s for this file.</summary>
-    public double ThroughputMbps { get; set; }
+    /// <summary>
+    /// Effective throughput for this file in MEGABYTES per second
+    /// (bytes / elapsedSeconds / 1048576).
+    /// <para>
+    /// B43: renamed from <c>ThroughputMbps</c>. The old name advertised
+    /// megabits-per-second but the producer formula at every call site
+    /// divides by 1024*1024 (i.e., produces megabytes per second). The
+    /// formula is correct; the label was wrong by a factor of 8 and that
+    /// silently misled every downstream throughput comparison. The JSONL
+    /// key is pinned via <see cref="JsonPropertyNameAttribute"/> to the
+    /// fully unambiguous <c>throughput_mbytes_per_sec</c> so post-hoc
+    /// grep tools cannot accidentally inherit the old wrong label.
+    /// </para>
+    /// </summary>
+    [JsonPropertyName("throughput_mbytes_per_sec")]
+    public double ThroughputMBps { get; set; }
 
     // ── Backup-specific fields ──
 
@@ -302,8 +316,13 @@ public sealed class OperationMetrics : MetricsRecord
     /// <summary>Wall-clock time for the entire operation in seconds.</summary>
     public double ElapsedSeconds { get; set; }
 
-    /// <summary>Overall throughput in MB/s.</summary>
-    public double ThroughputMbps { get; set; }
+    /// <summary>
+    /// Overall throughput in MEGABYTES per second
+    /// (bytes / elapsedSeconds / 1048576). See the matching property on
+    /// <see cref="FileMetrics"/> for the B43 rename rationale.
+    /// </summary>
+    [JsonPropertyName("throughput_mbytes_per_sec")]
+    public double ThroughputMBps { get; set; }
 
     /// <summary>Maximum file-level parallelism used.</summary>
     public int FileConcurrency { get; set; }

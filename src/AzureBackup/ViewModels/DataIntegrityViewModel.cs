@@ -109,6 +109,19 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     private bool _autoExportBundleOnFailure = true;
 
     /// <summary>
+    /// B43: whether the integrity check engine is allowed to silently
+    /// re-upload and re-check files that fail with a repairable reason
+    /// (missing-blob, wrong-size, md5-mismatch, crc-mismatch,
+    /// decrypt-failed, byte-differ). Default ON matches
+    /// <see cref="IntegrityCheckOptions.AutoRepairOnFailure"/>.
+    /// Bound to a checkbox on the Data Integrity tab; the user can
+    /// disable it for a forensic run that wants to see the un-repaired
+    /// failure shape.
+    /// </summary>
+    [ObservableProperty]
+    private bool _autoRepairOnFailure = true;
+
+    /// <summary>
     /// D10: count of chunks awaiting MD5 backfill. Drives the visibility
     /// and label of the "Promote pre-D6 chunks" button. Refreshed on
     /// tree-load and after each backfill run.
@@ -452,7 +465,8 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
         {
             FileIds = fileIds,
             ScopeSummary = scopeSummary,
-            AutoExportBundleOnFailure = AutoExportBundleOnFailure
+            AutoExportBundleOnFailure = AutoExportBundleOnFailure,
+            AutoRepairOnFailure = AutoRepairOnFailure
         };
 
         var progress = new Progress<IntegrityCheckProgress>(p =>
@@ -529,7 +543,8 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
             ScopeSummary = $"Re-check failures from run #{parentRun.Id} ({ids.Count} files)",
             IsReCheckOfFailures = true,
             ParentRunId = parentRun.Id,
-            AutoExportBundleOnFailure = AutoExportBundleOnFailure
+            AutoExportBundleOnFailure = AutoExportBundleOnFailure,
+            AutoRepairOnFailure = AutoRepairOnFailure
         };
 
         var progress = new Progress<IntegrityCheckProgress>(p =>
@@ -740,7 +755,13 @@ public sealed class IntegrityCheckRunViewModel
         {
             var totalFailures = Run.FilesFailedT1 + Run.FilesFailedT2 + Run.FilesFailedT3;
             var status = Run.Cancelled ? "[cancelled]" : totalFailures == 0 ? "[ok]" : $"[{totalFailures} failed]";
-            return $"#{Run.Id}  {Run.StartedUtc.ToLocalTime():g}  {status}  {Run.ScopeSummary}";
+            // B42: surface auto-repair count when the most recent run
+            // healed at least one file. The value lives only on the
+            // in-memory Run instance from the run that produced it
+            // (not persisted), so historical rows always show the
+            // bare header.
+            var repaired = Run.FilesAutoRepaired > 0 ? $" [auto-repaired {Run.FilesAutoRepaired}]" : string.Empty;
+            return $"#{Run.Id}  {Run.StartedUtc.ToLocalTime():g}  {status}{repaired}  {Run.ScopeSummary}";
         }
     }
 

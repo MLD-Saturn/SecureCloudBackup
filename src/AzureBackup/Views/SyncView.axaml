@@ -180,6 +180,10 @@
                             <ContextMenu>
                                 <MenuItem Header="Backup Selected" Command="{Binding BackupSelectedLocalFilesCommand}"
                                           IsEnabled="{Binding HasSelectedLocalFiles}"/>
+                                <MenuItem Header="Force Re-upload Selected"
+                                          Command="{Binding ForceReuploadSelectedLocalFilesCommand}"
+                                          IsEnabled="{Binding HasSelectedLocalFiles}"
+                                          ToolTip.Tip="Bypasses dedup and the metadata-skip fast path. Use after an integrity-check non-repairable failure or to recover suspected remote corruption for files whose local copy is known-good."/>
                                 <MenuItem Header="Mirror Sync to Azure" Command="{Binding MirrorSyncToAzureCommand}"
                                           IsEnabled="{Binding CanMirrorSyncToAzure}"/>
                                 <Separator/>
