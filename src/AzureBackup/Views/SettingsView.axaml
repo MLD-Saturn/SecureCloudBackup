@@ -369,6 +369,47 @@
                                     ToolTip.Tip="Move the corrupt catalog aside (bytes preserved) and route to first-run setup"/>
                         </StackPanel>
                     </StackPanel>
+
+                    <!-- B51: Rebuild from quarantined catalog -->
+                    <Separator Margin="0,8,0,0"/>
+                    <TextBlock Text="Rebuild from quarantined catalog (recovery)" FontWeight="SemiBold" Margin="0,8,0,0"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                               Text="If you previously quarantined a catalog with the button above, you can rebuild a fresh local catalog at the active path using the quarantined database file plus its matching .salt sidecar. The original password is required to read the encryption salt that was stored inside the quarantined database; you must also supply the Azure connection string and container name because those values are not recoverable from the quarantined catalog. The quarantined files are opened read-only and their bytes are not modified. Wrong-password attempts surface as 'Invalid password' and do NOT touch the active catalog path."/>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding !IsRebuildFromQuarantinePending}">
+                        <Button Content="Rebuild From Quarantined Catalog..."
+                                Command="{Binding RequestRebuildFromQuarantineCommand}"
+                                ToolTip.Tip="Open the rebuild form: select the quarantined database, salt sidecar, original password, and Azure connection details."/>
+                    </StackPanel>
+
+                    <StackPanel IsVisible="{Binding IsRebuildFromQuarantinePending}" Spacing="6">
+                        <TextBlock Text="Quarantined database file"/>
+                        <TextBox Text="{Binding RebuildQuarantinedDbPath}"
+                                 Watermark="C:\path\to\backup.db.quarantine-yyyyMMdd-HHmmss"/>
+
+                        <TextBlock Text="Quarantined salt sidecar"/>
+                        <TextBox Text="{Binding RebuildQuarantinedSaltPath}"
+                                 Watermark="C:\path\to\backup.db.salt.quarantine-yyyyMMdd-HHmmss"/>
+
+                        <TextBlock Text="Original password"/>
+                        <TextBox Text="{Binding RebuildQuarantinedPassword}" PasswordChar="*"/>
+
+                        <TextBlock Text="Azure connection string"/>
+                        <TextBox Text="{Binding RebuildConnectionString}" PasswordChar="*"
+                                 Watermark="DefaultEndpointsProtocol=https;AccountName=..."/>
+
+                        <TextBlock Text="Container name"/>
+                        <TextBox Text="{Binding RebuildContainerName}"/>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="Cancel"
+                                    Command="{Binding CancelRebuildFromQuarantineCommand}"/>
+                            <Button Content="Confirm Rebuild"
+                                    Command="{Binding ConfirmRebuildFromQuarantineCommand}"
+                                    Background="SteelBlue" Foreground="White"
+                                    ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from Azure metadata."/>
+                        </StackPanel>
+                    </StackPanel>
                 </StackPanel>
             </Border>
             </StackPanel>

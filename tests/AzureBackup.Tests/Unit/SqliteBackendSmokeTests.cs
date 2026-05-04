@@ -725,4 +725,122 @@ public class SqliteBackendSmokeTests : IDisposable
             () => LocalDatabaseService.QuarantineCorruptDatabase(missing));
         Assert.Equal(missing, ex.FileName);
     }
+
+    [Fact]
+    public void ReadPasswordSaltFromQuarantinedCatalog_WithCorrectPassword_ReturnsStoredSalt()
+    {
+        // B51: the rebuild-from-quarantined-catalog flow needs exactly
+        // one field from the dead catalog -- the in-database
+        // PasswordSalt that the Azure encryption key was derived from.
+        // Everything else (connection string, container) the user
+        // re-enters. This test seeds a real catalog with a known
+        // PasswordSalt, quarantines it via the same code path the
+        // Settings UI uses, and proves the helper reads that salt
+        // back through the read-only quarantined-DB open.
+        const string password = "Quarantine-B51-Password!";
+        var seededSalt = new byte[16];
+        for (int i = 0; i < seededSalt.Length; i++) seededSalt[i] = (byte)(i + 1);
+
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, password.AsSpan());
+            backend.SaveConfiguration(new BackupConfiguration
+            {
+                ContainerName = "rebuild-test",
+                PasswordSalt = seededSalt,
+            });
+            backend.Checkpoint();
+        }
+
+        var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+        var quarantinedSaltSidecar =
+            _dbPath + ".salt" + quarantine.QuarantinedDatabasePath[_dbPath.Length..];
+        Assert.True(File.Exists(quarantinedSaltSidecar),
+            "quarantined salt sidecar must exist for the helper to consume");
+
+        var recoveredSalt = SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
+            quarantine.QuarantinedDatabasePath,
+            quarantinedSaltSidecar,
+            password.AsSpan());
+
+        Assert.NotNull(recoveredSalt);
+        Assert.Equal(seededSalt, recoveredSalt);
+    }
+
+    [Fact]
+    public void ReadPasswordSaltFromQuarantinedCatalog_WithWrongPassword_ThrowsInvalidPasswordException()
+    {
+        // B51: the helper must NOT silently return garbage when the
+        // password is wrong. The validate-key probe inside
+        // OpenAndUnlockCore is the single oracle for password
+        // correctness; if it ever lets a partial decrypt through,
+        // the rebuild flow would derive an Azure key from random
+        // bytes and the user would never know why no blob decrypts.
+        const string realPassword = "Correct-B51-Password!";
+        const string wrongPassword = "Wrong-B51-Password!";
+
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, realPassword.AsSpan());
+            backend.SaveConfiguration(new BackupConfiguration
+            {
+                PasswordSalt = new byte[16],
+            });
+            backend.Checkpoint();
+        }
+
+        var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+        var quarantinedSaltSidecar =
+            _dbPath + ".salt" + quarantine.QuarantinedDatabasePath[_dbPath.Length..];
+
+        Assert.Throws<InvalidPasswordException>(() =>
+            SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
+                quarantine.QuarantinedDatabasePath,
+                quarantinedSaltSidecar,
+                wrongPassword.AsSpan()));
+    }
+
+    [Fact]
+    public void ReadPasswordSaltFromQuarantinedCatalog_WithMissingSaltSidecar_ThrowsFileNotFoundException()
+    {
+        // B51: callers should see the offending path, not a vague
+        // "salt is wrong size" message, when the user picks the DB
+        // file but forgets to also restore its salt sidecar.
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, "AnyPassword123!".AsSpan());
+        }
+        var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+        var missingSalt = Path.Combine(_testDir, "does-not-exist.salt");
+
+        var ex = Assert.Throws<FileNotFoundException>(() =>
+            SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
+                quarantine.QuarantinedDatabasePath,
+                missingSalt,
+                "AnyPassword123!".AsSpan()));
+        Assert.Equal(missingSalt, ex.FileName);
+    }
+
+    [Fact]
+    public void ReadPasswordSaltFromQuarantinedCatalog_WithMismatchedSaltSize_ThrowsInvalidOperationException()
+    {
+        // B51: a sidecar from a different quarantine event (or a
+        // truncated/garbage file) must fail loudly rather than be
+        // padded into a derivation that produces a deterministic
+        // wrong key.
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_dbPath, "AnyPassword123!".AsSpan());
+        }
+        var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
+
+        var bogusSalt = Path.Combine(_testDir, "bogus.salt");
+        File.WriteAllBytes(bogusSalt, new byte[8]); // too small
+
+        Assert.Throws<InvalidOperationException>(() =>
+            SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
+                quarantine.QuarantinedDatabasePath,
+                bogusSalt,
+                "AnyPassword123!".AsSpan()));
+    }
 }

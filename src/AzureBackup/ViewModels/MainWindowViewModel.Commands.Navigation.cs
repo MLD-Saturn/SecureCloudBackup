@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using AzureBackup.Core;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
@@ -442,6 +444,117 @@ public partial class MainWindowViewModel
         {
             AddLog($"Quarantine failed: {ex.GetType().Name}: {ex.Message}");
             System.Diagnostics.Debug.WriteLine($"Quarantine error: {ex}");
+        }
+        finally
+        {
+            IsOperationInProgress = false;
+        }
+    }
+
+    #endregion
+
+    #region B51 Rebuild From Quarantined Catalog
+
+    /// <summary>
+    /// B51: opens the rebuild-from-quarantined-catalog form in the
+    /// Settings danger zone. The form collects the quarantined DB and
+    /// salt sidecar paths, the original password, and fresh Azure
+    /// connection details so the orchestrator can recover the
+    /// in-database PasswordSalt and rebuild the local catalog from
+    /// Azure metadata.
+    /// </summary>
+    [RelayCommand]
+    private void RequestRebuildFromQuarantine()
+    {
+        IsRebuildFromQuarantinePending = true;
+        AddLog("Rebuild from quarantined catalog requested. Provide the quarantined database file, " +
+               "the matching .salt sidecar, the original password used with the quarantined catalog, " +
+               "and the Azure connection string + container that contain the backed-up data.");
+    }
+
+    /// <summary>
+    /// B51: cancels a pending rebuild-from-quarantined-catalog request
+    /// and clears the secret form fields.
+    /// </summary>
+    [RelayCommand]
+    private void CancelRebuildFromQuarantine()
+    {
+        IsRebuildFromQuarantinePending = false;
+        RebuildQuarantinedPassword = string.Empty;
+        RebuildConnectionString = string.Empty;
+        AddLog("Rebuild from quarantined catalog cancelled.");
+    }
+
+    /// <summary>
+    /// B51: executes the rebuild. Wraps
+    /// <see cref="BackupOrchestrator.RebuildFromQuarantinedCatalogAsync"/>
+    /// against the active catalog path
+    /// (<see cref="AppMode.DatabasePath"/>). Recovered failures
+    /// (wrong password, missing sidecar, mismatched salt size) are
+    /// surfaced as user-readable log lines; the active catalog file
+    /// is NOT created on a failed attempt.
+    /// </summary>
+    [RelayCommand]
+    private async Task ConfirmRebuildFromQuarantineAsync()
+    {
+        if (!IsRebuildFromQuarantinePending)
+        {
+            AddLog("Please click 'Rebuild From Quarantined Catalog...' first.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(RebuildQuarantinedDbPath) ||
+            string.IsNullOrWhiteSpace(RebuildQuarantinedSaltPath) ||
+            string.IsNullOrWhiteSpace(RebuildQuarantinedPassword) ||
+            string.IsNullOrWhiteSpace(RebuildConnectionString) ||
+            string.IsNullOrWhiteSpace(RebuildContainerName))
+        {
+            AddLog("All five fields are required: quarantined DB path, salt sidecar path, " +
+                   "password, Azure connection string, and container name.");
+            return;
+        }
+
+        IsOperationInProgress = true;
+        try
+        {
+            var dbPath = AppMode.DatabasePath;
+            AddLog($"Rebuilding fresh catalog at {dbPath} from quarantined source...");
+            AddLog($"  Quarantined DB:   {RebuildQuarantinedDbPath}");
+            AddLog($"  Quarantined salt: {RebuildQuarantinedSaltPath}");
+
+            await _orchestrator.RebuildFromQuarantinedCatalogAsync(
+                RebuildQuarantinedDbPath,
+                RebuildQuarantinedSaltPath,
+                RebuildQuarantinedPassword.AsMemory(),
+                RebuildConnectionString,
+                RebuildContainerName,
+                dbPath);
+
+            AddLog("Rebuild complete. The fresh catalog can be unlocked with the same password " +
+                   "you used for the quarantined catalog. Restart the app or unlock from the " +
+                   "Settings view to continue.");
+
+            IsRebuildFromQuarantinePending = false;
+            RebuildQuarantinedPassword = string.Empty;
+            RebuildConnectionString = string.Empty;
+        }
+        catch (InvalidPasswordException)
+        {
+            AddLog("Rebuild failed: the password does not match the quarantined catalog. " +
+                   "The active catalog file at the rebuild target was NOT created.");
+        }
+        catch (FileNotFoundException ex)
+        {
+            AddLog($"Rebuild failed: file not found -- {ex.FileName ?? ex.Message}");
+        }
+        catch (InvalidOperationException ex)
+        {
+            AddLog($"Rebuild failed: {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Rebuild failed: {ex.GetType().Name}: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"Rebuild error: {ex}");
         }
         finally
         {

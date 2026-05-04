@@ -232,6 +232,36 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     [ObservableProperty]
     private bool _isQuarantinePending;
 
+    /// <summary>
+    /// B51: True when the rebuild-from-quarantined-catalog form is
+    /// expanded in the Settings danger zone. The form collects the
+    /// quarantined DB + salt sidecar paths and the original password
+    /// so the orchestrator can recover the in-DB <c>PasswordSalt</c>
+    /// and rebuild a fresh catalog from Azure metadata.
+    /// </summary>
+    [ObservableProperty]
+    private bool _isRebuildFromQuarantinePending;
+
+    /// <summary>B51: full path to the quarantined catalog database file.</summary>
+    [ObservableProperty]
+    private string _rebuildQuarantinedDbPath = string.Empty;
+
+    /// <summary>B51: full path to the matching quarantined .salt sidecar.</summary>
+    [ObservableProperty]
+    private string _rebuildQuarantinedSaltPath = string.Empty;
+
+    /// <summary>B51: original password the quarantined catalog was protected with.</summary>
+    [ObservableProperty]
+    private string _rebuildQuarantinedPassword = string.Empty;
+
+    /// <summary>B51: Azure storage connection string supplied by the user for the rebuild.</summary>
+    [ObservableProperty]
+    private string _rebuildConnectionString = string.Empty;
+
+    /// <summary>B51: Azure container name supplied by the user for the rebuild.</summary>
+    [ObservableProperty]
+    private string _rebuildContainerName = "backup";
+
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(PasswordMismatch))]

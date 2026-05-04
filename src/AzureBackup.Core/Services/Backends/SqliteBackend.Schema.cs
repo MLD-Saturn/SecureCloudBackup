@@ -212,6 +212,98 @@ internal sealed partial class SqliteBackend
         }
     }
 
+    /// <summary>
+    /// B51: opens a quarantined catalog read-only using a caller-supplied
+    /// salt sidecar (NOT the on-disk <c>.salt</c> next to the file) and
+    /// returns the single value the rebuild flow needs to talk to Azure:
+    /// the 16-byte <c>password_salt</c> stored inside the encrypted
+    /// <c>config</c> table. Every other field is recoverable from Azure
+    /// or re-enterable by the user.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rebuild flow lets the user point at a quarantined database
+    /// (<c>backup.db.quarantine-yyyyMMdd-HHmmss</c>) plus the matching
+    /// quarantined salt sidecar
+    /// (<c>backup.db.salt.quarantine-yyyyMMdd-HHmmss</c>). The two files
+    /// were renamed atomically by <c>QuarantineCorruptDatabase</c>, so
+    /// pairing them here is a user choice -- this helper does not infer
+    /// the sidecar from the database path.
+    /// </para>
+    /// <para>
+    /// The connection is opened with <see cref="SqliteOpenMode.ReadOnly"/>
+    /// so a partial decrypt cannot mutate the quarantined bytes. The
+    /// validate-key probe (page-1 HMAC check) inside
+    /// <see cref="OpenAndUnlockCore"/> is the password-correctness
+    /// oracle: a wrong password surfaces as
+    /// <see cref="InvalidPasswordException"/> rather than allowing a
+    /// "partial decrypt" path through.
+    /// </para>
+    /// </remarks>
+    /// <param name="quarantinedDatabasePath">Path to the quarantined catalog file.</param>
+    /// <param name="quarantinedSaltPath">Path to the matching quarantined salt sidecar (16 bytes).</param>
+    /// <param name="password">The password the quarantined catalog was protected with.</param>
+    /// <returns>
+    /// The 16-byte <c>config.password_salt</c> if it could be read, or
+    /// <c>null</c> if the row exists but the column is NULL (no Azure
+    /// content was ever encrypted with this catalog).
+    /// </returns>
+    /// <exception cref="ArgumentException">A path or the password is null/whitespace.</exception>
+    /// <exception cref="FileNotFoundException">Either file is missing.</exception>
+    /// <exception cref="InvalidOperationException">The salt sidecar is the wrong size.</exception>
+    /// <exception cref="InvalidPasswordException">The password does not match the quarantined catalog.</exception>
+    public static byte[]? ReadPasswordSaltFromQuarantinedCatalog(
+        string quarantinedDatabasePath,
+        string quarantinedSaltPath,
+        ReadOnlySpan<char> password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedDatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedSaltPath);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+        if (!File.Exists(quarantinedDatabasePath))
+            throw new FileNotFoundException(
+                "Quarantined database file does not exist.", quarantinedDatabasePath);
+        if (!File.Exists(quarantinedSaltPath))
+            throw new FileNotFoundException(
+                "Quarantined salt sidecar does not exist.", quarantinedSaltPath);
+
+        var salt = File.ReadAllBytes(quarantinedSaltPath);
+        if (salt.Length != SaltSize)
+        {
+            throw new InvalidOperationException(
+                $"Quarantined salt sidecar is the wrong size " +
+                $"(expected {SaltSize} bytes, got {salt.Length}). " +
+                "The sidecar may belong to a different quarantine event.");
+        }
+
+        var derivedKey = DeriveKeyFromPasswordCore(passwordChars: password, salt: salt, diag: null);
+        try
+        {
+            // ReadOnly mode + caller-supplied salt: we never write to the
+            // quarantined files. The validate-key probe is what gives the
+            // user a hard "wrong password" signal instead of letting a
+            // garbage-decrypted page reach the SELECT below.
+            using var connection = OpenAndUnlockCore(
+                quarantinedDatabasePath, derivedKey,
+                SqliteOpenMode.ReadOnly, validateKey: true);
+
+            using var cmd = connection.CreateCommand();
+            cmd.CommandText = "SELECT password_salt FROM config WHERE id = 1;";
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read() || reader.IsDBNull(0))
+            {
+                return null;
+            }
+
+            return (byte[])reader.GetValue(0);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(derivedKey);
+        }
+    }
+
     private static SqliteConnection OpenAndUnlockCore(
         string databasePath, byte[] derivedKey,
         SqliteOpenMode mode, bool validateKey)

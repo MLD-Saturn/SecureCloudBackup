@@ -447,6 +447,31 @@ After confirming, you must:
 
 If a companion file cannot be moved (typically because an antivirus scanner is holding it open), the Logs view shows a `WARNING -- companion NOT moved` line for each one. The main database file is always moved first; if its move fails, the operation aborts and surfaces the underlying error.
 
+### Danger Zone — Rebuild From Quarantined Catalog (recovery)
+
+If you previously quarantined a catalog with the button above (or kept the `.quarantine-yyyyMMdd-HHmmss` files from a past quarantine event), the **Rebuild From Quarantined Catalog...** button rebuilds a fresh local catalog at the active path using the quarantined files plus your Azure connection details. This recovers the bridge between your local files and the existing Azure backups *without* forcing you to start completely from scratch.
+
+The quarantined catalog is opened **read-only**; its bytes are never modified. If the password you supply does not match the quarantined catalog, the rebuild fails with `Invalid password` and the active catalog path is left untouched.
+
+Click **Rebuild From Quarantined Catalog...** to expand the form. All five fields are required:
+
+- **Quarantined database file** — full path to the `.quarantine-yyyyMMdd-HHmmss` database file. Typically beside the original catalog under your data directory.
+- **Quarantined salt sidecar** — full path to the matching `.salt.quarantine-yyyyMMdd-HHmmss` file. The two files were renamed atomically when you quarantined the catalog, so they always pair by stamp.
+- **Original password** — the password the quarantined catalog was protected with. The same password becomes the new fresh-catalog password.
+- **Azure connection string** — your storage account connection string. This must be supplied by hand because the encrypted connection string lives inside the quarantined catalog and is treated as unrecoverable.
+- **Container name** — the Azure blob container that holds your backed-up chunks and metadata. Defaults to `backup`.
+
+After clicking **Confirm Rebuild** the app:
+
+1. Opens the quarantined catalog read-only and recovers the in-database password salt that was used to encrypt your Azure blobs.
+2. Initializes a fresh catalog at the active path with the password you supplied, then reseeds it with the recovered salt so the new catalog can decrypt blobs that were encrypted with the old key.
+3. Reconnects to Azure with the connection string and container you supplied.
+4. Repopulates the chunk index, the reverse index, and the backed-up-file graph from Azure metadata (the same work the **Storage Health → Rebuild from Azure** button performs).
+
+When the rebuild completes you can unlock the active catalog with the same password you used for the quarantined one. Your files in Azure Storage are unaffected throughout the process.
+
+If a catalog already exists at the active path when you click **Confirm Rebuild**, it is itself quarantined first (under a fresh timestamp) so the rebuild never silently overwrites in-progress state. Failure modes (wrong password, missing file, wrong-sized salt sidecar) are surfaced as user-readable lines in the Logs view; on any failure the active catalog file is **not** created.
+
 ---
 
 ## Logs and diagnostic bundles

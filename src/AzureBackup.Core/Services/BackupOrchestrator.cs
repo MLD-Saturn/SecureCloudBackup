@@ -551,6 +551,184 @@ public partial class BackupOrchestrator : IAsyncDisposable
     }
 
     /// <summary>
+    /// B51: rebuilds a fresh catalog at <paramref name="freshDatabasePath"/>
+    /// from a previously quarantined catalog plus user-supplied Azure
+    /// connection details. The quarantined catalog is opened read-only to
+    /// extract the in-database <c>PasswordSalt</c> -- the only field that
+    /// cannot be recovered from Azure or re-entered by the user. Every
+    /// other piece of state (connection string, container name, watched
+    /// folders, backed-up file graph) is either provided by the caller or
+    /// reconstructed from Azure metadata via
+    /// <c>ChunkIndexService.RebuildIndexFromAzureAsync</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rebuild is destructive on the active catalog at
+    /// <paramref name="freshDatabasePath"/>: any existing file at that
+    /// path is quarantined first (so the user can audit anything that
+    /// landed there post-recovery) before a fresh catalog is initialised.
+    /// The quarantined input files are NOT modified.
+    /// </para>
+    /// <para>
+    /// Distinguishing wrong passwords from partial decrypts is delegated
+    /// to the SQLCipher validate-key probe inside
+    /// <c>SqliteBackend.OpenAndUnlockCore</c>. A wrong password surfaces
+    /// as <see cref="Models.InvalidPasswordException"/> from this method;
+    /// a wrong Azure connection string surfaces as a connectivity error
+    /// from <c>ChunkIndexService.RebuildIndexFromAzureAsync</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="quarantinedDatabasePath">Path to the quarantined catalog (the
+    /// <c>.quarantine-yyyyMMdd-HHmmss</c> file that <c>QuarantineCorruptCatalogAsync</c>
+    /// created). Opened read-only.</param>
+    /// <param name="quarantinedSaltPath">Path to the matching quarantined salt sidecar
+    /// (the <c>.salt.quarantine-yyyyMMdd-HHmmss</c> file).</param>
+    /// <param name="password">The password the quarantined catalog was protected
+    /// with. The same password becomes the new fresh-catalog password.</param>
+    /// <param name="connectionString">Azure storage account connection string.
+    /// Re-encrypted into the fresh catalog with the recovered key.</param>
+    /// <param name="containerName">Azure blob container that holds the backed-up
+    /// chunks and metadata. Re-saved into the fresh catalog.</param>
+    /// <param name="freshDatabasePath">Where to write the fresh catalog.
+    /// Typically <c>AppMode.DatabasePath</c>.</param>
+    /// <param name="progress">Optional progress reporter forwarded to the
+    /// Azure rebuild phase.</param>
+    /// <param name="cancellationToken">Cancellation token. Honoured by the
+    /// Azure rebuild phase; the read-only extraction phase is fast and
+    /// not cancellable.</param>
+    /// <exception cref="ArgumentException">A path or password is null/whitespace.</exception>
+    /// <exception cref="FileNotFoundException">The quarantined DB or salt is missing.</exception>
+    /// <exception cref="Models.InvalidPasswordException">The password does not match the quarantined catalog.</exception>
+    /// <exception cref="InvalidOperationException">The quarantined catalog has no
+    /// <c>password_salt</c> recorded -- nothing was ever encrypted with it, so
+    /// there is nothing to recover. The user should run a normal first-run setup
+    /// instead.</exception>
+    public async Task RebuildFromQuarantinedCatalogAsync(
+        string quarantinedDatabasePath,
+        string quarantinedSaltPath,
+        ReadOnlyMemory<char> password,
+        string connectionString,
+        string containerName,
+        string freshDatabasePath,
+        IProgress<(int processed, int total, string currentFile)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedDatabasePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedSaltPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(freshDatabasePath);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+
+        if (_chunkIndexService == null)
+        {
+            throw new InvalidOperationException(
+                "BackupOrchestrator.SetChunkIndexService(...) must be called before " +
+                "RebuildFromQuarantinedCatalogAsync; the rebuild needs the chunk-index " +
+                "service to repopulate the catalog from Azure metadata.");
+        }
+
+        Log("RebuildFromQuarantinedCatalogAsync: starting");
+        StatusChanged?.Invoke(this, "Reading password salt from quarantined catalog...");
+
+        // Phase 1: extract the in-DB password_salt from the quarantined
+        // catalog. The validate-key probe inside the read-only open is the
+        // single oracle for password correctness.
+        var recoveredSalt = Backends.SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
+            quarantinedDatabasePath, quarantinedSaltPath, password.Span);
+        if (recoveredSalt == null)
+        {
+            throw new InvalidOperationException(
+                "Quarantined catalog has no password_salt recorded -- it was never used " +
+                "to encrypt any Azure data. There is nothing to rebuild from. Run a normal " +
+                "first-run setup against a fresh catalog instead.");
+        }
+        Log("RebuildFromQuarantinedCatalogAsync: recovered PasswordSalt from quarantined catalog");
+
+        // Phase 2: stop any running work, drop in-memory secrets, and make
+        // sure the active catalog path is free. If something already exists
+        // at freshDatabasePath we quarantine it first so the user can audit
+        // it later -- never overwrite or delete a catalog file silently.
+        if (_isRunning)
+        {
+            Log("RebuildFromQuarantinedCatalogAsync: stopping running backup");
+            await StopAsync();
+        }
+        _encryptionService.ClearKey();
+        _credential = null;
+
+        if (LocalDatabaseService.DatabaseExists(freshDatabasePath))
+        {
+            Log($"RebuildFromQuarantinedCatalogAsync: existing catalog at {freshDatabasePath} -- quarantining it first");
+            StatusChanged?.Invoke(this, "Existing catalog at the fresh path -- quarantining it first...");
+            _ = _databaseService.QuarantineAndClose(freshDatabasePath);
+        }
+        else
+        {
+            // Defensive close -- the active catalog might be open against
+            // a different path (e.g. portable mode quirk during testing).
+            _databaseService.Close();
+        }
+
+        // Phase 3: initialise a fresh catalog at the active path with the
+        // user's password. This generates a NEW (throwaway) PasswordSalt
+        // and PasswordVerificationHash; we overwrite both with values
+        // derived from the recovered salt below so the new catalog can
+        // decrypt Azure blobs that were encrypted with the old salt.
+        StatusChanged?.Invoke(this, "Creating fresh catalog at the active path...");
+        _databaseService.Initialize(freshDatabasePath, password.Span);
+        Log("RebuildFromQuarantinedCatalogAsync: fresh catalog initialized");
+
+        // Phase 4: replace the throwaway salt with the recovered one and
+        // recompute the verification hash so future unlocks succeed
+        // against the same password + recovered salt pair.
+        var freshConfig = _databaseService.GetConfiguration();
+        freshConfig.PasswordSalt = recoveredSalt;
+        freshConfig.PasswordVerificationHash =
+            await _encryptionService.CreatePasswordVerificationHashAsync(password, recoveredSalt);
+        freshConfig.FailedLoginAttempts = 0;
+        freshConfig.LockoutUntilUtc = null;
+        _databaseService.SaveConfiguration(freshConfig);
+        Log("RebuildFromQuarantinedCatalogAsync: fresh catalog reseeded with recovered PasswordSalt");
+
+        // Phase 5: derive the Azure encryption key from the recovered
+        // salt + user password and arm the encryption service so the
+        // upcoming Azure I/O can decrypt blobs that were encrypted with
+        // the old catalog's key.
+        StatusChanged?.Invoke(this, "Deriving Azure encryption key...");
+        var key = await _encryptionService.DeriveKeyAsync(password, recoveredSalt);
+        try
+        {
+            _encryptionService.Initialize(key);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
+        Log("RebuildFromQuarantinedCatalogAsync: encryption service armed with recovered key");
+
+        // Phase 6: persist the user-supplied Azure connection string and
+        // container name (re-encrypted with the recovered key) and open
+        // the live blob connection. SaveConnectionStringAsync handles
+        // both halves of that work.
+        StatusChanged?.Invoke(this, "Connecting to Azure storage...");
+        await SaveConnectionStringAsync(connectionString, containerName);
+
+        // Phase 7: rebuild the catalog from Azure metadata. This wipes
+        // the placeholder rows the fresh Initialize created and walks
+        // every metadata blob to repopulate chunk_index, chunk_file_refs,
+        // and the backed-up files graph. Cancellation is honoured here.
+        StatusChanged?.Invoke(this, "Rebuilding catalog from Azure metadata...");
+        await _chunkIndexService.RebuildIndexFromAzureAsync(progress, cancellationToken);
+
+        StatusChanged?.Invoke(this,
+            "Catalog rebuild from quarantined source complete. The fresh catalog can be " +
+            "unlocked with the same password you used for the quarantined one.");
+        Log("RebuildFromQuarantinedCatalogAsync: complete");
+    }
+
+    /// <summary>
     /// Starts the backup service.
     /// </summary>
     public void Start()
