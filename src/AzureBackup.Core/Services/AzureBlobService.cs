@@ -26,13 +26,96 @@ public partial class AzureBlobService : IBlobStorageService
     
 
     // Transfer optimization settings
-    // These settings maximize bandwidth by using parallel block transfers within each blob
+    // These settings maximize bandwidth by using parallel block transfers within each blob.
+    // Used as the DOWNLOAD-side default and as the upper bound the upload-side
+    // chunk-size-gated helper interpolates toward; see ComputeUploadTransferOptions.
     private static readonly StorageTransferOptions DefaultTransferOptions = new()
     {
         MaximumConcurrency = 8,              // Parallel block uploads/downloads per blob
         MaximumTransferSize = 8 * 1024 * 1024,  // 8 MB blocks for large files
         InitialTransferSize = 8 * 1024 * 1024   // Start with 8 MB initial transfer
     };
+
+    /// <summary>
+    /// B53 (W3 Phase B): chunk-size-gated upload transfer options. The Azure
+    /// SDK stages roughly <c>MaximumConcurrency * MaximumTransferSize</c>
+    /// bytes per in-flight upload while the request is on the wire; under
+    /// the 16-way file × 6-way chunk concurrency ceiling that staging
+    /// residency stacks across every concurrent upload and lives entirely
+    /// outside the <see cref="MemoryBudget"/> charge.
+    /// <para>
+    /// Pre-B53 the constant <see cref="DefaultTransferOptions"/> applied
+    /// 8×8 MB staging to every upload, which on a 1 MB chunk wasted ~63 MB
+    /// of SDK-side staging and produced no throughput benefit (the chunk
+    /// fits in one PUT). For a 64 MB chunk the same staging is the
+    /// throughput-optimal shape and must be preserved. The helper scales
+    /// the staging linearly with the encrypted payload length so a small
+    /// chunk gets a single in-band transfer (no parallel staging) while a
+    /// large chunk still gets the 8×8 MB fan-out.
+    /// </para>
+    /// <para>
+    /// Bands (encrypted length, MaximumConcurrency × MaximumTransferSize):
+    /// </para>
+    /// <list type="bullet">
+    ///   <item>? 8 MB: 1 × min(length, 8 MB) -- single PUT, no parallel staging</item>
+    ///   <item>? 16 MB: 2 × 8 MB -- two parallel blocks</item>
+    ///   <item>? 32 MB: 4 × 8 MB -- four parallel blocks</item>
+    ///   <item>&gt; 32 MB: 8 × 8 MB -- full pre-B53 fan-out, unchanged</item>
+    /// </list>
+    /// <para>
+    /// The 8 MB block size and the 8-way ceiling are preserved verbatim so
+    /// the throughput on the chunks that actually need parallel staging
+    /// (the 64 MB media-library shape that drives the 350 Mbps observed
+    /// upload ceiling) is unchanged. Only chunks small enough to fit in
+    /// one or two blocks see reduced staging.
+    /// </para>
+    /// </summary>
+    /// <param name="encryptedLength">
+    /// Length of the encrypted payload that will be uploaded, in bytes.
+    /// Must be positive.
+    /// </param>
+    internal static StorageTransferOptions ComputeUploadTransferOptions(int encryptedLength)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(encryptedLength);
+
+        const int eightMb = 8 * 1024 * 1024;
+
+        if (encryptedLength <= eightMb)
+        {
+            // Single PUT path: one in-band transfer at the chunk's actual
+            // size (capped at 8 MB). MaximumConcurrency=1 so the SDK does
+            // not stage a second block speculatively.
+            return new StorageTransferOptions
+            {
+                MaximumConcurrency = 1,
+                MaximumTransferSize = encryptedLength,
+                InitialTransferSize = encryptedLength
+            };
+        }
+
+        if (encryptedLength <= 16 * 1024 * 1024)
+        {
+            return new StorageTransferOptions
+            {
+                MaximumConcurrency = 2,
+                MaximumTransferSize = eightMb,
+                InitialTransferSize = eightMb
+            };
+        }
+
+        if (encryptedLength <= 32 * 1024 * 1024)
+        {
+            return new StorageTransferOptions
+            {
+                MaximumConcurrency = 4,
+                MaximumTransferSize = eightMb,
+                InitialTransferSize = eightMb
+            };
+        }
+
+        // > 32 MB: full pre-B53 fan-out, unchanged.
+        return DefaultTransferOptions;
+    }
 
     // Retry settings for upload failures. We retry on transient failures (MD5 mismatch
     // from in-transit corruption, 5xx, 408, 429, socket / IO errors, timeouts) but NOT
@@ -948,7 +1031,11 @@ public partial class AzureBlobService : IBlobStorageService
             {
                 ContentType = "application/octet-stream"
             },
-            TransferOptions = DefaultTransferOptions
+            // B53 (W3 Phase B): scale the SDK's per-upload staging
+            // residency with the encrypted payload size. Large chunks
+            // keep the pre-B53 8x8 MB fan-out; small chunks pay only
+            // for what fits in one or two blocks.
+            TransferOptions = ComputeUploadTransferOptions(encryptedLength)
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, rentedBuffer, encryptedLength, options,
