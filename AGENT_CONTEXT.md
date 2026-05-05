@@ -218,7 +218,7 @@ Follow-ups deferred from B27 (each can become its own future workstream when pri
 
 ## Completed workstreams (recent)
 
-- **B59 (commit `<pending>`, 2026-04-27)**: Phase 3 Commit 1 of W4 (LiteDB-compatibility removal -- collapse SQLite-vs-LiteDB selection seam).
+- **B59 (commit `93aea60`, 2026-04-27)**: Phase 3 Commit 1 of W4 (LiteDB-compatibility removal -- collapse SQLite-vs-LiteDB selection seam).
 
 - **B58 (commit `04e55e6`, 2026-04-27)**: Phase 2 of W4 (LiteDB-compatibility removal).
 
@@ -278,7 +278,7 @@ If running from inside Visual Studio (which is the typical user environment), th
 
 | Hash | Message |
 |---|---|
-| `<pending>` | B59: W4 Phase 3 Commit 1 -- collapse SQLite-vs-LiteDB selection seam; DatabaseBackendFactory reduced to CreateAndInitializeSqlite; LocalDatabaseService.InitializeCore collapsed to SQLite-only; InitializeLiteDbCore + DeriveKeyFromPassword + four LiteDB-only Argon2 constants deleted; BackendOverrideScope + DatabaseBackendFactoryTests + LocalDatabaseServiceSqliteRoutingTests deleted; IntegrityCheckServiceTests + LocalDatabaseServiceTests lost LiteDB-pinning cases; AZBK_USE_SQLITE env-var line removed from BackupBenchmarkBase.cs; 881/881 tests pass |
+| `93aea60` | B59: W4 Phase 3 Commit 1 -- collapse SQLite-vs-LiteDB selection seam;
 | `04e55e6` | B58: W4 Phase 2 -- delete orphaned LiteDB migration helpers and tests;
 | `ca5d628` | B57: W4 Phase 1 -- remove legacy LiteDB migration branches from auth/startup viewmodels (MainWindowViewModel.Commands.Auth.cs, MainWindowViewModel.cs, MainWindowViewModel.Commands.Navigation.cs); 3 files, +33/-276; 921/921 tests pass |
 | `3535574` | B56: peak-aware [mem] log telemetry;
