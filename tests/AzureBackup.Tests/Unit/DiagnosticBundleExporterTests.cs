@@ -79,11 +79,7 @@ public class DiagnosticBundleExporterTests : IDisposable
         Seed("backup.db.salt", "argon2 salt");
         Seed("backup.db-wal", "sqlite WAL");
         Seed("backup.db-shm", "sqlite SHM");
-        Seed("backup.db.unencrypted.bak", "pre-migration plaintext");
-        Seed("backup.db.legacy.bak", "legacy encrypted DB");
-        Seed("backup.db.upgrade-pending", "{\"databasePath\":\"x\"}");
-        Seed("backup.litedb-backup", "old LiteDB DB");
-        Seed("backup.litedb-backup.salt", "old salt");
+        Seed("backup.db.bak", "generic backup");
         // One innocent file to confirm the filter is not over-broad.
         Seed("azurebackup-2026-04-22.log", "should be included");
 
@@ -95,8 +91,6 @@ public class DiagnosticBundleExporterTests : IDisposable
         Assert.DoesNotContain(names, n => n.Contains("backup.db", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(names, n => n.EndsWith(".salt", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(names, n => n.EndsWith(".bak", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(names, n => n.EndsWith(".upgrade-pending", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(names, n => n.Contains(".litedb-backup", StringComparison.OrdinalIgnoreCase));
         Assert.Contains("azurebackup-2026-04-22.log", names);
     }
 

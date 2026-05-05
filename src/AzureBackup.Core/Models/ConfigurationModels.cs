@@ -77,7 +77,6 @@ public class BackupConfiguration
     /// Full blob service URI (e.g., "https://mystorageaccount.blob.core.windows.net").
     /// Computed from StorageAccountName if not set directly.
     /// </summary>
-    [LiteDB.BsonIgnore]
     public Uri? BlobServiceUri => !string.IsNullOrEmpty(StorageAccountName) 
         ? new Uri($"https://{StorageAccountName}.blob.core.windows.net") 
         : null;
@@ -96,16 +95,15 @@ public class BackupConfiguration
     public int FailedLoginAttempts { get; set; }
     
     /// <summary>
-    /// Lockout time stored as UTC ticks to avoid LiteDB DateTime serialization issues.
-    /// Use LockoutUntilUtc property for convenient access.
+    /// Lockout time stored as UTC ticks. Use LockoutUntilUtc property
+    /// for convenient access.
     /// </summary>
     public long? LockoutUntilTicks { get; set; }
-    
+
     /// <summary>
     /// Time until which the account is locked due to failed attempts (UTC).
     /// This is a computed property that converts to/from LockoutUntilTicks.
     /// </summary>
-    [LiteDB.BsonIgnore]
     public DateTime? LockoutUntilUtc
     {
         get => LockoutUntilTicks.HasValue 
@@ -128,7 +126,6 @@ public class BackupConfiguration
     /// <summary>
     /// Whether Azure storage is configured (either auth method).
     /// </summary>
-    [LiteDB.BsonIgnore]
     public bool IsAzureConfigured => AuthMethod == AzureAuthMethod.EntraId 
         ? (IsEntraIdAuthenticated && !string.IsNullOrEmpty(StorageAccountName))
         : (EncryptedConnectionString != null);

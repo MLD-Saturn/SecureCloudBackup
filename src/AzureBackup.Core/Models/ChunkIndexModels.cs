@@ -10,7 +10,6 @@ public class ChunkIndexEntry
     /// The SHA-256 hash of the chunk content (also used as blob name).
     /// This is the unique identifier for the chunk in the database.
     /// </summary>
-    [LiteDB.BsonId]
     public string ChunkHash { get; set; } = string.Empty;
 
     /// <summary>

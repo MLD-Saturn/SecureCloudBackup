@@ -281,7 +281,6 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Key derivation | Argon2id, 64 MB memory, 8 lanes, 3 iterations |
 | Encryption envelope overhead | 37 bytes per chunk |
 | Local database (production) | SQLCipher-encrypted SQLite (`SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, `Microsoft.Data.Sqlite` 10.x) |
-| Local database (LiteDB) | reference scheduled for removal in B60 (W4 Phase 3 Commit 2). The `<PackageReference Include="LiteDB" Version="5.0.21" />` is still present in `src/AzureBackup.Core/AzureBackup.Core.csproj` because `LiteDbBackend.cs` and the `BackendContractTests` shared-contract suite still reference the type, but no production code path reaches it after B59. |
 | Chunking | Content-defined, Rabin-style rolling hash (window 48, prime 31), per-extension config |
 | Default file-level concurrency | 16 (`MaxParallelFileBackups`, raised from 8 in B27 based on `TwoTierFileSplitBigScaleBenchmark`) |
 | Default chunk-level concurrency per file | 6 (`MaxParallelChunkUploads`) |

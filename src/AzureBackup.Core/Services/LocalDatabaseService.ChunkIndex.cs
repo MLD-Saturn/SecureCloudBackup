@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 
 namespace AzureBackup.Core.Services;
@@ -15,11 +14,8 @@ public partial class LocalDatabaseService
     /// </summary>
     public ChunkIndexEntry? GetChunkIndexEntry(string chunkHash)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.GetChunkIndexEntry(chunkHash);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        return InReadLock(() => _chunkIndexCollection!.FindOne(x => x.ChunkHash == chunkHash));
+        return GetBackend().GetChunkIndexEntry(chunkHash);
     }
 
     /// <summary>
@@ -27,22 +23,8 @@ public partial class LocalDatabaseService
     /// </summary>
     public void SaveChunkIndexEntry(ChunkIndexEntry entry)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.SaveChunkIndexEntry(entry); return; }
-        EnsureInitialized();
         ArgumentNullException.ThrowIfNull(entry);
-
-        InWriteLock(() =>
-        {
-            var existing = _chunkIndexCollection!.FindOne(x => x.ChunkHash == entry.ChunkHash);
-            if (existing != null)
-            {
-                _chunkIndexCollection.Update(entry);
-            }
-            else
-            {
-                _chunkIndexCollection.Insert(entry);
-            }
-        });
+        GetBackend().SaveChunkIndexEntry(entry);
     }
 
     /// <summary>
@@ -51,11 +33,8 @@ public partial class LocalDatabaseService
     /// </summary>
     public void BulkInsertChunkIndexEntries(IEnumerable<ChunkIndexEntry> entries)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.BulkInsertChunkIndexEntries(entries); return; }
-        EnsureInitialized();
         ArgumentNullException.ThrowIfNull(entries);
-
-        InWriteLock(() => _chunkIndexCollection!.InsertBulk(entries));
+        GetBackend().BulkInsertChunkIndexEntries(entries);
     }
 
     /// <summary>
@@ -63,23 +42,14 @@ public partial class LocalDatabaseService
     /// </summary>
     public void DeleteChunkIndexEntry(string chunkHash)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.DeleteChunkIndexEntry(chunkHash); return; }
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        InWriteLock(() => _chunkIndexCollection!.DeleteMany(x => x.ChunkHash == chunkHash));
+        GetBackend().DeleteChunkIndexEntry(chunkHash);
     }
 
     /// <summary>
     /// Gets all chunk index entries.
     /// </summary>
-    public List<ChunkIndexEntry> GetAllChunkIndexEntries()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetAllChunkIndexEntries();
-        EnsureInitialized();
-
-        return InReadLock(() => _chunkIndexCollection!.FindAll().ToList());
-    }
+    public List<ChunkIndexEntry> GetAllChunkIndexEntries() => GetBackend().GetAllChunkIndexEntries();
 
     /// <summary>
     /// Gets a lightweight summary of all chunk index entries for fast lookups.
@@ -88,20 +58,7 @@ public partial class LocalDatabaseService
     /// At 1M chunks, this uses ~80 MB vs ~1.5 GB for full entries.
     /// </summary>
     public Dictionary<string, (int ReferenceCount, long SizeBytes, StorageTier Tier)> GetChunkIndexSummaryMap()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetChunkIndexSummaryMap();
-        EnsureInitialized();
-
-        return InReadLock(() =>
-        {
-            var result = new Dictionary<string, (int, long, StorageTier)>(StringComparer.Ordinal);
-            foreach (var entry in _chunkIndexCollection!.FindAll())
-            {
-                result[entry.ChunkHash] = (entry.ReferenceCount, entry.SizeBytes, entry.CurrentTier);
-            }
-            return result;
-        });
-    }
+        => GetBackend().GetChunkIndexSummaryMap();
 
     /// <summary>
     /// Gets chunk entries that reference a specific file.
@@ -109,113 +66,25 @@ public partial class LocalDatabaseService
     /// <remarks>
     /// Uses the reverse <c>chunk_file_refs</c> index (Phase 5 / P3): an indexed
     /// <c>FilePath</c> lookup returns the matching chunk hashes, then a single
-    /// <c>Contains</c> query against the <see cref="ChunkIndexEntry.ChunkHash"/>
-    /// index batches all entry fetches into one round trip. This replaces the
-    /// legacy path that did <c>FindAll</c> over every chunk and filtered in
-    /// memory, and replaces the first-cut Phase 5 path that issued one
-    /// <c>FindOne</c> per hash (N round trips for N chunks).
+    /// indexed lookup against <see cref="ChunkIndexEntry.ChunkHash"/> batches
+    /// all entry fetches into one round trip.
     /// </remarks>
     public List<ChunkIndexEntry> GetChunkEntriesForFile(string filePath)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.GetChunkEntriesForFile(filePath);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        return InReadLock(() =>
-        {
-            // Step 1: indexed reverse lookup on FilePath.
-            var refs = _chunkFileRefsCollection!
-                .Find(x => x.FilePath == filePath)
-                .ToList();
-
-            if (refs.Count == 0)
-            {
-                // Possibilities:
-                //   (a) The file genuinely references no chunks, or
-                //   (b) The reverse index has not been built yet (migration pending).
-                // (b) is disambiguated by the migration path; by the time we reach
-                // here post-migration, (a) is the only reason for an empty result.
-                return new List<ChunkIndexEntry>();
-            }
-
-            // Step 2: fetch the matching ChunkIndexEntry rows. We loop FindOne
-            // per hash rather than expressing this as a single
-            // `Find(x => hashes.Contains(x.ChunkHash))` LINQ query because
-            // LiteDB's expression visitor cannot translate
-            // <see cref="System.Linq.Enumerable.Contains{T}(System.Collections.Generic.IEnumerable{T}, T)"/>
-            // to a BSON expression and throws <c>NotSupportedException</c> at
-            // runtime. Each FindOne is an indexed seek on the unique
-            // <c>ChunkHash</c> index so the per-call cost is O(log N); the
-            // total stays well under the legacy full-scan cost for any
-            // realistic chunks-per-file count.
-            var hashes = refs
-                .Select(r => r.ChunkHash)
-                .Distinct(StringComparer.Ordinal)
-                .ToArray();
-
-            var result = new List<ChunkIndexEntry>(hashes.Length);
-            foreach (var hash in hashes)
-            {
-                var entry = _chunkIndexCollection!.FindOne(x => x.ChunkHash == hash);
-                if (entry != null) result.Add(entry);
-            }
-            return result;
-        });
-    }
-
-    /// <summary>
-    /// Legacy full-scan variant retained for the one-time reverse-index rebuild
-    /// path and for performance comparison in <c>AzureBackup.Benchmarks</c>.
-    /// Do not call from new application code - use <see cref="GetChunkEntriesForFile"/>.
-    /// Internal so accidental consumers cannot reach the slow path; benchmarks
-    /// see it via <c>InternalsVisibleTo("AzureBackup.Benchmarks")</c>.
-    /// </summary>
-    internal List<ChunkIndexEntry> GetChunkEntriesForFile_LegacyScan(string filePath)
-    {
-        EnsureInitialized();
-        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        return InReadLock(() =>
-            _chunkIndexCollection!
-                .FindAll()
-                .Where(e => e.ReferencingFiles.Any(r =>
-                    r.FilePath.Equals(filePath, StringComparison.OrdinalIgnoreCase)))
-                .ToList());
+        return GetBackend().GetChunkEntriesForFile(filePath);
     }
 
     /// <summary>
     /// Adds or updates a single reverse-index row. Idempotent: a row for the same
     /// <c>(FilePath, ChunkHash, ChunkIndex)</c> triple is replaced rather than
-    /// duplicated. The caller is expected to also mutate the primary
-    /// <see cref="ChunkIndexEntry.ReferencingFiles"/>.
+    /// duplicated.
     /// </summary>
     internal void UpsertChunkFileRef(string filePath, string chunkHash, int chunkIndex, DateTime referencedAt)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.UpsertChunkFileRef(filePath, chunkHash, chunkIndex, referencedAt); return; }
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        InWriteLock(() =>
-        {
-            var existing = _chunkFileRefsCollection!
-                .FindOne(x => x.FilePath == filePath && x.ChunkHash == chunkHash && x.ChunkIndex == chunkIndex);
-
-            if (existing != null)
-            {
-                existing.ReferencedAt = referencedAt;
-                _chunkFileRefsCollection.Update(existing);
-                return;
-            }
-
-            _chunkFileRefsCollection.Insert(new ChunkFileRefRow
-            {
-                FilePath = filePath,
-                ChunkHash = chunkHash,
-                ChunkIndex = chunkIndex,
-                ReferencedAt = referencedAt
-            });
-        });
+        GetBackend().UpsertChunkFileRef(filePath, chunkHash, chunkIndex, referencedAt);
     }
 
     /// <summary>
@@ -225,11 +94,8 @@ public partial class LocalDatabaseService
     /// </summary>
     internal void BulkInsertChunkFileRefs(IEnumerable<ChunkFileRefRow> rows)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.BulkInsertChunkFileRefs(rows); return; }
-        EnsureInitialized();
         ArgumentNullException.ThrowIfNull(rows);
-
-        InWriteLock(() => _chunkFileRefsCollection!.InsertBulk(rows));
+        GetBackend().BulkInsertChunkFileRefs(rows);
     }
 
     /// <summary>
@@ -237,18 +103,9 @@ public partial class LocalDatabaseService
     /// path so the encrypted blob carries the (file_path, chunk_hash,
     /// chunk_index) graph alongside the primary chunk_index entries.
     /// Without this, restoring from an Azure index backup would leave
-    /// chunk_file_refs empty (under the SQLite backend
-    /// <see cref="ChunkIndexEntry.ReferencingFiles"/> is not populated
-    /// on read, so a backup-then-restore round-trip would silently
-    /// lose every reference).
+    /// chunk_file_refs empty.
     /// </summary>
-    internal List<ChunkFileRefRow> GetAllChunkFileRefs()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetAllChunkFileRefs();
-        EnsureInitialized();
-
-        return InReadLock(() => _chunkFileRefsCollection!.FindAll().ToList());
-    }
+    internal List<ChunkFileRefRow> GetAllChunkFileRefs() => GetBackend().GetAllChunkFileRefs();
 
     /// <summary>
     /// Deletes every reverse-index row for a single file path. Called when a
@@ -256,12 +113,8 @@ public partial class LocalDatabaseService
     /// </summary>
     internal int DeleteChunkFileRefsForFile(string filePath)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.DeleteChunkFileRefsForFile(filePath);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-
-        return InWriteLock(() =>
-            _chunkFileRefsCollection!.DeleteMany(x => x.FilePath == filePath));
+        return GetBackend().DeleteChunkFileRefsForFile(filePath);
     }
 
     /// <summary>
@@ -270,12 +123,8 @@ public partial class LocalDatabaseService
     /// </summary>
     internal int DeleteChunkFileRefsForChunk(string chunkHash)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.DeleteChunkFileRefsForChunk(chunkHash);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        return InWriteLock(() =>
-            _chunkFileRefsCollection!.DeleteMany(x => x.ChunkHash == chunkHash));
+        return GetBackend().DeleteChunkFileRefsForChunk(chunkHash);
     }
 
     /// <summary>
@@ -285,13 +134,9 @@ public partial class LocalDatabaseService
     /// </summary>
     internal int DeleteChunkFileRefsForFileAndChunk(string filePath, string chunkHash)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.DeleteChunkFileRefsForFileAndChunk(filePath, chunkHash);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        return InWriteLock(() =>
-            _chunkFileRefsCollection!.DeleteMany(x => x.FilePath == filePath && x.ChunkHash == chunkHash));
+        return GetBackend().DeleteChunkFileRefsForFileAndChunk(filePath, chunkHash);
     }
 
     /// <summary>
@@ -299,13 +144,7 @@ public partial class LocalDatabaseService
     /// been built for the current database. Checked by the UI at startup so
     /// it can decide whether to show the one-time rebuild progress dialog.
     /// </summary>
-    public bool IsReverseChunkIndexBuilt()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.IsReverseChunkIndexBuilt();
-        EnsureInitialized();
-        return InReadLock(() =>
-            _indexMetadataCollection!.FindOne(x => x.Key == "ReverseIndexBuiltAt") != null);
-    }
+    public bool IsReverseChunkIndexBuilt() => GetBackend().IsReverseChunkIndexBuilt();
 
     /// <summary>
     /// One-time migration that populates the reverse <c>chunk_file_refs</c> index
@@ -318,132 +157,36 @@ public partial class LocalDatabaseService
     /// layer drives a modal progress dialog from this callback.
     /// </param>
     /// <param name="cancellationToken">
-    /// Cancellation propagates cooperatively between chunk batches. If cancelled
-    /// the partial rebuild is rolled back by clearing the reverse collection so
-    /// a retry starts cleanly.
+    /// Cancellation propagates cooperatively between chunk batches.
     /// </param>
     public void RebuildReverseChunkIndex(
         IProgress<(int processed, int total)>? progress = null,
         CancellationToken cancellationToken = default)
-    {
-        if (_sqliteBackend != null)
-        {
-            _sqliteBackend.RebuildReverseChunkIndex(progress, cancellationToken);
-            return;
-        }
-        EnsureInitialized();
-
-        if (IsReverseChunkIndexBuilt())
-        {
-            Log("RebuildReverseChunkIndex: Already built, skipping.");
-            return;
-        }
-
-        // Count + snapshot under read lock so a concurrent writer cannot mutate
-        // the primary collection mid-rebuild. We release the read lock before
-        // taking write locks per batch so other readers stay unblocked.
-        var entries = InReadLock(() => _chunkIndexCollection!.FindAll().ToList());
-        var total = entries.Count;
-        Log($"RebuildReverseChunkIndex: Starting rebuild for {total} chunks.");
-        progress?.Report((0, total));
-
-        try
-        {
-            // Process in batches so each write-lock window is short.
-            const int BatchSize = 2_000;
-            var processed = 0;
-
-            // Idempotency: clear any partial rows from a prior interrupted run.
-            InWriteLock(() => _chunkFileRefsCollection!.DeleteAll());
-
-            var batch = new List<ChunkFileRefRow>(BatchSize * 4);
-            for (var i = 0; i < entries.Count; i++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var entry = entries[i];
-                foreach (var r in entry.ReferencingFiles)
-                {
-                    batch.Add(new ChunkFileRefRow
-                    {
-                        FilePath = r.FilePath,
-                        ChunkHash = entry.ChunkHash,
-                        ChunkIndex = r.ChunkIndex,
-                        ReferencedAt = r.ReferencedAt
-                    });
-                }
-
-                if (batch.Count >= BatchSize || i == entries.Count - 1)
-                {
-                    var flush = batch;
-                    InWriteLock(() => _chunkFileRefsCollection!.InsertBulk(flush));
-                    processed = i + 1;
-                    progress?.Report((processed, total));
-                    batch = new List<ChunkFileRefRow>(BatchSize * 4);
-                }
-            }
-
-            // Mark the rebuild complete so future starts skip this path.
-            SetIndexMetadata("ReverseIndexBuiltAt", DateTime.UtcNow);
-            Log($"RebuildReverseChunkIndex: Completed for {total} chunks.");
-        }
-        catch (OperationCanceledException)
-        {
-            // Leave the reverse collection empty and the metadata unset so a
-            // retry restarts from zero rather than finding half-populated rows.
-            InWriteLock(() => _chunkFileRefsCollection!.DeleteAll());
-            Log("RebuildReverseChunkIndex: Cancelled; partial rows rolled back.");
-            throw;
-        }
-    }
+        => GetBackend().RebuildReverseChunkIndex(progress, cancellationToken);
 
     /// <summary>
-    /// Runs an explicit LiteDB checkpoint, flushing the WAL into the main data
-    /// file. Keeps the <c>-log</c> file from growing unbounded across long app
-    /// sessions (discovered during Phase 4 implementation).
+    /// Runs an explicit WAL checkpoint, flushing the WAL into the main data
+    /// file. Keeps the WAL companion file from growing unbounded across long
+    /// app sessions; SqliteBackend manages its own checkpoint timer in
+    /// addition to honouring this explicit call.
     /// </summary>
-    /// <remarks>
-    /// LiteDB normally checkpoints automatically but only at shutdown or when the
-    /// WAL reaches its threshold; this app can run for days with small sustained
-    /// writes, during which the WAL grows to multi-GB before either trigger fires.
-    /// Callers should invoke this on a timer (e.g. hourly) and at clean shutdown.
-    /// </remarks>
-    public void Checkpoint()
-    {
-        if (_sqliteBackend != null) { _sqliteBackend.Checkpoint(); return; }
-        EnsureInitialized();
-
-        // Checkpoint itself is a write operation on the WAL state, so hold the
-        // write lock to keep it ordered against in-flight writers.
-        InWriteLock(() => _database!.Checkpoint());
-    }
+    public void Checkpoint() => GetBackend().Checkpoint();
 
     /// <summary>
     /// Gets orphaned chunks (reference count = 0).
     /// </summary>
-    public List<ChunkIndexEntry> GetOrphanedChunks()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetOrphanedChunks();
-        EnsureInitialized();
-
-        return InReadLock(() => _chunkIndexCollection!.Find(x => x.ReferenceCount == 0).ToList());
-    }
+    public List<ChunkIndexEntry> GetOrphanedChunks() => GetBackend().GetOrphanedChunks();
 
     /// <summary>
     /// Returns the authoritative reference count for <paramref name="chunkHash"/>
     /// computed from the canonical <c>chunk_file_refs</c> reverse-index
     /// collection rather than from the cached
-    /// <see cref="ChunkIndexEntry.ReferenceCount"/> column. Used by
-    /// <see cref="ChunkIndexService"/> so the count remains correct even
-    /// when the backend (e.g. SQLite) does not populate the in-memory
-    /// <see cref="ChunkIndexEntry.ReferencingFiles"/> list on read.
+    /// <see cref="ChunkIndexEntry.ReferenceCount"/> column.
     /// </summary>
     public int GetReferenceCountForChunk(string chunkHash)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.GetReferenceCountForChunk(chunkHash);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        return InReadLock(() => _chunkFileRefsCollection!.Count(x => x.ChunkHash == chunkHash));
+        return GetBackend().GetReferenceCountForChunk(chunkHash);
     }
 
     /// <summary>
@@ -454,48 +197,22 @@ public partial class LocalDatabaseService
     /// </summary>
     public List<ChunkFileReference> GetReferencingFilesForChunk(string chunkHash)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.GetReferencingFilesForChunk(chunkHash);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
-
-        return InReadLock(() => _chunkFileRefsCollection!
-            .Find(x => x.ChunkHash == chunkHash)
-            .Select(r => new ChunkFileReference
-            {
-                FilePath = r.FilePath,
-                ChunkIndex = r.ChunkIndex,
-                ReferencedAt = r.ReferencedAt,
-            })
-            .ToList());
+        return GetBackend().GetReferencingFilesForChunk(chunkHash);
     }
 
     /// <summary>
     /// Clears all chunk index entries.
     /// </summary>
-    public void ClearChunkIndex()
-    {
-        if (_sqliteBackend != null) { _sqliteBackend.ClearChunkIndex(); return; }
-        EnsureInitialized();
-
-        InWriteLock(() =>
-        {
-            _chunkIndexCollection!.DeleteAll();
-            // Reverse-index rows are a denormalised view of the primary collection,
-            // so they must be cleared in lockstep.
-            _chunkFileRefsCollection?.DeleteAll();
-        });
-    }
+    public void ClearChunkIndex() => GetBackend().ClearChunkIndex();
 
     /// <summary>
     /// Gets index metadata by key.
     /// </summary>
     public DateTime? GetIndexMetadata(string key)
     {
-        if (_sqliteBackend != null) return _sqliteBackend.GetIndexMetadata(key);
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
-
-        return InReadLock(() => _indexMetadataCollection!.FindOne(x => x.Key == key)?.Value);
+        return GetBackend().GetIndexMetadata(key);
     }
 
     /// <summary>
@@ -503,57 +220,19 @@ public partial class LocalDatabaseService
     /// </summary>
     public void SetIndexMetadata(string key, DateTime value)
     {
-        if (_sqliteBackend != null) { _sqliteBackend.SetIndexMetadata(key, value); return; }
-        EnsureInitialized();
         ArgumentException.ThrowIfNullOrWhiteSpace(key);
-
-        InWriteLock(() =>
-        {
-            var entry = _indexMetadataCollection!.FindOne(x => x.Key == key);
-            if (entry != null)
-            {
-                entry.Value = value;
-                _indexMetadataCollection.Update(entry);
-            }
-            else
-            {
-                _indexMetadataCollection.Insert(new IndexMetadata { Key = key, Value = value });
-            }
-        });
+        GetBackend().SetIndexMetadata(key, value);
     }
 
     /// <summary>
     /// Returns every (key, value) row in the index_metadata collection.
-    /// Used by the C-2 LiteDB-to-SQLite migration to copy the whole
-    /// metadata table. Production consumers use the single-key
-    /// <see cref="GetIndexMetadata"/>.
     /// </summary>
-    public IReadOnlyDictionary<string, DateTime> GetAllIndexMetadata()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetAllIndexMetadata();
-        EnsureInitialized();
-
-        return InReadLock(() =>
-        {
-            var result = new Dictionary<string, DateTime>(StringComparer.Ordinal);
-            foreach (var row in _indexMetadataCollection!.FindAll())
-            {
-                result[row.Key] = row.Value;
-            }
-            return (IReadOnlyDictionary<string, DateTime>)result;
-        });
-    }
+    public IReadOnlyDictionary<string, DateTime> GetAllIndexMetadata() => GetBackend().GetAllIndexMetadata();
 
     /// <summary>
     /// Gets the total count of chunks in the index.
     /// </summary>
-    public int GetChunkIndexCount()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetChunkIndexCount();
-        EnsureInitialized();
-
-        return InReadLock(() => _chunkIndexCollection!.Count());
-    }
+    public int GetChunkIndexCount() => GetBackend().GetChunkIndexCount();
 
     #endregion
 
@@ -562,29 +241,7 @@ public partial class LocalDatabaseService
     /// <summary>
     /// Gets backup statistics.
     /// </summary>
-    public BackupStatistics GetStatistics()
-    {
-        if (_sqliteBackend != null) return _sqliteBackend.GetStatistics();
-        EnsureInitialized();
-
-        return InReadLock(() =>
-        {
-            var files = _filesCollection!.FindAll().ToList();
-            var config = _configCollection!.FindById(1) ?? new BackupConfiguration();
-
-            return new BackupStatistics
-            {
-                TotalFiles = files.Count,
-                TotalSize = files.Sum(x => x.FileSize),
-                CompletedFiles = files.Count(x => x.Status == BackupStatus.Completed),
-                PendingFiles = files.Count(x => x.Status == BackupStatus.Pending),
-                FailedFiles = files.Count(x => x.Status == BackupStatus.Failed),
-                PendingChanges = _pendingChangesCollection!.Count(),
-                LastBackupTime = config.LastBackupTime,
-                TotalBytesUploaded = config.TotalBytesUploaded
-            };
-        });
-    }
+    public BackupStatistics GetStatistics() => GetBackend().GetStatistics();
 
     #endregion
 
@@ -593,111 +250,15 @@ public partial class LocalDatabaseService
     /// <summary>
     /// Securely deletes all data and resets the database.
     /// Overwrites sensitive data before deletion to prevent recovery.
-    /// After calling this method, the database is closed and the application 
+    /// After calling this method, the database is closed and the application
     /// should restart or call Initialize with a new password.
     /// </summary>
     public void SecureReset()
     {
-        if (_sqliteBackend != null)
-        {
-            _sqliteBackend.SecureReset();
-            _sqliteBackend = null;
-            _databasePath = null;
-            return;
-        }
-
-        // Stop the checkpoint timer before tearing down the database file; the
-        // callback is guarded against _disposed but an in-flight tick could still
-        // race with file deletion.
-        _checkpointTimer?.Dispose();
-        _checkpointTimer = null;
-
-        InWriteLock(() =>
-        {
-            if (_database == null || string.IsNullOrEmpty(_databasePath))
-                return;
-
-            // First, overwrite sensitive data in the database
-            OverwriteSensitiveData();
-
-            // Close the database
-            _database.Dispose();
-            _database = null;
-            _configCollection = null;
-            _filesCollection = null;
-            _pendingChangesCollection = null;
-            _chunkIndexCollection = null;
-            _indexMetadataCollection = null;
-            _chunkFileRefsCollection = null;
-
-            // Securely delete the database file and all sibling artefacts
-            // (journal, WAL log, salt). All four route through the shared
-            // FileSystemHelper.TrySecureDelete (single random-bytes pass +
-            // Flush(true) + unlink) so the cleanup contract matches every
-            // other secret-bearing delete in the codebase. The lambda
-            // wrapper is necessary because Log is [Conditional] and so
-            // can't be assigned to an Action<string> directly.
-            FileSystemHelper.TrySecureDelete(_databasePath, msg => Log(msg));
-            FileSystemHelper.TrySecureDelete(_databasePath + "-journal", msg => Log(msg));
-            FileSystemHelper.TrySecureDelete(_databasePath + "-log", msg => Log(msg));
-            FileSystemHelper.TrySecureDelete(GetSaltFilePath(_databasePath), msg => Log(msg));
-
-            Log("SecureReset: Database and salt file have been securely deleted. Application restart required.");
-        });
-    }
-
-    /// <summary>
-    /// Overwrites sensitive data in the database before deletion.
-    /// </summary>
-    private void OverwriteSensitiveData()
-    {
-        if (_configCollection == null) return;
-
-        var config = _configCollection.FindById(1);
-        if (config != null)
-        {
-            // Overwrite password-related data
-            if (config.PasswordSalt != null)
-            {
-                RandomNumberGenerator.Fill(config.PasswordSalt);
-                config.PasswordSalt = null;
-            }
-
-            if (config.PasswordVerificationHash != null)
-            {
-                RandomNumberGenerator.Fill(config.PasswordVerificationHash);
-                config.PasswordVerificationHash = null;
-            }
-
-            // Overwrite encrypted connection string
-            if (config.EncryptedConnectionString != null)
-            {
-                RandomNumberGenerator.Fill(config.EncryptedConnectionString);
-                config.EncryptedConnectionString = null;
-            }
-
-            // Reset authentication method to default
-            config.AuthMethod = AzureAuthMethod.ConnectionString;
-
-            // Reset Entra ID and storage account settings
-            config.StorageAccountName = null;
-            config.IsEntraIdAuthenticated = false;
-            config.EntraIdUserName = null;
-
-            // Reset other sensitive fields
-            config.FailedLoginAttempts = 0;
-            config.LockoutUntilUtc = null;
-            config.WatchedFolders = [];
-
-            _configCollection.Update(config);
-        }
-
-        // Clear all file records
-        _filesCollection?.DeleteAll();
-        _pendingChangesCollection?.DeleteAll();
-        _chunkIndexCollection?.DeleteAll();
-        _indexMetadataCollection?.DeleteAll();
-        _chunkFileRefsCollection?.DeleteAll();
+        if (_sqliteBackend == null) return;
+        _sqliteBackend.SecureReset();
+        _sqliteBackend = null;
+        _databasePath = null;
     }
 
     #endregion

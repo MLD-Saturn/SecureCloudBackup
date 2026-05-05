@@ -35,9 +35,8 @@ namespace AzureBackup.Core;
 ///   <item>The encrypted database (<c>backup.db</c>) and its salt -- contains
 ///     credentials and would be a credential-disclosure risk if pasted into
 ///     a bug report.</item>
-///   <item>Any file matching <c>*.bak</c>, <c>*.litedb-backup*</c>,
-///     <c>*.upgrade-pending</c> -- migration artefacts that may also
-///     contain sensitive data.</item>
+///   <item>Any file matching <c>*.bak</c> -- generic backup artefacts that
+///     may also contain sensitive data.</item>
 /// </list>
 /// </remarks>
 public static class DiagnosticBundleExporter
@@ -136,11 +135,9 @@ public static class DiagnosticBundleExporter
         // backup.db + backup.db.salt + backup.db-* (SQLite WAL/SHM/journal)
         if (name.StartsWith("backup.db", StringComparison.OrdinalIgnoreCase))
             return true;
-        // Migration artefacts and salt files
+        // Generic backup + salt files
         if (name.EndsWith(".bak", StringComparison.OrdinalIgnoreCase)) return true;
         if (name.EndsWith(".salt", StringComparison.OrdinalIgnoreCase)) return true;
-        if (name.EndsWith(".upgrade-pending", StringComparison.OrdinalIgnoreCase)) return true;
-        if (name.Contains(".litedb-backup", StringComparison.OrdinalIgnoreCase)) return true;
         return false;
     }
 
@@ -205,7 +202,7 @@ public static class DiagnosticBundleExporter
         }
         writer.WriteLine();
         writer.WriteLine("Excluded artefacts (sensitive):");
-        writer.WriteLine("  backup.db, backup.db-*, *.salt, *.bak, *.upgrade-pending, *.litedb-backup*");
+        writer.WriteLine("  backup.db, backup.db-*, *.salt, *.bak");
         writer.WriteLine();
         writer.WriteLine("Use the SessionId above to grep azurebackup-*.log for the matching run.");
     }
