@@ -3,32 +3,21 @@ using AzureBackup.Core.Services.Backends;
 namespace AzureBackup.Core.Services;
 
 /// <summary>
-/// Option C / C-1 final step b: decides at
+/// Decides at
 /// <see cref="LocalDatabaseService.Initialize(string, ReadOnlySpan{char})"/>
 /// time which backend the service delegates to.
 ///
 /// <para>
-/// The flag is the environment variable <c>AZBK_USE_SQLITE</c>. Values
-/// <c>1</c>, <c>true</c>, <c>yes</c>, and <c>on</c> (case-insensitive,
-/// trimmed) enable the SQLite backend. Any other value - including
-/// unset, empty, <c>0</c>, <c>false</c> - leaves the service on its
-/// original LiteDB code path.
-/// </para>
-///
-/// <para>
-/// <b>Default-off is the safe choice.</b> All existing users and all
-/// existing integration tests see the LiteDB path by default. A single
-/// env-var flip routes them to SQLite with zero other changes. This is
-/// the preview-flag gate the eval doc \u00a711.8 prescribes for the C-6
-/// soak phase.
+/// As of C-5, SQLite is the production default. <see cref="ShouldUseSqlite"/>
+/// returns <c>true</c> unconditionally except when an explicit
+/// <see cref="AsyncLocal{T}"/> override is in scope; tests use that
+/// override (via <c>BackendOverrideScope</c>) to opt into the
+/// retained legacy LiteDB code path.
 /// </para>
 ///
 /// <para>
 /// <b>Read once, not per call.</b> The factory is consulted exactly
-/// once per <c>Initialize</c> call; flipping the env var mid-session
-/// is undefined. Production code never flips it, and tests that need
-/// to exercise both paths should run in separate processes (xunit
-/// creates separate AppDomains per test class which is sufficient).
+/// once per <c>Initialize</c> call.
 /// </para>
 /// </summary>
 internal static class DatabaseBackendFactory
@@ -37,9 +26,8 @@ internal static class DatabaseBackendFactory
     /// Optional per-async-flow override that pins the backend choice
     /// for the current async context. <c>null</c> means "use the
     /// production default" (SQLite). Tests use this to opt INTO the
-    /// LiteDB code path when they need to seed data in the legacy
-    /// format - e.g. the migration integration tests that need a
-    /// LiteDB DB on disk before exercising MigrateFromLiteDb.
+    /// LiteDB code path when they need to exercise the legacy-backend
+    /// branches still kept under the AsyncLocal override.
     /// </summary>
     private static readonly AsyncLocal<bool?> _asyncLocalOverride = new();
 

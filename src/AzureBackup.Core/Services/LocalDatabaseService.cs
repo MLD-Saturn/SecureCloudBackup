@@ -9,18 +9,19 @@ namespace AzureBackup.Core.Services;
 
 /// <summary>
 /// Manages local database for tracking backup state, configuration, and file metadata.
-/// Uses LiteDB for embedded, portable storage (no installation required).
-/// The database is encrypted using a key derived from the user's password via Argon2id,
-/// providing strong protection against brute force attacks.
+/// SQLCipher-encrypted SQLite is the production backend (selected by
+/// <see cref="DatabaseBackendFactory"/>); the legacy LiteDB code path is
+/// retained behind the same factory's AsyncLocal test override.
+/// The database is encrypted using a key derived from the user's password
+/// via Argon2id, providing strong protection against brute force attacks.
 ///
 /// <para>
-/// <b>Option C / C-1 final step b:</b> when the environment variable
-/// <c>AZBK_USE_SQLITE</c> is set (see <see cref="DatabaseBackendFactory"/>),
-/// <see cref="Initialize(string, ReadOnlySpan{char})"/> creates a
-/// <see cref="SqliteBackend"/> instead of opening a LiteDB handle, and
-/// every public method short-circuits to the backend via the
-/// <c>_sqliteBackend</c> field at the top of the method. The LiteDB
-/// code path is otherwise untouched.
+/// When <see cref="DatabaseBackendFactory.ShouldUseSqlite"/> returns
+/// <c>true</c>, <see cref="Initialize(string, ReadOnlySpan{char})"/>
+/// creates a <see cref="SqliteBackend"/> and every public method on
+/// this class short-circuits to the backend via the
+/// <c>_sqliteBackend</c> field at the top of the method. Otherwise
+/// the legacy LiteDB code path is taken.
 /// </para>
 /// </summary>
 public partial class LocalDatabaseService : IDisposable
@@ -124,29 +125,17 @@ public partial class LocalDatabaseService : IDisposable
         if (password.IsEmpty)
             throw new ArgumentException("Password cannot be empty", nameof(password));
 
-        // C-2 defence-in-depth: detect re-entrant Initialize on the SAME
-        // instance. Migration flows are:
-        //   outer Initialize on instance A
-        //     -> MigrateFromLiteDb
-        //       -> new LocalDatabaseService instance B
-        //         -> Initialize on instance B (legitimate; different instance)
-        // That is fine; the counter is per-instance so instance B's
-        // counter starts fresh. The bad pattern this catches is:
-        //   outer Initialize on instance A
-        //     -> something on instance A
-        //       -> Initialize on instance A (BAD; would self-recurse)
-        // which would happen if a future caller forgets to clear the
-        // feature-flag switches before recursing. Without this guard a
-        // bug like that blows the whole test host's stack; with it,
-        // we get a clear InvalidOperationException with stack trace.
+        // Defence-in-depth: detect re-entrant Initialize on the SAME
+        // instance. Production code never re-enters Initialize on a
+        // service that is already initializing; if a future caller
+        // does, this guard surfaces the bug as a clear exception
+        // instead of letting the stack blow up.
         if (_initializeInProgress)
         {
             throw new InvalidOperationException(
                 "LocalDatabaseService.Initialize called re-entrantly on the same instance. " +
                 "This indicates a code path that re-enters Initialize on a service that is " +
-                "already initializing (e.g. the C-2 migration helper InitializeLiteDbOnly " +
-                "forgot to clear the AZBK_USE_SQLITE switch on this instance). See " +
-                "LocalDatabaseService.Migration.Sqlite.cs#InitializeLiteDbOnly.");
+                "already initializing.");
         }
 
         _initializeInProgress = true;
@@ -170,24 +159,16 @@ public partial class LocalDatabaseService : IDisposable
 
     private void InitializeCore(string databasePath, ReadOnlySpan<char> password)
     {
-        // Option C / C-1 final step b: feature-flag branch. Read the
-        // env var ONCE here so flipping it mid-session is a no-op. When
-        // set, we instantiate SqliteBackend and skip ALL LiteDB setup;
-        // every public method on this class checks _sqliteBackend at
-        // its top and delegates if present.
+        // Backend selection is decided once per Initialize call. In
+        // production this always picks SQLite; only the test-only
+        // AsyncLocal override on DatabaseBackendFactory can opt into
+        // the legacy LiteDB branch below. When SQLite is selected we
+        // instantiate SqliteBackend and skip ALL LiteDB setup; every
+        // public method on this class checks _sqliteBackend at its top
+        // and delegates if present.
         if (DatabaseBackendFactory.ShouldUseSqlite())
         {
-            // C-2: the UI layer is responsible for detecting an existing
-            // LiteDB database (via IsExistingSqliteDatabase returning
-            // false) and calling MigrateFromLiteDb BEFORE us. We do not
-            // auto-migrate here because migration on a real-size DB
-            // takes 10-15 s and the UI wants to surface a progress
-            // indicator. Calling Initialize on a LiteDB file with the
-            // SQLite flag on will throw InvalidPasswordException from
-            // SqliteBackend's open - the contract is "migrate first,
-            // open second". See MigrateFromLiteDb's xmldoc and the
-            // EnsureMigratedToSqliteAsync helper in MainWindowViewModel.
-            Log($"Initialize: AZBK_USE_SQLITE flag is set; routing to SqliteBackend");
+            Log($"Initialize: routing to SqliteBackend (production default)");
             _databasePath = databasePath;
             // B13: forward the backend's diagnostic events through this
             // service's own DiagnosticLog so the file logger captures the
@@ -206,11 +187,9 @@ public partial class LocalDatabaseService : IDisposable
 
     /// <summary>
     /// Opens the database as LiteDB, derives the key with Argon2id, and
-    /// builds every collection + index. This is the LiteDB-side body of
-    /// <see cref="InitializeCore"/>; extracted so the C-2 migration
-    /// helper <c>InitializeLiteDbOnly</c> can call it directly without
-    /// having to mutate the feature-flag switches (env var / AsyncLocal
-    /// override) to force <c>InitializeCore</c> down the LiteDB branch.
+    /// builds every collection + index. Reachable only when a test pins
+    /// the backend to LiteDB via <see cref="DatabaseBackendFactory"/>'s
+    /// AsyncLocal override; production always routes through SQLite.
     /// </summary>
     private void InitializeLiteDbCore(string databasePath, ReadOnlySpan<char> password)
     {

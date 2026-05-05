@@ -8,12 +8,6 @@ namespace AzureBackup.Tests;
 /// must return <c>true</c> by default (SQLite is the production
 /// backend) and honour the <see cref="System.Threading.AsyncLocal{T}"/>
 /// override that tests use to opt INTO the legacy LiteDB code path.
-///
-/// <para>
-/// The C-1-era <c>AZBK_USE_SQLITE</c> environment variable was
-/// removed in C-5; tests that exercised it (<c>IsTruthy</c> token
-/// matrix, <c>EnvVarScope</c> helper) went with it.
-/// </para>
 /// </summary>
 public class DatabaseBackendFactoryTests
 {

@@ -8,12 +8,12 @@ namespace AzureBackup.Tests;
 /// for the lifetime of the <c>using</c> block, then clears it on dispose.
 ///
 /// <para>
-/// Replaces the older <c>EnvVarScope</c> pattern that mutated the
-/// process-wide <c>AZBK_USE_SQLITE</c> environment variable. The env-var
-/// pattern was unsafe under xUnit's parallel test execution: two test
-/// classes that flipped the env var concurrently would race, and a
-/// third test in a sibling class could observe the wrong value mid-call.
-/// The <see cref="AsyncLocal{T}"/>-based override is per-logical-thread
+/// Replaces the older <c>EnvVarScope</c> pattern that mutated a
+/// process-wide environment variable. The env-var pattern was unsafe
+/// under xUnit's parallel test execution: two test classes that
+/// flipped the variable concurrently would race, and a third test in
+/// a sibling class could observe the wrong value mid-call. The
+/// <see cref="AsyncLocal{T}"/>-based override is per-logical-thread
 /// so each test is isolated.
 /// </para>
 ///
