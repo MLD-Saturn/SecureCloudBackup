@@ -1,27 +1,23 @@
 using System.Diagnostics;
-using System.Security.Cryptography;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services.Backends;
-using Konscious.Security.Cryptography;
 using LiteDB;
 
 namespace AzureBackup.Core.Services;
 
 /// <summary>
 /// Manages local database for tracking backup state, configuration, and file metadata.
-/// SQLCipher-encrypted SQLite is the production backend (selected by
-/// <see cref="DatabaseBackendFactory"/>); the legacy LiteDB code path is
-/// retained behind the same factory's AsyncLocal test override.
-/// The database is encrypted using a key derived from the user's password
-/// via Argon2id, providing strong protection against brute force attacks.
+/// Backed by a SQLCipher-encrypted SQLite database created via
+/// <see cref="DatabaseBackendFactory.CreateAndInitializeSqlite"/>; every public
+/// method on this class delegates to the underlying <see cref="SqliteBackend"/>
+/// stored in the <c>_sqliteBackend</c> field.
 ///
 /// <para>
-/// When <see cref="DatabaseBackendFactory.ShouldUseSqlite"/> returns
-/// <c>true</c>, <see cref="Initialize(string, ReadOnlySpan{char})"/>
-/// creates a <see cref="SqliteBackend"/> and every public method on
-/// this class short-circuits to the backend via the
-/// <c>_sqliteBackend</c> field at the top of the method. Otherwise
-/// the legacy LiteDB code path is taken.
+/// W4 Phase 3 (B59) removed the historical LiteDB code path and the
+/// AsyncLocal test override that pinned it; the LiteDB-typed collection
+/// fields below remain only as the still-pending Phase-3-Commit-2 cleanup
+/// surface that <see cref="Backends.LiteDbBackend"/> and the contract tests
+/// reach through this class.
 /// </para>
 /// </summary>
 public partial class LocalDatabaseService : IDisposable
@@ -35,12 +31,11 @@ public partial class LocalDatabaseService : IDisposable
     private ILiteCollection<ChunkFileRefRow>? _chunkFileRefsCollection;
 
     /// <summary>
-    /// Populated by <see cref="Initialize(string, ReadOnlySpan{char})"/>
-    /// ONLY when <see cref="DatabaseBackendFactory.ShouldUseSqlite"/>
-    /// returns true. When non-null every public method on this class
-    /// delegates to the backend instead of touching the LiteDB fields
-    /// above. When null the service behaves exactly as it did
-    /// pre-feature-flag.
+    /// Populated by <see cref="Initialize(string, ReadOnlySpan{char})"/>.
+    /// Always non-null after a successful Initialize. The remaining
+    /// LiteDB-typed fields above will be retired in W4 Phase 3 Commit 2;
+    /// while they exist, every public method on this class checks
+    /// <c>_sqliteBackend</c> first and delegates to it.
     /// </summary>
     private SqliteBackend? _sqliteBackend;
 
@@ -79,25 +74,18 @@ public partial class LocalDatabaseService : IDisposable
     private bool _disposed;
     private string? _databasePath;
 
-    // Argon2id parameters - matches EncryptionService for consistency
-    private const int Argon2DegreeOfParallelism = 8;
-    private const int Argon2MemorySize = 65536; // 64 MB
-    private const int Argon2Iterations = 3;
-    private const int SaltSize = 16;
-    private const int DerivedKeySize = 32; // 256 bits
-
     public bool IsInitialized => _sqliteBackend?.IsInitialized ?? (_database != null);
 
     /// <summary>
     /// Gets the current database file path.
     /// </summary>
     public string? DatabasePath => _sqliteBackend?.DatabasePath ?? _databasePath;
-    
+
     /// <summary>
     /// Event for detailed debug/diagnostic logging.
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
-    
+
     [Conditional("DIAGNOSTICLOG")]
     private void Log(string message)
     {
@@ -112,8 +100,9 @@ public partial class LocalDatabaseService : IDisposable
 
     /// <summary>
     /// Initializes the database at the specified path with password encryption.
-    /// Uses Argon2id to derive a strong key from the password, providing protection
-    /// against brute force attacks even if the database file is stolen.
+    /// The underlying SQLCipher backend derives a strong key from the password
+    /// using Argon2id, providing protection against brute force attacks even
+    /// if the database file is stolen.
     /// </summary>
     /// <param name="databasePath">Path to the database file</param>
     /// <param name="password">Password used to encrypt the database. Supplied as a span so the
@@ -151,149 +140,25 @@ public partial class LocalDatabaseService : IDisposable
 
     /// <summary>
     /// Per-instance re-entry guard for <see cref="Initialize"/>. See
-    /// the guard comment in Initialize for why this exists. Per-instance
-    /// (not [ThreadStatic]) because the legitimate migration flow
-    /// recurses on a DIFFERENT LocalDatabaseService instance.
+    /// the guard comment in Initialize for why this exists.
     /// </summary>
     private bool _initializeInProgress;
 
     private void InitializeCore(string databasePath, ReadOnlySpan<char> password)
     {
-        // Backend selection is decided once per Initialize call. In
-        // production this always picks SQLite; only the test-only
-        // AsyncLocal override on DatabaseBackendFactory can opt into
-        // the legacy LiteDB branch below. When SQLite is selected we
-        // instantiate SqliteBackend and skip ALL LiteDB setup; every
-        // public method on this class checks _sqliteBackend at its top
-        // and delegates if present.
-        if (DatabaseBackendFactory.ShouldUseSqlite())
-        {
-            Log($"Initialize: routing to SqliteBackend (production default)");
-            _databasePath = databasePath;
-            // B13: forward the backend's diagnostic events through this
-            // service's own DiagnosticLog so the file logger captures the
-            // Argon2id KDF entry/exit/OOM messages.
-            _sqliteBackend = DatabaseBackendFactory.CreateAndInitializeSqlite(
-                databasePath, password,
-                diagnosticLogSink: (s, msg) => DiagnosticLog?.Invoke(this, msg));
-            // Note: SqliteBackend does its OWN WAL checkpoint lifecycle
-            // via synchronous=NORMAL + internal periodic-checkpoint, so
-            // we do NOT start the LiteDB-oriented _checkpointTimer.
-            return;
-        }
-
-        InitializeLiteDbCore(databasePath, password);
-    }
-
-    /// <summary>
-    /// Opens the database as LiteDB, derives the key with Argon2id, and
-    /// builds every collection + index. Reachable only when a test pins
-    /// the backend to LiteDB via <see cref="DatabaseBackendFactory"/>'s
-    /// AsyncLocal override; production always routes through SQLite.
-    /// </summary>
-    private void InitializeLiteDbCore(string databasePath, ReadOnlySpan<char> password)
-    {
-        Log($"Initialize: Opening encrypted database at {databasePath}");
-
+        // W4 Phase 3 (B59): SQLite is the only backend. Every public
+        // method on this class checks _sqliteBackend at its top and
+        // delegates to it; the legacy LiteDB code path was removed
+        // along with DatabaseBackendFactory.ShouldUseSqlite and the
+        // AsyncLocal test override.
+        Log($"Initialize: routing to SqliteBackend");
         _databasePath = databasePath;
-
-        var directory = Path.GetDirectoryName(databasePath);
-        if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
-        {
-            Directory.CreateDirectory(directory);
-            Log($"Initialize: Created directory {directory}");
-        }
-
-        // Get or create the database salt
-        var saltFilePath = GetSaltFilePath(databasePath);
-        byte[] salt;
-
-        if (File.Exists(saltFilePath))
-        {
-            // Existing database - read salt
-            salt = File.ReadAllBytes(saltFilePath);
-            if (salt.Length != SaltSize)
-            {
-                throw new InvalidOperationException($"Database salt file is corrupted (expected {SaltSize} bytes, got {salt.Length})");
-            }
-            Log("Initialize: Loaded existing database salt");
-        }
-        else
-        {
-            // New database - generate and save salt
-            salt = new byte[SaltSize];
-            RandomNumberGenerator.Fill(salt);
-            File.WriteAllBytes(saltFilePath, salt);
-            Log("Initialize: Generated and saved new database salt");
-        }
-
-        // Derive strong key using Argon2id (same parameters as EncryptionService)
-        Log("Initialize: Deriving database key with Argon2id...");
-        var derivedKey = DeriveKeyFromPassword(password, salt);
-
-        try
-        {
-            // Convert derived key to Base64 for LiteDB password
-            // LiteDB will use this as the encryption password
-            var dbPassword = Convert.ToBase64String(derivedKey);
-
-            // Build connection string with derived key
-            var connectionString = new ConnectionString
-            {
-                Filename = databasePath,
-                Password = dbPassword,
-                Connection = ConnectionType.Shared
-            };
-
-            try
-            {
-                _database = new LiteDatabase(connectionString);
-
-                _configCollection = _database.GetCollection<BackupConfiguration>("config");
-                _filesCollection = _database.GetCollection<BackedUpFile>("files");
-                _pendingChangesCollection = _database.GetCollection<FileChangeEvent>("pending_changes");
-                _chunkIndexCollection = _database.GetCollection<ChunkIndexEntry>("chunk_index");
-                _indexMetadataCollection = _database.GetCollection<IndexMetadata>("index_metadata");
-                _chunkFileRefsCollection = _database.GetCollection<ChunkFileRefRow>("chunk_file_refs");
-
-                // Create indexes for faster queries
-                _filesCollection.EnsureIndex(x => x.LocalPath, unique: true);
-                _filesCollection.EnsureIndex(x => x.Status);
-                _filesCollection.EnsureIndex(x => x.FileHash);
-
-                // Chunk index indexes
-                _chunkIndexCollection.EnsureIndex(x => x.ChunkHash, unique: true);
-                _chunkIndexCollection.EnsureIndex(x => x.ReferenceCount);
-                _chunkIndexCollection.EnsureIndex(x => x.CurrentTier);
-
-                // Reverse-index (Phase 5 / P3): indexed on both sides so
-                // GetChunkEntriesForFile (file -> chunks) and chunk deletion
-                // (chunk -> files) are both O(log N) lookups.
-                _chunkFileRefsCollection.EnsureIndex(x => x.FilePath);
-                _chunkFileRefsCollection.EnsureIndex(x => x.ChunkHash);
-            }
-            catch (LiteException ex) when (ex.Message.Contains("invalid password", StringComparison.OrdinalIgnoreCase) ||
-                                            ex.Message.Contains("file is not a valid", StringComparison.OrdinalIgnoreCase) ||
-                                            ex.Message.Contains("HMAC", StringComparison.OrdinalIgnoreCase))
-            {
-                Log("Initialize: Invalid password for encrypted database");
-                _database?.Dispose();
-                _database = null;
-                throw new InvalidPasswordException("Invalid password. Please try again.", ex);
-            }
-        }
-        finally
-        {
-            // Zero the derived key from memory
-            CryptographicOperations.ZeroMemory(derivedKey);
-        }
-
-        Log("Initialize: Encrypted database initialized successfully with Argon2id-derived key");
-
-        // Start the automatic checkpoint timer. First fire is after CheckpointInterval
-        // so we do not pay the flush cost during the latency-sensitive startup window.
-        _checkpointTimer = new System.Threading.Timer(CheckpointTimerCallback, state: null,
-            dueTime: CheckpointInterval, period: CheckpointInterval);
+        // B13: forward the backend's diagnostic events through this
+        // service's own DiagnosticLog so the file logger captures the
+        // Argon2id KDF entry/exit/OOM messages.
+        _sqliteBackend = DatabaseBackendFactory.CreateAndInitializeSqlite(
+            databasePath, password,
+            diagnosticLogSink: (s, msg) => DiagnosticLog?.Invoke(this, msg));
     }
 
     /// <summary>
@@ -304,31 +169,6 @@ public partial class LocalDatabaseService : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(password);
         Initialize(databasePath, password.AsSpan());
-    }
-
-    /// <summary>
-    /// Derives a key from a password using Argon2id.
-    /// Uses the same parameters as EncryptionService for consistency.
-    /// </summary>
-    private static byte[] DeriveKeyFromPassword(ReadOnlySpan<char> password, byte[] salt)
-    {
-        var passwordBytes = PasswordBytes.FromChars(password);
-        try
-        {
-            using Argon2id argon2 = new(passwordBytes)
-            {
-                Salt = salt,
-                DegreeOfParallelism = Argon2DegreeOfParallelism,
-                MemorySize = Argon2MemorySize,
-                Iterations = Argon2Iterations
-            };
-
-            return argon2.GetBytes(DerivedKeySize);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(passwordBytes);
-        }
     }
 
     /// <summary>
@@ -1015,15 +855,12 @@ public partial class LocalDatabaseService : IDisposable
     /// Azure-side ContentHash.
     /// </summary>
     /// <remarks>
-    /// SQLite is the production default since C-5 (see
-    /// <see cref="DatabaseBackendFactory.ShouldUseSqlite"/>) so the
-    /// SQLite backend is always available in real deployments. The
-    /// only way to reach this method without a SQLite backend is the
-    /// test-only AsyncLocal override that pins LiteDB; B5 (post-D6
-    /// audit) confirmed there are no production LiteDB users to
-    /// support. We throw rather than silently no-op so a future
-    /// regression that wires LiteDB into a non-test code path is
-    /// loud rather than silently losing MD5 data.
+    /// SQLite is the only backend in production (W4 Phase 3 / B59).
+    /// The throw guard is retained until the LiteDB-shaped contract
+    /// tests are retired in Phase 3 Commit 2 because they still
+    /// instantiate <see cref="LocalDatabaseService"/> through the
+    /// <c>LiteDbBackend</c> wrapper, and a wrapper-only call site
+    /// without a SQLite backend would otherwise silently lose MD5 data.
     /// </remarks>
     public void SetChunkExpectedMd5(string chunkHash, byte[] md5)
     {

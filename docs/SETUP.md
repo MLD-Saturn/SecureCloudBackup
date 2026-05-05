@@ -186,7 +186,7 @@ Use the **Tier Migration** view (in the app) to move existing chunks between tie
 
 ### Local database
 
-The local metadata database is `backup.db`. Production builds use **SQLCipher-encrypted SQLite**; the database is unlocked at startup using your password (via the Argon2id-derived key). An older LiteDB-backed format is still supported for migration: if the app finds a legacy `backup.db`, it migrates it to the SQLite format on first unlock with the correct password. The original is preserved as a backup file for manual deletion.
+The local metadata database is `backup.db`. Production builds use **SQLCipher-encrypted SQLite**; the database is unlocked at startup using your password (via the Argon2id-derived key). The application is SQLite-only -- the historical LiteDB-to-SQLite unlock-time migration was retired in B47 / B57 / B58 and a legacy LiteDB `backup.db` is no longer auto-migrated; if you have one, copy it aside, let the app create a fresh SQLite catalog, and rely on **Storage Health -> Rebuild from Azure** (or **Rebuild from quarantined catalog**) to repopulate state from Azure.
 
 ---
 
@@ -281,7 +281,7 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Key derivation | Argon2id, 64 MB memory, 8 lanes, 3 iterations |
 | Encryption envelope overhead | 37 bytes per chunk |
 | Local database (production) | SQLCipher-encrypted SQLite (`SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, `Microsoft.Data.Sqlite` 10.x) |
-| Local database (legacy / migration source) | LiteDB 5.x |
+| Local database (LiteDB) | reference scheduled for removal in B60 (W4 Phase 3 Commit 2). The `<PackageReference Include="LiteDB" Version="5.0.21" />` is still present in `src/AzureBackup.Core/AzureBackup.Core.csproj` because `LiteDbBackend.cs` and the `BackendContractTests` shared-contract suite still reference the type, but no production code path reaches it after B59. |
 | Chunking | Content-defined, Rabin-style rolling hash (window 48, prime 31), per-extension config |
 | Default file-level concurrency | 16 (`MaxParallelFileBackups`, raised from 8 in B27 based on `TwoTierFileSplitBigScaleBenchmark`) |
 | Default chunk-level concurrency per file | 6 (`MaxParallelChunkUploads`) |

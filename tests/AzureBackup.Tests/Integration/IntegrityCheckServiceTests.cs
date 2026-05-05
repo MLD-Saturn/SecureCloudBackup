@@ -31,14 +31,11 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
     private FileWatcherService _fileWatcherService = null!;
     private BackupOrchestrator _orchestrator = null!;
     private IntegrityCheckService _integrityService = null!;
-    private BackendOverrideScope _backendScope = null!;
 
     private const string TestPassword = "IntegrityCheck#TestPwd1!";
 
     public async Task InitializeAsync()
     {
-        _backendScope = new BackendOverrideScope(useSqlite: true);
-
         _testDir = Path.Combine(Path.GetTempPath(), $"AzbkIntegrity_{Guid.NewGuid():N}");
         _sourceDir = Path.Combine(_testDir, "src");
         _diagDir = Path.Combine(_testDir, "diagnostics");
@@ -77,7 +74,6 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         try { await _orchestrator.DisposeAsync(); } catch { }
         try { _encryptionService.Dispose(); } catch { }
         try { _databaseService.Dispose(); } catch (NullReferenceException) { }
-        _backendScope.Dispose();
         if (Directory.Exists(_testDir))
         {
             try { Directory.Delete(_testDir, recursive: true); } catch { /* best effort */ }
@@ -281,7 +277,6 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // Simulate "uploaded before D6" by erasing what the upload
         // callback persisted. We test directly via the database service
         // because there is no public unwind API.
-        // (LiteDB legacy backend would naturally have null here.)
         // Trick: write all-zero bytes which will be overwritten by TOFU
         // on first check, but the integrity check should not fail.
         // Actually the cleanest path: clear via setting a sentinel of
@@ -355,31 +350,6 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
             {
                 FileIds = Array.Empty<int>(),
                 ScopeSummary = "Empty"
-            });
-        });
-    }
-
-    [Fact]
-    public async Task IntegrityCheckSupported_FalseOnLiteDb_RunAsyncThrows()
-    {
-        // D7 review fix 4.9: the integrity feature is SQLite-only. On
-        // the LiteDB legacy backend, RunAsync must throw NotSupportedException
-        // with a clear message pointing at the SQLite migration.
-        using var litedbScope = new BackendOverrideScope(useSqlite: false);
-        var litedbDir = Path.Combine(_testDir, "litedb");
-        Directory.CreateDirectory(litedbDir);
-        using var litedbService = new LocalDatabaseService();
-        litedbService.Initialize(Path.Combine(litedbDir, "legacy.db"), TestPassword);
-
-        Assert.False(litedbService.IntegrityCheckSupported);
-        var legacyEngine = new IntegrityCheckService(litedbService, _blobService, _encryptionService);
-
-        await Assert.ThrowsAsync<NotSupportedException>(async () =>
-        {
-            await legacyEngine.RunAsync(new IntegrityCheckOptions
-            {
-                FileIds = new[] { 1 },
-                ScopeSummary = "Should not run"
             });
         });
     }

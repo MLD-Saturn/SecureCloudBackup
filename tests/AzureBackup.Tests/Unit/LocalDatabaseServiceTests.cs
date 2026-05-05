@@ -615,66 +615,6 @@ public class LocalDatabaseServiceTests : IAsyncLifetime
         Assert.Equal(firstMarker, secondMarker);
     }
 
-    [Fact]
-    public void RebuildReverseChunkIndex_PopulatesFromLegacyReferencingFiles()
-    {
-        // C-5: this test exercises the LiteDB-side reverse-index
-        // rebuild that derives chunk_file_refs from the legacy
-        // ReferencingFiles list on ChunkIndexEntry. SQLite's
-        // RebuildReverseChunkIndex derives from the file_chunks table
-        // instead (no ReferencingFiles dependency). Pin to LiteDB so
-        // the seeded shape (ReferencingFiles populated, file_chunks
-        // empty) is what the rebuild reads. Use a private
-        // LocalDatabaseService rather than the fixture's
-        // _databaseService because the fixture is SQLite-by-default
-        // post-C-5.
-        using var _flagOff = new BackendOverrideScope(useSqlite: false);
-        using var liteDb = new LocalDatabaseService();
-        var legacyDbPath = Path.Combine(_testDirectory, "legacy_rebuild.db");
-        liteDb.Initialize(legacyDbPath, TestPassword);
-
-        // Arrange - seed two chunks referenced by two overlapping files using the
-        // legacy shape (ReferencingFiles list on ChunkIndexEntry) without the
-        // reverse-index hookup. Mimics an upgraded database.
-        var now = DateTime.UtcNow;
-        var entry1 = new ChunkIndexEntry
-        {
-            ChunkHash = new string('a', 64),
-            FirstUploadedAt = now,
-            ReferenceCount = 2,
-            ReferencingFiles =
-            [
-                new ChunkFileReference { FilePath = "C:\\alpha.bin", ChunkIndex = 0, ReferencedAt = now },
-                new ChunkFileReference { FilePath = "C:\\beta.bin", ChunkIndex = 0, ReferencedAt = now }
-            ]
-        };
-        var entry2 = new ChunkIndexEntry
-        {
-            ChunkHash = new string('b', 64),
-            FirstUploadedAt = now,
-            ReferenceCount = 1,
-            ReferencingFiles =
-            [
-                new ChunkFileReference { FilePath = "C:\\alpha.bin", ChunkIndex = 1, ReferencedAt = now }
-            ]
-        };
-        liteDb.SaveChunkIndexEntry(entry1);
-        liteDb.SaveChunkIndexEntry(entry2);
-
-        // Act
-        liteDb.RebuildReverseChunkIndex();
-
-        // Assert - indexed file lookups return the correct sets.
-        var alpha = liteDb.GetChunkEntriesForFile("C:\\alpha.bin");
-        var beta = liteDb.GetChunkEntriesForFile("C:\\beta.bin");
-
-        Assert.Equal(2, alpha.Count);
-        Assert.Contains(alpha, e => e.ChunkHash == entry1.ChunkHash);
-        Assert.Contains(alpha, e => e.ChunkHash == entry2.ChunkHash);
-        Assert.Single(beta);
-        Assert.Equal(entry1.ChunkHash, beta[0].ChunkHash);
-    }
-
     #endregion
 
     #region Checkpoint (discovered-#3)

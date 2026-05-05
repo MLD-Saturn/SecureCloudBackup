@@ -120,10 +120,6 @@ public abstract class BackupBenchmarkBase
         Directory.CreateDirectory(_filesDir);
         _dbPath = Path.Combine(_testDir, "backup.db");
 
-        // Force the SQLite backend regardless of any process-level env var.
-        // SQLite is the production default since C-5.
-        Environment.SetEnvironmentVariable("AZBK_USE_SQLITE", "1");
-
         var (profile, fileCount) = GetWorkload(Workload);
 
         // B27 disk-space preflight. The original B25-bench-2 runs
