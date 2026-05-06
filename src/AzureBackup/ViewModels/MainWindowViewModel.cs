@@ -1229,6 +1229,21 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     public event EventHandler? RemapFolderPickerRequested;
 
     /// <summary>
+    /// B61: event raised when the rebuild form needs an OS file picker
+    /// to choose the quarantined database file. Mirrors the Remap /
+    /// Restore folder-picker pattern: the View handles the StorageProvider
+    /// call and writes the result back via
+    /// <see cref="SetRebuildQuarantinedDbPath"/>.
+    /// </summary>
+    public event EventHandler? RebuildQuarantinedDbPickerRequested;
+
+    /// <summary>
+    /// B61: event raised when the rebuild form needs an OS file picker
+    /// to choose the quarantined salt sidecar.
+    /// </summary>
+    public event EventHandler? RebuildQuarantinedSaltPickerRequested;
+
+    /// <summary>
     /// Event raised when a preview dialog is needed.
     /// The View subscribes to show the preview dialog and returns user's decision.
     /// </summary>

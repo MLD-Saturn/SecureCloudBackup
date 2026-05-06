@@ -455,8 +455,8 @@ The quarantined catalog is opened **read-only**; its bytes are never modified. I
 
 Click **Rebuild From Quarantined Catalog...** to expand the form. All five fields are required:
 
-- **Quarantined database file** — full path to the `.quarantine-yyyyMMdd-HHmmss` database file. Typically beside the original catalog under your data directory.
-- **Quarantined salt sidecar** — full path to the matching `.salt.quarantine-yyyyMMdd-HHmmss` file. The two files were renamed atomically when you quarantined the catalog, so they always pair by stamp.
+- **Quarantined database file** — full path to the `.quarantine-yyyyMMdd-HHmmss` database file. Typically beside the original catalog under your data directory. The form auto-fills this with the most recent matched quarantine pair found in the data directory; click **Browse...** to pick a different file (the picker defaults to your data directory and pre-filters to `backup.db.quarantine-*`).
+- **Quarantined salt sidecar** — full path to the matching `.salt.quarantine-yyyyMMdd-HHmmss` file. The two files were renamed atomically when you quarantined the catalog, so they always pair by stamp; the auto-fill follows that rule and never returns a half-populated pair. Click **Browse...** to override (the picker pre-filters to `backup.db.salt.quarantine-*`).
 - **Original password** — the password the quarantined catalog was protected with. The same password becomes the new fresh-catalog password.
 - **Azure connection string** — your storage account connection string. This must be supplied by hand because the encrypted connection string lives inside the quarantined catalog and is treated as unrecoverable.
 - **Container name** — the Azure blob container that holds your backed-up chunks and metadata. Defaults to `backup`.

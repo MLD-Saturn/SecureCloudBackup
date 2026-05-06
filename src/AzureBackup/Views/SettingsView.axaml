@@ -384,12 +384,24 @@
 
                     <StackPanel IsVisible="{Binding IsRebuildFromQuarantinePending}" Spacing="6">
                         <TextBlock Text="Quarantined database file"/>
-                        <TextBox Text="{Binding RebuildQuarantinedDbPath}"
-                                 Watermark="C:\path\to\backup.db.quarantine-yyyyMMdd-HHmmss"/>
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Grid.Column="0" Text="{Binding RebuildQuarantinedDbPath}"
+                                     Watermark="C:\path\to\backup.db.quarantine-yyyyMMdd-HHmmss"/>
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Command="{Binding BrowseRebuildQuarantinedDbCommand}"
+                                    Margin="6,0,0,0" Padding="8,2"
+                                    ToolTip.Tip="Browse for the quarantined database file"/>
+                        </Grid>
 
                         <TextBlock Text="Quarantined salt sidecar"/>
-                        <TextBox Text="{Binding RebuildQuarantinedSaltPath}"
-                                 Watermark="C:\path\to\backup.db.salt.quarantine-yyyyMMdd-HHmmss"/>
+                        <Grid ColumnDefinitions="*,Auto">
+                            <TextBox Grid.Column="0" Text="{Binding RebuildQuarantinedSaltPath}"
+                                     Watermark="C:\path\to\backup.db.salt.quarantine-yyyyMMdd-HHmmss"/>
+                            <Button Grid.Column="1" Content="Browse..."
+                                    Command="{Binding BrowseRebuildQuarantinedSaltCommand}"
+                                    Margin="6,0,0,0" Padding="8,2"
+                                    ToolTip.Tip="Browse for the matching quarantined salt sidecar"/>
+                        </Grid>
 
                         <TextBlock Text="Original password"/>
                         <TextBox Text="{Binding RebuildQuarantinedPassword}" PasswordChar="*"/>

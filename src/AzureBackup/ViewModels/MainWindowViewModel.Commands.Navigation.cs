@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using AzureBackup.Core;
+using AzureBackup.Core.Services;
 using CommunityToolkit.Mvvm.Input;
 
 namespace AzureBackup.ViewModels;
@@ -453,14 +454,113 @@ public partial class MainWindowViewModel
     /// connection details so the orchestrator can recover the
     /// in-database PasswordSalt and rebuild the local catalog from
     /// Azure metadata.
+    /// <para>
+    /// B61: the two path fields are pre-populated from the most-recent
+    /// quarantine pair found in <see cref="AppMode.DataDirectory"/> so
+    /// the user can usually click Confirm without typing or browsing.
+    /// The Browse buttons are still wired for the case where the
+    /// quarantined files were copied somewhere else.
+    /// </para>
     /// </summary>
     [RelayCommand]
     private void RequestRebuildFromQuarantine()
     {
         IsRebuildFromQuarantinePending = true;
-        AddLog("Rebuild from quarantined catalog requested. Provide the quarantined database file, " +
-               "the matching .salt sidecar, the original password used with the quarantined catalog, " +
-               "and the Azure connection string + container that contain the backed-up data.");
+
+        // B61: pre-populate paths from the data directory if a complete
+        // quarantine pair (matched by identical timestamp suffix) exists.
+        // We only overwrite empty fields so a user re-opening the form
+        // after a typo doesn't lose their in-progress edits.
+        var (defaultDb, defaultSalt) = QuarantineFileLocator.FindMostRecentQuarantinePair(AppMode.DataDirectory);
+        if (string.IsNullOrWhiteSpace(RebuildQuarantinedDbPath) && defaultDb is not null)
+        {
+            RebuildQuarantinedDbPath = defaultDb;
+        }
+        if (string.IsNullOrWhiteSpace(RebuildQuarantinedSaltPath) && defaultSalt is not null)
+        {
+            RebuildQuarantinedSaltPath = defaultSalt;
+        }
+
+        if (defaultDb is not null && defaultSalt is not null)
+        {
+            AddLog($"Rebuild from quarantined catalog requested. Pre-filled the most recent quarantine pair from {AppMode.DataDirectory}; " +
+                   "verify the paths, enter the original password, and supply the Azure connection string + container.");
+        }
+        else
+        {
+            AddLog("Rebuild from quarantined catalog requested. Provide the quarantined database file, " +
+                   "the matching .salt sidecar, the original password used with the quarantined catalog, " +
+                   "and the Azure connection string + container that contain the backed-up data.");
+        }
+    }
+
+    /// <summary>
+    /// B61: command bound to the Browse button next to the quarantined
+    /// database path field. Asks the View to open an OS file picker;
+    /// the View writes the result back via
+    /// <see cref="SetRebuildQuarantinedDbPath"/>.
+    /// </summary>
+    [RelayCommand]
+    private void BrowseRebuildQuarantinedDb()
+    {
+        RebuildQuarantinedDbPickerRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// B61: command bound to the Browse button next to the quarantined
+    /// salt sidecar field.
+    /// </summary>
+    [RelayCommand]
+    private void BrowseRebuildQuarantinedSalt()
+    {
+        RebuildQuarantinedSaltPickerRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// B61: View callback that writes the file-picker result into the
+    /// quarantined-database path field.
+    /// </summary>
+    public void SetRebuildQuarantinedDbPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        RebuildQuarantinedDbPath = path;
+    }
+
+    /// <summary>
+    /// B61: View callback that writes the file-picker result into the
+    /// quarantined-salt path field.
+    /// </summary>
+    public void SetRebuildQuarantinedSaltPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return;
+        RebuildQuarantinedSaltPath = path;
+    }
+
+    /// <summary>
+    /// B61: directory the file picker should default to. Returns the
+    /// directory of whatever the user has already typed in the matching
+    /// path field (so re-Browse stays in the same folder), falling back
+    /// to <see cref="AppMode.DataDirectory"/> otherwise.
+    /// </summary>
+    public string GetRebuildPickerStartDirectory(bool forSalt)
+    {
+        var existing = forSalt ? RebuildQuarantinedSaltPath : RebuildQuarantinedDbPath;
+        if (!string.IsNullOrWhiteSpace(existing))
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(existing);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    return dir;
+                }
+            }
+            catch
+            {
+                // GetDirectoryName can throw on weird inputs; fall through.
+            }
+        }
+        return AppMode.DataDirectory;
     }
 
     /// <summary>
