@@ -16,6 +16,17 @@ public class RestoreResult
 
     public long TotalBytesRestored { get; set; }
 
+    /// <summary>
+    /// B63: high-water mark of file-level concurrency the
+    /// <see cref="AzureBackup.Core.Services.BandwidthScheduler"/> actually used
+    /// during this restore. Surfaced so operation metrics record the real
+    /// adaptive concurrency rather than the static
+    /// <c>MaxParallelFileRestores</c> ceiling, which post-B62 no longer
+    /// reflects what the AIMD controller chose. Zero for restores that did
+    /// not engage the large-file scheduler (small-file-only batches).
+    /// </summary>
+    public int PeakFileConcurrency { get; set; }
+
     public int TotalFilesProcessed => SuccessfulFiles.Count + FailedFiles.Count + CorruptedRecoveryFiles.Count;
     public bool IsSuccess => FailedFiles.Count == 0 && CorruptedRecoveryFiles.Count == 0;
 }

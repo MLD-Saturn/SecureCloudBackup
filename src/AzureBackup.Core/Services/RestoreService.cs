@@ -1,5 +1,4 @@
 using System.Buffers;
-using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
@@ -347,6 +346,12 @@ public partial class RestoreService
                         }
                         catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))
                         {
+                            // B63: feed the AIMD scheduler from the single-chunk path too. Without
+                            // this, multi-chunk-adjacent files (a 17 MB file split into a single
+                            // 17 MB chunk vs a 14 MB file split into a single 14 MB chunk) skip the
+                            // signal entirely and the scheduler can keep adding capacity while the
+                            // server is already 503'ing single-chunk requests.
+                            bandwidthScheduler?.NotifyTransientError();
                             var delay = ChunkRetryBaseDelayMs * (1 << attempt);
                             diag.RecordChunk("TransientRetry", chunk.Index, chunk.Hash, chunk.Length,
                                 extra: $"attempt={attempt + 1}/{MaxChunkRetries + 1}, error={ex.GetType().Name}");
@@ -370,6 +375,10 @@ public partial class RestoreService
 
                     currentBytes += chunk.Length;
                     progress?.Report((currentBytes, file.FileSize));
+                    // B63: feed scheduler from single-chunk success path too so that
+                    // even single-chunk-large-file restores contribute to the EWMA
+                    // throughput signal that drives the next batch's dispatch wave.
+                    bandwidthScheduler?.RecordBytesCompleted(chunk.Length);
                 }
 
                 await outputStream.FlushAsync(cancellationToken);
@@ -669,10 +678,16 @@ public partial class RestoreService
         long lastDownloadCompletedTicks = Environment.TickCount64;
         int acquireWaitingCount = 0;
         int snapshotsLogged = 0;
-        // Capture indices of chunks that completed download but not write yet,
-        // so the watchdog snapshot can name them. Bounded by reorder-buffer size.
-        var bufferedIndicesSnapshot = new ConcurrentDictionary<int, byte>();
-        
+        // B63: pendingChunks lives in the outer scope so the watchdog can sample it
+        // under `pendingChunksLock`. Pre-B63 the writer maintained a parallel
+        // ConcurrentDictionary just for the snapshot, which doubled per-chunk
+        // bookkeeping cost on the hot path and could drift from `pendingChunks`
+        // if the writer ever forgot to mirror an add/remove. The locked snapshot
+        // is taken at most once per WatchdogPollMs (5 s) so contention is
+        // negligible.
+        var pendingChunks = new Dictionary<int, (byte[] data, int length)>();
+        var pendingChunksLock = new Lock();
+
         // Producer task: Download chunks in parallel and write to channel
         var producerTask = Task.Run(async () =>
         {
@@ -712,10 +727,25 @@ public partial class RestoreService
                         // Phase B: Release 1× after download returns (encrypted buffer freed inside blob service)
                         // Phase C: Consumer releases remaining 1× after writing plaintext to disk
                         var chunkMemoryCost = (long)chunk.Length * 2;
+                        // B63: track precisely how much budget we still owe so the
+                        // catch branches do not over-release. Pre-B63 the OCE/general
+                        // catches always called Release(chunkMemoryCost), but if the
+                        // exception fired AFTER Phase B (line `memoryBudget.Release(chunk.Length)`)
+                        // and BEFORE the consumer received the chunk, we would have
+                        // released chunkLength twice. After the channel write succeeds
+                        // ownership transfers to the writer and we owe nothing.
+                        long owedBudget = 0;
+                        // B63: the buffer returned by DownloadChunkStreamingAsync is
+                        // ArrayPool-rented. The catch branches must return it when the
+                        // chunk never reaches the consumer; pre-B63 they did not, leaking
+                        // pooled buffers on every cancelled or failed download that had
+                        // already produced a chunk.
+                        byte[]? rentedBuffer = null;
                         Interlocked.Increment(ref acquireWaitingCount);
                         try
                         {
                             await memoryBudget.AcquireAsync(chunkMemoryCost, linkedCts.Token);
+                            owedBudget = chunkMemoryCost;
                         }
                         finally
                         {
@@ -754,6 +784,17 @@ public partial class RestoreService
                                 }
                             }
 
+                            rentedBuffer = chunkBuffer;
+
+                            // B63: stamp "download completed" BEFORE the bounded-channel
+                            // WriteAsync. Pre-B63 this stamp was set after WriteAsync, so a
+                            // slow writer (channel full) made the download stage look idle
+                            // even though every download was succeeding back-to-back. The
+                            // watchdog's "downloads idle" line is supposed to discriminate
+                            // a download-stage stall from a writer-stage stall; that only
+                            // works if the timestamp tracks the download stage proper.
+                            Volatile.Write(ref lastDownloadCompletedTicks, Environment.TickCount64);
+
                             diag.RecordChunk("Downloaded", chunk.Index, chunk.Hash,
                                 chunkLength, extra: $"blob={chunk.BlobName}, expectedLen={chunk.Length}");
                             VerifyChunkIntegrity(chunkBuffer.AsSpan(0, chunkLength), chunk, file.LocalPath);
@@ -763,12 +804,13 @@ public partial class RestoreService
                             // Phase B: Encrypted buffer was returned inside DownloadChunkStreamingAsync.
                             // Release that portion now — only the plaintext buffer remains in the channel.
                             memoryBudget.Release(chunk.Length);
+                            owedBudget -= chunk.Length;
 
                             await channel.Writer.WriteAsync((chunk.Index, chunkBuffer!, chunkLength), linkedCts.Token);
-
-                            // B62 watchdog: timestamp the most recent successful download so the
-                            // watchdog can distinguish "download stalled" from "writer stalled".
-                            Volatile.Write(ref lastDownloadCompletedTicks, Environment.TickCount64);
+                            // B63: ownership of buffer + remaining plaintext budget has
+                            // now transferred to the writer. We owe nothing.
+                            owedBudget = 0;
+                            rentedBuffer = null;
 
                             var count = Interlocked.Increment(ref chunksDownloaded);
                             if (count % 50 == 0 || count == sortedChunks.Count)
@@ -779,8 +821,14 @@ public partial class RestoreService
                         }
                         catch (OperationCanceledException)
                         {
-                            // Download failed before Phase B release — release the full 2× cost
-                            memoryBudget.Release(chunkMemoryCost);
+                            // B63: only release what we still owe (see `owedBudget` above)
+                            // and only return the buffer if we still hold it. Pre-B63
+                            // these branches blindly released chunkMemoryCost and never
+                            // returned the rented buffer, which both over-released budget
+                            // (when OCE fired between Phase B and channel write) and leaked
+                            // ArrayPool buffers (when OCE fired after the buffer was rented).
+                            if (owedBudget > 0) memoryBudget.Release(owedBudget);
+                            if (rentedBuffer != null) ArrayPool<byte>.Shared.Return(rentedBuffer, clearArray: true);
                             // B62 (C): chunk will never reach the writer, so the writer
                             // will never release this window slot. Release it here so the
                             // producer loop can dispatch the next chunk during shutdown.
@@ -789,7 +837,8 @@ public partial class RestoreService
                         }
                         catch (Exception ex)
                         {
-                            memoryBudget.Release(chunkMemoryCost);
+                            if (owedBudget > 0) memoryBudget.Release(owedBudget);
+                            if (rentedBuffer != null) ArrayPool<byte>.Shared.Return(rentedBuffer, clearArray: true);
                             // B62 (C): same reasoning as the cancellation branch -- the
                             // chunk will never reach the writer because we are about to
                             // cancel the linked CTS, so the writer cannot release the slot.
@@ -852,7 +901,6 @@ public partial class RestoreService
         string? computedFileHash = null;
         var writerTask = Task.Run(async () =>
         {
-            var pendingChunks = new Dictionary<int, (byte[] data, int length)>();
             using var incrementalHash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
             Log($"BoundedParallelDownload.Consumer: Opening output file: {tempPath}");
@@ -879,29 +927,48 @@ public partial class RestoreService
                 // Shared by the direct-write and pending-drain paths.
                 async Task WriteChunkAndReleaseAsync(byte[] chunkData, int chunkLength)
                 {
-                    await outputStream.WriteAsync(chunkData.AsMemory(0, chunkLength), linkedCts.Token);
-                    incrementalHash.AppendData(chunkData.AsSpan(0, chunkLength));
-                    currentBytes += chunkLength;
-                    chunksWritten++;
-                    bufferedIndicesSnapshot.TryRemove(nextChunkToWrite, out _);
-                    nextChunkToWrite++;
-                    ArrayPool<byte>.Shared.Return(chunkData, clearArray: true);
-                    // Phase C: Release remaining 1× for plaintext buffer
-                    // (producer already released the encrypted buffer portion in Phase B)
-                    memoryBudget.Release(chunkLength);
-                    // B62 (C): release the writer-released window slot so the
-                    // producer can dispatch one more chunk. The slot is gated on
-                    // ACTUAL write progress, not download progress, so the
-                    // outstanding-but-not-written chunk count cannot exceed the
-                    // configured window.
-                    windowSlots.Release();
-                    // B62 (B): feed the AIMD scheduler with real per-chunk
-                    // throughput. Recorded in the writer (not the producer) so
-                    // bytes that downloaded but never landed do not skew the
-                    // bandwidth signal upward.
-                    bandwidthScheduler?.RecordBytesCompleted(chunkLength);
-                    // B62 watchdog: writer made forward progress — reset stall timer.
-                    Volatile.Write(ref lastWriterProgressTicks, Environment.TickCount64);
+                    // B63: every successful chunk write owes the window slot back
+                    // to the producer, otherwise the producer can starve. Wrap the
+                    // body in a try/finally so a transient FileStream.WriteAsync
+                    // exception does not leak a slot and stall the next chunk.
+                    // The pre-B63 code released the slot inline at the end of the
+                    // body, so any throw before that line silently consumed a slot
+                    // permanently.
+                    bool windowSlotReleased = false;
+                    try
+                    {
+                        await outputStream.WriteAsync(chunkData.AsMemory(0, chunkLength), linkedCts.Token);
+                        incrementalHash.AppendData(chunkData.AsSpan(0, chunkLength));
+                        currentBytes += chunkLength;
+                        chunksWritten++;
+                        nextChunkToWrite++;
+                        ArrayPool<byte>.Shared.Return(chunkData, clearArray: true);
+                        // Phase C: Release remaining 1× for plaintext buffer
+                        // (producer already released the encrypted buffer portion in Phase B)
+                        memoryBudget.Release(chunkLength);
+                        // B62 (C): release the writer-released window slot so the
+                        // producer can dispatch one more chunk. The slot is gated on
+                        // ACTUAL write progress, not download progress, so the
+                        // outstanding-but-not-written chunk count cannot exceed the
+                        // configured window.
+                        windowSlots.Release();
+                        windowSlotReleased = true;
+                        // B62 (B): feed the AIMD scheduler with real per-chunk
+                        // throughput. Recorded in the writer (not the producer) so
+                        // bytes that downloaded but never landed do not skew the
+                        // bandwidth signal upward.
+                        bandwidthScheduler?.RecordBytesCompleted(chunkLength);
+                        // B62 watchdog: writer made forward progress — reset stall timer.
+                        Volatile.Write(ref lastWriterProgressTicks, Environment.TickCount64);
+                    }
+                    finally
+                    {
+                        // Belt-and-braces: if WriteAsync, hash, or budget release threw
+                        // before the inline Release line, we still owe the slot to the
+                        // producer. Without this, the producer parks in WaitAsync and the
+                        // pipeline stalls until cancellation tears it down.
+                        if (!windowSlotReleased) windowSlots.Release();
+                    }
                 }
 
                 await foreach (var (index, data, length) in channel.Reader.ReadAllAsync(linkedCts.Token))
@@ -910,9 +977,15 @@ public partial class RestoreService
                     {
                         await WriteChunkAndReleaseAsync(data, length);
 
-                        while (pendingChunks.TryGetValue(nextChunkToWrite, out var pending))
+                        while (true)
                         {
-                            pendingChunks.Remove(nextChunkToWrite);
+                            (byte[] data, int length) pending;
+                            lock (pendingChunksLock)
+                            {
+                                if (!pendingChunks.TryGetValue(nextChunkToWrite, out pending))
+                                    break;
+                                pendingChunks.Remove(nextChunkToWrite);
+                            }
                             await WriteChunkAndReleaseAsync(pending.data, pending.length);
                         }
 
@@ -926,27 +999,40 @@ public partial class RestoreService
 
                         if (chunksWritten % 50 == 0)
                         {
+                            int bufferedCount;
+                            lock (pendingChunksLock) bufferedCount = pendingChunks.Count;
                             diag.Record($"[WRITER] '{fileName}' written {chunksWritten}/{sortedChunks.Count} chunks, " +
-                                $"{currentBytes:N0}/{file.FileSize:N0} bytes, {pendingChunks.Count} buffered");
-                            Log($"BoundedParallelDownload.Consumer: '{fileName}' written {chunksWritten}/{sortedChunks.Count} chunks, {currentBytes} bytes, {pendingChunks.Count} buffered");
+                                $"{currentBytes:N0}/{file.FileSize:N0} bytes, {bufferedCount} buffered");
+                            Log($"BoundedParallelDownload.Consumer: '{fileName}' written {chunksWritten}/{sortedChunks.Count} chunks, {currentBytes} bytes, {bufferedCount} buffered");
                         }
                     }
                     else
                     {
-                        pendingChunks[index] = (data, length);
-                        bufferedIndicesSnapshot.TryAdd(index, 0);
+                        int currentPending;
+                        long bufferedBytes;
+                        lock (pendingChunksLock)
+                        {
+                            pendingChunks[index] = (data, length);
+                            currentPending = pendingChunks.Count;
+                            // Defer summing bytes until the verbose log path actually
+                            // runs; the common path takes the lock for two pointer
+                            // writes only.
+                            bufferedBytes = 0;
+                        }
                         // Track peak reorder buffer depth for metrics
-                        int currentPending = pendingChunks.Count;
                         int prevMax;
                         while (currentPending > (prevMax = Volatile.Read(ref metricReorderMax)))
                         {
                             Interlocked.CompareExchange(ref metricReorderMax, currentPending, prevMax);
                         }
-                        if (pendingChunks.Count % 10 == 0 || pendingChunks.Count > effectiveConcurrency)
+                        if (currentPending % 10 == 0 || currentPending > effectiveConcurrency)
                         {
-                            var bufferedBytes = pendingChunks.Values.Sum(d => (long)d.length);
+                            lock (pendingChunksLock)
+                            {
+                                bufferedBytes = pendingChunks.Values.Sum(d => (long)d.length);
+                            }
                             Log($"BoundedParallelDownload.Consumer: '{fileName}' buffering chunk {index} (waiting for {nextChunkToWrite}), " +
-                                $"{pendingChunks.Count} chunks buffered ({bufferedBytes:N0} bytes), " +
+                                $"{currentPending} chunks buffered ({bufferedBytes:N0} bytes), " +
                                 $"GC.TotalMemory={GC.GetTotalMemory(false):N0}");
                         }
                     }
@@ -964,9 +1050,11 @@ public partial class RestoreService
             }
             catch (ChannelClosedException)
             {
+                int pendingCount;
+                lock (pendingChunksLock) pendingCount = pendingChunks.Count;
                 Log($"BoundedParallelDownload.Consumer: '{fileName}' channel closed unexpectedly. " +
                     $"chunksWritten={chunksWritten}, nextExpected={nextChunkToWrite}, " +
-                    $"pendingBuffered={pendingChunks.Count}, " +
+                    $"pendingBuffered={pendingCount}, " +
                     $"downloadException={downloadException?.GetType().Name ?? "none"}: {downloadException?.Message ?? "none"}");
                 if (downloadException != null)
                     throw downloadException;
@@ -974,10 +1062,12 @@ public partial class RestoreService
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                int pendingCount;
+                lock (pendingChunksLock) pendingCount = pendingChunks.Count;
                 Log($"BoundedParallelDownload.Consumer: '{fileName}' EXCEPTION writing: {ex.GetType().Name}: {ex.Message}");
                 Log($"BoundedParallelDownload.Consumer: StackTrace: {ex.StackTrace}");
                 Log($"BoundedParallelDownload.Consumer: State - chunksWritten={chunksWritten}, " +
-                    $"nextExpected={nextChunkToWrite}, pendingBuffered={pendingChunks.Count}, " +
+                    $"nextExpected={nextChunkToWrite}, pendingBuffered={pendingCount}, " +
                     $"currentBytes={currentBytes:N0}, GC.TotalMemory={GC.GetTotalMemory(false):N0}");
                 if (ex is IOException ioEx)
                 {
@@ -994,11 +1084,25 @@ public partial class RestoreService
                 // in a shared multi-file restore.
                 // These chunks already had Phase B release (encrypted portion) by the producer,
                 // so only release the remaining 1× plaintext portion here.
-                if (pendingChunks.Count > 0)
+                List<(byte[] data, int length)> toDrain;
+                lock (pendingChunksLock)
                 {
-                    Log($"BoundedParallelDownload.Consumer: Draining {pendingChunks.Count} pending chunks " +
+                    if (pendingChunks.Count == 0)
+                    {
+                        toDrain = [];
+                    }
+                    else
+                    {
+                        toDrain = new List<(byte[] data, int length)>(pendingChunks.Count);
+                        foreach (var (_, pending) in pendingChunks) toDrain.Add(pending);
+                        pendingChunks.Clear();
+                    }
+                }
+                if (toDrain.Count > 0)
+                {
+                    Log($"BoundedParallelDownload.Consumer: Draining {toDrain.Count} pending chunks " +
                         $"(returning buffers and releasing budget)");
-                    foreach (var (_, pending) in pendingChunks)
+                    foreach (var pending in toDrain)
                     {
                         ArrayPool<byte>.Shared.Return(pending.data, clearArray: true);
                         memoryBudget.Release(pending.length);
@@ -1008,7 +1112,6 @@ public partial class RestoreService
                         // can unblock and observe the linked-CTS cancellation.
                         windowSlots.Release();
                     }
-                    pendingChunks.Clear();
                 }
             }
         }, linkedCts.Token);
@@ -1059,9 +1162,20 @@ public partial class RestoreService
                     var written = Volatile.Read(ref chunksWritten);
                     var downloaded = Volatile.Read(ref chunksDownloaded);
                     var waitingAcquire = Volatile.Read(ref acquireWaitingCount);
-                    var bufferedSnapshot = bufferedIndicesSnapshot.Keys.OrderBy(i => i).Take(16).ToArray();
-                    var bufferedCount = bufferedIndicesSnapshot.Count;
-                    var nextNeededIsBuffered = bufferedIndicesSnapshot.ContainsKey(nextNeeded);
+                    int[] bufferedSnapshot;
+                    int bufferedCount;
+                    bool nextNeededIsBuffered;
+                    // B63: snapshot pendingChunks under its lock instead of maintaining
+                    // a parallel ConcurrentDictionary. Watchdog poll cadence is 5 s, so
+                    // briefly blocking the writer for the snapshot has no measurable
+                    // throughput impact and removes a whole class of "the parallel
+                    // dictionary drifted from pendingChunks" bugs.
+                    lock (pendingChunksLock)
+                    {
+                        bufferedCount = pendingChunks.Count;
+                        bufferedSnapshot = pendingChunks.Keys.OrderBy(i => i).Take(16).ToArray();
+                        nextNeededIsBuffered = pendingChunks.ContainsKey(nextNeeded);
+                    }
 
                     var snapshot =
                         $"[STALL-WATCHDOG] '{fileName}' no writer progress for {writerIdleSec}s " +

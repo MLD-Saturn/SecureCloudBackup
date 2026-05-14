@@ -206,6 +206,13 @@ public partial class RestoreService
         var mirrorStopwatch = Stopwatch.StartNew();
         var crcFailStart = _blobService.TotalCrcFailures;
         var crcRetryStart = _blobService.TotalCrcRetries;
+        // B63: lifted out of the if-block below so the operation-metrics emit
+        // at the bottom of this method can read the scheduler's actual peak
+        // concurrency rather than the static MaxParallelFileRestores ceiling.
+        // Stays at zero when no files needed restoring (mirror-noop case),
+        // which the metric-emit code interprets as "scheduler not engaged"
+        // and falls back to the static ceiling.
+        var mirrorPeakFileConcurrency = 0;
 
         // Normalize paths
         sourceBasePath = Path.GetFullPath(sourceBasePath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -310,6 +317,7 @@ public partial class RestoreService
             result.FilesCorruptedRecovered = restoreResult.CorruptedRecoveryFiles.Count;
             result.FilesErrored = restoreResult.FailedFiles.Count;
             result.BytesTransferred = restoreResult.TotalBytesRestored;
+            mirrorPeakFileConcurrency = restoreResult.PeakFileConcurrency;
             foreach (var (_, recoveredPath, _) in restoreResult.CorruptedRecoveryFiles)
                 result.CorruptedRecoveryPaths.Add(recoveredPath);
             foreach (var failed in restoreResult.FailedFiles)
@@ -386,6 +394,13 @@ public partial class RestoreService
         mirrorStopwatch.Stop();
         var mirrorElapsed = mirrorStopwatch.Elapsed.TotalSeconds;
         var mirrorBytes = result.BytesTransferred;
+        // B63: prefer the scheduler's actual peak concurrency, falling back to
+        // the static ceiling when the mirror touched no large files. The
+        // restoreResult variable is in scope only inside the `if` above, so we
+        // staged its peak into `mirrorPeakFileConcurrency` for use here.
+        var mirrorEffectiveConcurrency = mirrorPeakFileConcurrency > 0
+            ? mirrorPeakFileConcurrency
+            : MaxParallelFileRestores;
         Metrics?.RecordOperationAndFlush(new OperationMetrics
         {
             Operation = "mirror",
@@ -395,7 +410,7 @@ public partial class RestoreService
             Bytes = mirrorBytes,
             ElapsedSeconds = mirrorElapsed,
             ThroughputMBps = mirrorElapsed > 0 ? mirrorBytes / mirrorElapsed / (1024 * 1024) : 0,
-            FileConcurrency = MaxParallelFileRestores,
+            FileConcurrency = mirrorEffectiveConcurrency,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
             CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
         });
@@ -763,6 +778,13 @@ public partial class RestoreService
 
         opStopwatch.Stop();
         var opElapsed = opStopwatch.Elapsed.TotalSeconds;
+        // B63: use the scheduler's actual peak concurrency for the metric
+        // when available; fall back to the static ceiling for batches that
+        // did not exercise the scheduler (e.g. small-file-only batches that
+        // never acquired a scheduler slot).
+        var effectiveConcurrencyMetric = result.PeakFileConcurrency > 0
+            ? result.PeakFileConcurrency
+            : MaxParallelFileRestores;
         Metrics?.RecordOperationAndFlush(new OperationMetrics
         {
             Operation = "restore",
@@ -773,7 +795,7 @@ public partial class RestoreService
             Chunks = fileList.Sum(f => f.file.Chunks.Count),
             ElapsedSeconds = opElapsed,
             ThroughputMBps = opElapsed > 0 ? result.TotalBytesRestored / opElapsed / (1024 * 1024) : 0,
-            FileConcurrency = MaxParallelFileRestores,
+            FileConcurrency = effectiveConcurrencyMetric,
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
             BudgetStalls = (int)memoryBudget.StallCount,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
@@ -917,8 +939,17 @@ public partial class RestoreService
 
         await Task.WhenAll(restoreTasks);
 
+        // B63: surface the AIMD controller's actual peak file-level concurrency
+        // so the caller can record it in operation metrics. Pre-B63 the metrics
+        // recorded the static `MaxParallelFileRestores` ceiling, which post-B62
+        // no longer reflects what the scheduler actually used. Zero-large-file
+        // batches leave PeakFileConcurrency at 0 (the default) since the
+        // scheduler never granted a slot.
+        result.PeakFileConcurrency = bandwidthScheduler.PeakActiveSlots;
+
         Log($"RestoreFilesBatchCoreAsync: scheduler summary -- " +
             $"finalConnections={bandwidthScheduler.CurrentConnections}, " +
+            $"peakActive={bandwidthScheduler.PeakActiveSlots}, " +
             $"increases={bandwidthScheduler.AdditiveIncreases}, " +
             $"decreases={bandwidthScheduler.MultiplicativeDecreases}, " +
             $"holds={bandwidthScheduler.Holds}, " +

@@ -60,10 +60,14 @@ public sealed class BandwidthScheduler
     private readonly int _maxConnections;
     private readonly Func<long> _nowTicks;
     private readonly Lock _evaluationLock = new();
-    private readonly SemaphoreSlim _slotReleased = new(0, int.MaxValue);
+    // B63: renamed from `_slotReleased` -- the semaphore is released both when a
+    // slot is given back AND when an additive-increase step grants new capacity.
+    // The old name implied only the first cause.
+    private readonly SemaphoreSlim _acquireWakeups = new(0, int.MaxValue);
 
     private int _currentConnections;
     private int _activeSlots;
+    private int _peakActiveSlots;
     private long _bytesSinceLastTick;
     private long _lastTickTicks;
     private double _ewmaBytesPerSecond;
@@ -156,6 +160,16 @@ public sealed class BandwidthScheduler
     public int ActiveSlots => Volatile.Read(ref _activeSlots);
 
     /// <summary>
+    /// B63: high-water mark of <see cref="ActiveSlots"/> over the lifetime of
+    /// this scheduler. Surfaced so the batch dispatcher can record the actual
+    /// peak file-level concurrency in operation metrics rather than the static
+    /// <c>MaxParallelFileRestores</c> ceiling, which post-B62 no longer reflects
+    /// what the AIMD controller actually used. Updated lock-free via CAS inside
+    /// <see cref="AcquireSlotAsync"/>; reads are atomic.
+    /// </summary>
+    public int PeakActiveSlots => Volatile.Read(ref _peakActiveSlots);
+
+    /// <summary>
     /// Acquires a file-level scheduling slot, waiting if the current
     /// concurrency is fully used. Used by the batch restore dispatcher to
     /// gate per-file admission on the AIMD-controlled <see cref="CurrentConnections"/>
@@ -176,18 +190,28 @@ public sealed class BandwidthScheduler
             int allowed = Volatile.Read(ref _currentConnections);
             if (active < allowed)
             {
-                if (Interlocked.CompareExchange(ref _activeSlots, active + 1, active) == active)
+                int newActive = active + 1;
+                if (Interlocked.CompareExchange(ref _activeSlots, newActive, active) == active)
                 {
+                    // B63: track high-water mark for operation-level metrics. CAS loop
+                    // because multiple acquires can race; whoever observes the largest
+                    // value commits it.
+                    int currentPeak;
+                    while ((currentPeak = Volatile.Read(ref _peakActiveSlots)) < newActive &&
+                           Interlocked.CompareExchange(ref _peakActiveSlots, newActive, currentPeak) != currentPeak)
+                    {
+                    }
                     return new SlotHandle(this);
                 }
                 continue;
             }
-            // Wait until a slot is released, then re-check the (possibly shrunk)
-            // allowed value. A multiplicative-decrease step can shrink `_currentConnections`
-            // below the active count without itself releasing any slot, so the wait
-            // here cannot rely on the allowed value alone — we re-evaluate on every
-            // wakeup.
-            await _slotReleased.WaitAsync(cancellationToken).ConfigureAwait(false);
+            // Wait until a slot is released or additive-increase grants more
+            // capacity, then re-check the (possibly shrunk) allowed value. A
+            // multiplicative-decrease step can shrink `_currentConnections`
+            // below the active count without itself releasing any slot, so the
+            // wait here cannot rely on the allowed value alone -- we re-
+            // evaluate on every wakeup.
+            await _acquireWakeups.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -199,8 +223,17 @@ public sealed class BandwidthScheduler
     /// </summary>
     public void ReleaseSlot()
     {
-        Interlocked.Decrement(ref _activeSlots);
-        _slotReleased.Release();
+        // B63: suppress spurious wakeups when the post-decrement active count
+        // is still at or above the allowed ceiling. Pre-B63 every release
+        // woke one waiter, which then re-parked because `active >= allowed`.
+        // Under multiplicative-decrease pressure with many parked waiters,
+        // that produced quadratic wakeup churn. Eventual additive-increase
+        // steps still wake waiters via their own _acquireWakeups.Release(N),
+        // so skipping the wakeup here is safe -- we only skip when no waiter
+        // could possibly make progress on this slot.
+        var newActive = Interlocked.Decrement(ref _activeSlots);
+        if (newActive < Volatile.Read(ref _currentConnections))
+            _acquireWakeups.Release();
     }
 
     private sealed class SlotHandle : IAsyncDisposable
@@ -271,6 +304,12 @@ public sealed class BandwidthScheduler
 
     private void Evaluate(bool force)
     {
+        // B63: compute the wakeup count under the lock, then release the
+        // semaphore AFTER exiting the lock. SemaphoreSlim.Release can
+        // synchronously run continuations that re-enter scheduler code paths;
+        // releasing under the evaluation lock is fragile even if no current
+        // continuation actually deadlocks today.
+        int wakeupsToRelease = 0;
         lock (_evaluationLock)
         {
             var now = _nowTicks();
@@ -307,7 +346,7 @@ public sealed class BandwidthScheduler
 
             if (delta > PlateauBand)
             {
-                ApplyAdditiveIncrease();
+                wakeupsToRelease = ApplyAdditiveIncrease(delta);
             }
             else if (delta < -PlateauBand)
             {
@@ -318,22 +357,38 @@ public sealed class BandwidthScheduler
                 Interlocked.Increment(ref _holds);
             }
         }
+
+        if (wakeupsToRelease > 0)
+            _acquireWakeups.Release(wakeupsToRelease);
     }
 
-    private void ApplyAdditiveIncrease()
+    /// <summary>
+    /// Variable-step additive increase. AIMD's "additive" is conventionally
+    /// +1 per evaluation tick, but on a fast link a +1 climb from
+    /// <c>initialConnections=4</c> to a 16-32 ceiling takes 24-56 s of
+    /// sustained sample windows. When the EWMA improvement is large
+    /// (delta &gt; 4 * <see cref="PlateauBand"/>) we step +2 to halve that
+    /// climb without abandoning AIMD's "additive" character. Returns the
+    /// number of waiter wakeups the caller must subsequently release
+    /// (==step on success, 0 on ceiling).
+    /// </summary>
+    private int ApplyAdditiveIncrease(double delta)
     {
         var current = Volatile.Read(ref _currentConnections);
         if (current >= _maxConnections)
         {
             Interlocked.Increment(ref _holds);
-            return;
+            return 0;
         }
-        Volatile.Write(ref _currentConnections, current + 1);
+        var step = delta > PlateauBand * 4 ? 2 : 1;
+        var next = Math.Min(_maxConnections, current + step);
+        var actualStep = next - current;
+        Volatile.Write(ref _currentConnections, next);
         Interlocked.Increment(ref _additiveIncreases);
-        // Wake one parked acquirer so it can take the newly available slot.
-        // Releasing more than one would let extra acquirers race past the
-        // `active < allowed` check; the +1 here matches the +1 above.
-        _slotReleased.Release();
+        // Caller releases `actualStep` semaphore counts AFTER exiting the
+        // evaluation lock so a continuation that re-enters scheduler code
+        // cannot reacquire it.
+        return actualStep;
     }
 
     private void ApplyMultiplicativeDecrease(string reason)
