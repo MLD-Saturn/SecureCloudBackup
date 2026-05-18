@@ -124,7 +124,15 @@ public sealed class MemoryFidelityColumnProvider : IColumnProvider
             var workload = ParameterString(benchmarkCase, "Workload") ?? string.Empty;
             var memoryLimitMB = ParameterInt(benchmarkCase, "MemoryLimitParam") ?? 0;
 
+            // B64 Phase 1.1: union the in-process singleton (populated
+            // when the benchmark runs in-process via --launchCount 0
+            // or InProcessEmitToolchain) with the per-iteration JSON
+            // lines the child process persisted. The first B64 run
+            // showed every cell as "-" because BDN's default toolchain
+            // runs benchmark methods in a child and the host-side
+            // column provider saw an empty singleton.
             var matches = MemoryFidelityCollector.Instance.Results
+                .Concat(MemoryFidelityCollector.LoadPersistedResults())
                 .Where(r =>
                     r.BenchmarkName == benchmarkName &&
                     r.Workload == workload &&

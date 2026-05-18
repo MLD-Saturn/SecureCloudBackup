@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace AzureBackup.Benchmarks;
@@ -100,6 +101,24 @@ public sealed class MemoryFidelityCollector
     private const long MB = 1024L * 1024L;
 
     /// <summary>
+    /// Environment variable that carries the shared samples directory
+    /// between the BDN host and the benchmark child process. The host
+    /// resolves a per-run path and exports it before
+    /// <see cref="BenchmarkDotNet.Running.BenchmarkSwitcher.Run"/>;
+    /// the child appends one JSON-lines record per iteration into
+    /// <c>samples.jsonl</c> under that directory; the host's
+    /// <see cref="MemoryFidelityColumnProvider"/> loads the file at
+    /// end-of-run. Without this seam the columns render as "-"
+    /// because BDN's default toolchain runs the benchmark method
+    /// in a child process and our in-memory singleton lives only
+    /// inside that child.
+    /// </summary>
+    public const string SamplesDirEnvVar = "AZBK_BENCH_FIDELITY_DIR";
+
+    /// <summary>Per-run JSON-lines filename inside the samples dir.</summary>
+    public const string SamplesFileName = "samples.jsonl";
+
+    /// <summary>
     /// Process-wide singleton. BDN constructs benchmark types per
     /// iteration, so a per-instance collector would lose state
     /// between the benchmark method and the column-provider read
@@ -167,11 +186,12 @@ public sealed class MemoryFidelityCollector
     /// </summary>
     public void EndIteration(long bytesProcessed)
     {
+        MemoryFidelityResult? toPersist = null;
         lock (_lock)
         {
             var sample = _current;
             if (sample.BenchmarkName is null) return;
-            _results.Add(new MemoryFidelityResult(
+            var result = new MemoryFidelityResult(
                 BenchmarkName: sample.BenchmarkName,
                 Workload: sample.Workload,
                 MemoryLimitMB: sample.MemoryLimitMB,
@@ -180,9 +200,79 @@ public sealed class MemoryFidelityCollector
                 PeakBudgetUsedBytes: sample.PeakBudgetUsedBytes,
                 StallCount: sample.StallCount,
                 OversizedAdmissions: sample.OversizedAdmissions,
-                BytesProcessed: bytesProcessed));
+                BytesProcessed: bytesProcessed);
+            _results.Add(result);
             _current = default;
+            toPersist = result;
         }
+
+        // B64 Phase 1.1: cross-process persistence. BDN's default
+        // toolchain runs benchmark methods in a child process; the
+        // host-side IColumnProvider would otherwise see an empty
+        // singleton and render every fidelity cell as "-". Writing
+        // one JSON line per iteration to a shared file is the
+        // smallest seam that crosses the boundary without depending
+        // on a custom IDiagnoser. Best-effort -- a failure here must
+        // never tear down the benchmark process, so all I/O is
+        // wrapped and silently swallowed (the worst case degrades
+        // gracefully back to the empty-column output the user
+        // already saw on the first B64 run).
+        if (toPersist is null) return;
+        try
+        {
+            var dir = Environment.GetEnvironmentVariable(SamplesDirEnvVar);
+            if (string.IsNullOrWhiteSpace(dir)) return;
+            Directory.CreateDirectory(dir);
+            var path = Path.Combine(dir, SamplesFileName);
+            var json = JsonSerializer.Serialize(toPersist);
+            File.AppendAllText(path, json + Environment.NewLine);
+        }
+        catch
+        {
+            // Defensive: see rationale above.
+        }
+    }
+
+    /// <summary>
+    /// Loads every persisted iteration sample from the JSON-lines
+    /// file under the directory named by
+    /// <see cref="SamplesDirEnvVar"/>. Returns an empty list if the
+    /// env var is unset, the file is missing, or every line failed
+    /// to parse. Called by
+    /// <see cref="MemoryFidelityColumnProvider"/> during the host
+    /// process's end-of-run column projection.
+    /// </summary>
+    public static IReadOnlyList<MemoryFidelityResult> LoadPersistedResults()
+    {
+        var dir = Environment.GetEnvironmentVariable(SamplesDirEnvVar);
+        if (string.IsNullOrWhiteSpace(dir)) return [];
+        var path = Path.Combine(dir, SamplesFileName);
+        if (!File.Exists(path)) return [];
+
+        var results = new List<MemoryFidelityResult>();
+        try
+        {
+            foreach (var line in File.ReadAllLines(path))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                try
+                {
+                    var parsed = JsonSerializer.Deserialize<MemoryFidelityResult>(line);
+                    if (parsed is not null) results.Add(parsed);
+                }
+                catch
+                {
+                    // Skip malformed lines: a previous run's partial
+                    // write or a future schema change should not
+                    // poison the whole table.
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort.
+        }
+        return results;
     }
 
     /// <summary>
