@@ -2,7 +2,7 @@
 <html lang='en'>
 <head>
 <meta charset='utf-8' />
-<title>AzureBackup.Benchmarks.MemoryBudgetBenchmark-20260425-194230</title>
+<title>AzureBackup.Benchmarks.MemoryBudgetBenchmark-20260519-090712</title>
 
 <style type="text/css">
 	table { border-collapse: collapse; display: block; width: 100%; overflow: auto; }
@@ -13,23 +13,39 @@
 </head>
 <body>
 <pre><code>
-BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8246/25H2/2025Update/HudsonValley2) (Hyper-V)
+BenchmarkDotNet v0.15.8, Windows 11 (10.0.26200.8390/25H2/2025Update/HudsonValley2) (Hyper-V)
 AMD EPYC 7763 2.44GHz, 1 CPU, 16 logical and 8 physical cores
-.NET SDK 10.0.202
-  [Host]     : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
-  Job-VWSJFF : .NET 10.0.6 (10.0.6, 10.0.626.17701), X64 RyuJIT x86-64-v3
+.NET SDK 10.0.204
+  [Host]     : .NET 10.0.8 (10.0.8, 10.0.826.23019), X64 RyuJIT x86-64-v3
+  Job-VWSJFF : .NET 10.0.8 (10.0.8, 10.0.826.23019), X64 RyuJIT x86-64-v3
 </code></pre>
 <pre><code>InvocationCount=1  IterationCount=2  RunStrategy=Throughput  
 UnrollFactor=1  WarmupCount=1  
 </code></pre>
 
 <table>
-<thead><tr><th>Method                                            </th><th>Workload   </th><th>MemoryLimitParam</th><th>Mean</th><th>Error</th><th>StdDev</th><th>Gen0 </th><th>Gen1 </th><th>Gen2 </th><th>Allocated</th>
+<thead><tr><th>Method                                                 </th><th>Workload      </th><th>MemoryLimitParam</th><th>Mean</th><th>Error</th><th>StdDev</th><th>PeakWS_MB</th><th>MaxUnacc_MB</th><th>PeakBudget_MB</th><th>Overshoot</th><th>Stalls/GB</th><th>Oversized</th><th>Gen0  </th><th>Gen1  </th><th>Gen2  </th><th>Allocated</th>
 </tr>
-</thead><tbody><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>0</td><td>4.937 m</td><td>69.7621 m</td><td>0.1550 m</td><td>225000.0000</td><td>149000.0000</td><td>105000.0000</td><td>258.54 GB</td>
-</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>4096</td><td>4.726 m</td><td>0.2185 m</td><td>0.0005 m</td><td>211000.0000</td><td>133000.0000</td><td>91000.0000</td><td>258.27 GB</td>
-</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>8192</td><td>4.744 m</td><td>20.1477 m</td><td>0.0448 m</td><td>215000.0000</td><td>136000.0000</td><td>95000.0000</td><td>257.39 GB</td>
-</tr><tr><td>&#39;Backup on media-library-500 at parametric MemoryBudget&#39;</td><td>media-library-500</td><td>16384</td><td>4.721 m</td><td>10.9402 m</td><td>0.0243 m</td><td>210000.0000</td><td>136000.0000</td><td>90000.0000</td><td>257.4 GB</td>
+</thead><tbody><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)hunks [24]</td><td>0</td><td>56.67 s</td><td>242.08 s</td><td>0.538 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>83000.0000</td><td>82000.0000</td><td>82000.0000</td><td>174.66 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)hunks [24]</td><td>2048</td><td>158.45 s</td><td>83.31 s</td><td>0.185 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>280000.0000</td><td>279000.0000</td><td>279000.0000</td><td>174.66 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)hunks [24]</td><td>4096</td><td>74.36 s</td><td>302.20 s</td><td>0.671 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>137000.0000</td><td>136000.0000</td><td>136000.0000</td><td>174.66 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)hunks [24]</td><td>8192</td><td>57.12 s</td><td>291.31 s</td><td>0.647 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>87000.0000</td><td>86000.0000</td><td>86000.0000</td><td>174.66 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)hunks [24]</td><td>16384</td><td>51.88 s</td><td>18.62 s</td><td>0.041 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>64000.0000</td><td>63000.0000</td><td>63000.0000</td><td>174.66 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adversarial-mixed</td><td>0</td><td>45.08 s</td><td>646.92 s</td><td>1.437 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>94000.0000</td><td>79000.0000</td><td>69000.0000</td><td>124.81 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adversarial-mixed</td><td>2048</td><td>105.46 s</td><td>423.25 s</td><td>0.940 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>212000.0000</td><td>191000.0000</td><td>186000.0000</td><td>124.82 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adversarial-mixed</td><td>4096</td><td>56.65 s</td><td>952.53 s</td><td>2.116 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>115000.0000</td><td>97000.0000</td><td>90000.0000</td><td>124.83 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adversarial-mixed</td><td>8192</td><td>43.14 s</td><td>246.89 s</td><td>0.548 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>94000.0000</td><td>78000.0000</td><td>70000.0000</td><td>124.81 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adversarial-mixed</td><td>16384</td><td>44.31 s</td><td>942.44 s</td><td>2.094 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>83000.0000</td><td>67000.0000</td><td>59000.0000</td><td>124.81 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)churn [22]</td><td>0</td><td>27.37 s</td><td>139.70 s</td><td>0.310 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>257000.0000</td><td>203000.0000</td><td>190000.0000</td><td>19.59 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)churn [22]</td><td>2048</td><td>49.87 s</td><td>244.52 s</td><td>0.543 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>753000.0000</td><td>691000.0000</td><td>685000.0000</td><td>19.61 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)churn [22]</td><td>4096</td><td>29.89 s</td><td>50.79 s</td><td>0.113 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>376000.0000</td><td>316000.0000</td><td>309000.0000</td><td>19.59 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)churn [22]</td><td>8192</td><td>29.41 s</td><td>184.44 s</td><td>0.410 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>275000.0000</td><td>219000.0000</td><td>208000.0000</td><td>19.58 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>adver(...)churn [22]</td><td>16384</td><td>28.51 s</td><td>109.31 s</td><td>0.243 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>262000.0000</td><td>206000.0000</td><td>195000.0000</td><td>19.59 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>media-library-500</td><td>0</td><td>218.22 s</td><td>117.84 s</td><td>0.262 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>385000.0000</td><td>304000.0000</td><td>257000.0000</td><td>658.99 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>media-library-500</td><td>2048</td><td>685.13 s</td><td>823.51 s</td><td>1.829 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>1162000.0000</td><td>1067000.0000</td><td>1030000.0000</td><td>659.08 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>media-library-500</td><td>4096</td><td>322.25 s</td><td>1,117.90 s</td><td>2.483 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>626000.0000</td><td>539000.0000</td><td>496000.0000</td><td>659.02 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>media-library-500</td><td>8192</td><td>218.27 s</td><td>622.44 s</td><td>1.383 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>398000.0000</td><td>317000.0000</td><td>270000.0000</td><td>658.99 GB</td>
+</tr><tr><td>&#39;Backup at parametric MemoryBudget with W5 fidelity tracking&#39;</td><td>media-library-500</td><td>16384</td><td>211.46 s</td><td>236.46 s</td><td>0.525 s</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>-</td><td>392000.0000</td><td>308000.0000</td><td>264000.0000</td><td>658.98 GB</td>
 </tr></tbody></table>
 </body>
 </html>
