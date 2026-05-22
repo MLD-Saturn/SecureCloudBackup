@@ -73,8 +73,8 @@ public sealed class BackupMemoryReporter : IDisposable
     private readonly int _gen0Start;
     private readonly int _gen1Start;
     private readonly int _gen2Start;
-    private readonly LargeChunkBufferPool? _largeChunkPool;
-    private readonly BudgetedMemoryPool? _smallChunkPool;
+    private readonly ChunkBufferPool? _largeChunkPool;
+    private readonly ChunkBufferPool? _smallChunkPool;
 
     private long _previousStallCount;
     private long _previousOversizedCount;
@@ -105,8 +105,8 @@ public sealed class BackupMemoryReporter : IDisposable
         string opLabel,
         Action<string> emit,
         TimeSpan? interval = null,
-        LargeChunkBufferPool? largeChunkPool = null,
-        BudgetedMemoryPool? smallChunkPool = null)
+        ChunkBufferPool? largeChunkPool = null,
+        ChunkBufferPool? smallChunkPool = null)
     {
         ArgumentNullException.ThrowIfNull(budget);
         ArgumentException.ThrowIfNullOrWhiteSpace(opLabel);

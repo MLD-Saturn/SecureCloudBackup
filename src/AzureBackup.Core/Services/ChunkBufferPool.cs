@@ -3,71 +3,91 @@ using System.Collections.Concurrent;
 namespace AzureBackup.Core.Services;
 
 /// <summary>
-/// B69 (W5 Phase 3 Commit 1): owned, budget-aware recycler for the
-/// SMALL-chunk byte buffer range (64 KB to 16 MB) that
-/// <see cref="ChunkingService"/> rents from
-/// <see cref="System.Buffers.ArrayPool{T}.Shared"/> on the producer-side
-/// chunk-payload allocation path.
+/// B70 (W5 Phase 3 Commit 2): bounded, budget-aware recycler for the
+/// <c>byte[]</c> chunk-payload allocations that
+/// <see cref="ChunkingService"/> hands to the upload pipeline. A
+/// single pool implementation services BOTH the small-chunk path
+/// (64 KB - 16 MB, formerly the <c>BudgetedMemoryPool</c>) and the
+/// large-chunk path (16 MB - 256 MB, formerly the
+/// <c>LargeChunkBufferPool</c>); the bucket geometry is supplied at
+/// construction time via <see cref="SmallChunkBucketSizes"/> or
+/// <see cref="LargeChunkBucketSizes"/>. The two pre-B70 classes had
+/// byte-identical bodies except for the bucket array, so collapsing
+/// them into one parameterized type removes ~430 lines of duplication
+/// and gives every future tuning change (cap policy, peak telemetry,
+/// zero-on-return) a single place to live.
 ///
 /// <para>
-/// Motivation: the W5 Phase 2 measurement baseline confirmed that the
-/// pre-B69 small-chunk path leaks residency through
+/// Motivation (small-chunk path, formerly <c>BudgetedMemoryPool</c>,
+/// B69): the W5 Phase 2 measurement baseline confirmed the
+/// pre-B69 path leaked residency through
 /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>'s per-core tier
 /// caches. ArrayPool keeps a per-core (and per-tier) list of recently
 /// returned arrays that lives entirely outside the active
-/// <see cref="MemoryBudget"/>; the budget accounting code in
-/// <see cref="ChunkingService.AcquireChunkBufferAsync"/> charges the
-/// rent's rounded-up tier ceiling (W3 / B30) on acquire and releases the
-/// same amount on consumer completion, but the tier caches themselves
-/// keep the returned array in process working set indefinitely until the
-/// GC reclaims them. On a long-running multi-file backup that retention
-/// stacks across every concurrent file worker and forms the bulk of the
-/// pre-B69 <c>unaccounted</c> residency the
+/// <see cref="MemoryBudget"/>; on a long-running multi-file backup
+/// that retention stacks across every concurrent file worker and
+/// forms the bulk of the pre-B69 <c>unaccounted</c> residency the
 /// <see cref="MemoryFidelityCollector"/> reported.
 /// </para>
 ///
 /// <para>
-/// Solution shape: replace the shared per-core tier caches with an
-/// operation-scoped pool whose retention IS the budget's residency.
-/// Rented buffers are alive forever (the pool retains them in its
-/// bucket bags) so the GC never needs to reclaim them between gen-2
-/// collections; the per-bucket cap and global byte cap together form
-/// the strict residency ceiling. Disposing the pool drains every
-/// bucket and lets the GC reclaim the retained arrays once the
-/// operation completes. This is the small-chunk twin of B37 / B52's
-/// <see cref="LargeChunkBufferPool"/> for the large-chunk path.
+/// Motivation (large-chunk path, formerly <c>LargeChunkBufferPool</c>,
+/// B37): B33 swapped
+/// <see cref="System.Buffers.ArrayPool{T}.Shared"/> rentals for exact
+/// <c>new byte[]</c> allocations on the large-chunk path because the
+/// shared pool's per-core caches retain large arrays indefinitely.
+/// The exact-allocation path closed that gap but introduced a
+/// different one: every chunk's payload buffer became an LOH-resident
+/// <c>byte[]</c> that the GC can only reclaim during a gen-2
+/// collection. Under the production workload (many concurrent
+/// 16-128 MB chunks), gen-2 collections fire roughly once a minute,
+/// and ~6 GB of dead-but-unreclaimed LOH accumulates between
+/// collections. On a 32 GB host with a 16 GB budget that residency
+/// lives entirely outside the budget's accounting and pushes
+/// <c>privateMem</c> well past physical RAM.
 /// </para>
 ///
 /// <para>
-/// Bucketing: power-of-two-spaced from 64 KB up to 16 MB. The lower
-/// bound covers the smallest payload sizes
-/// <see cref="ChunkingService"/> rents during CDC tail emission; the
-/// upper bound is exactly
-/// <see cref="ChunkingService.PoolSkipThresholdBytes"/>, the boundary
-/// at which <see cref="ChunkingService.AcquireChunkBufferAsync"/>
-/// hands off to <see cref="LargeChunkBufferPool"/> instead. Sizes
-/// outside that range allocate fresh and do not flow through the pool
-/// -- the producer path never asks for sub-64-KB buffers, so the
-/// out-of-range case is defensive only.
+/// Solution shape (both paths): operation-scoped pool whose retention
+/// IS the budget's residency. Rented buffers are alive forever (the
+/// pool retains them in its bucket bags) so the GC never needs to
+/// reclaim them between gen-2 collections; the per-bucket cap and
+/// global byte cap together form the strict residency ceiling.
+/// Disposing the pool drains every bucket and lets the GC reclaim the
+/// retained arrays once the operation completes.
+/// </para>
+///
+/// <para>
+/// Bucketing: requests are rounded up to the next configured bucket
+/// size and indexed into a fixed set of buckets. Sizes outside that
+/// range allocate fresh and do not flow through the pool. The two
+/// production geometries -- <see cref="SmallChunkBucketSizes"/>
+/// (64 KB / 256 KB / 1 MB / 4 MB / 16 MB) and
+/// <see cref="LargeChunkBucketSizes"/> (16 MB / 32 MB / 64 MB /
+/// 128 MB / 256 MB) -- partition the buffer-size axis at
+/// <see cref="ChunkingService.PoolSkipThresholdBytes"/> (16 MB) so
+/// the small pool and the large pool never compete for the same
+/// allocation.
 /// </para>
 ///
 /// <para>
 /// Concurrency: each bucket is a <see cref="ConcurrentBag{T}"/>
-/// guarded by an <see cref="Interlocked"/>-managed count, exactly
-/// mirroring the <see cref="LargeChunkBufferPool"/> pattern so the two
-/// pools have identical contention properties and identical
-/// debuggability.
+/// guarded by an <see cref="Interlocked"/>-managed count. Under
+/// contention a bucket's count can briefly exceed the cap (the count
+/// is decremented AFTER bag.TryTake; another thread can rent first),
+/// but the cap is only an advisory ceiling -- a small overshoot has
+/// no correctness implication, only a short-term residency overshoot.
+/// The alternative of a strict lock-protected count would serialize
+/// all rents and starve the producers.
 /// </para>
 ///
 /// <para>
 /// Interaction with <see cref="MemoryBudget"/>: the pool does NOT
 /// itself charge the budget. The producer in
-/// <see cref="ChunkingService"/> charges the rent's rounded-up tier
-/// ceiling on acquire and releases the same amount on consumer
-/// completion exactly as before; the pool replaces the leaky
-/// per-core ArrayPool tier caches with operation-scoped bucket bags
-/// that share the budget's lifetime. The budget remains the single
-/// throttle.
+/// <see cref="ChunkingService"/> charges the rent's bucket ceiling on
+/// acquire and releases the same amount on consumer completion; the
+/// pool is a pure allocation cache underneath. The budget remains
+/// the single throttle.
 /// </para>
 ///
 /// <para>
@@ -75,29 +95,25 @@ namespace AzureBackup.Core.Services;
 /// <see cref="BackupOrchestrator"/>. Disposing the pool clears every
 /// bucket and lets the GC reclaim the cached buffers; no explicit
 /// finalizer is needed because the cached buffers are reachable only
-/// through the pool's bucket arrays. Pre-B69 the
-/// <see cref="System.Buffers.ArrayPool{T}.Shared"/> tier caches outlived
-/// the operation and the next backup inherited stale residency; the
-/// owned pool makes that impossible by construction.
+/// through the pool's bucket arrays.
 /// </para>
 /// </summary>
-public sealed class BudgetedMemoryPool : IDisposable
+public sealed class ChunkBufferPool : IDisposable
 {
     private const int KB = 1024;
     private const int MB = 1024 * 1024;
 
     /// <summary>
-    /// Bucket sizes, smallest first. Power-of-two-spaced so the
-    /// rounding-up logic in <see cref="GetBucketIndex"/> is a single
-    /// linear scan with bounded length. The range starts at 64 KB
+    /// Production bucket geometry for the SMALL-chunk path (formerly
+    /// the <c>BudgetedMemoryPool</c> default). Range starts at 64 KB
     /// (the smallest payload size CDC tail emission can produce) and
     /// ends at exactly 16 MB, matching
-    /// <see cref="ChunkingService.PoolSkipThresholdBytes"/> so that
-    /// any chunk at or above the threshold flows to
-    /// <see cref="LargeChunkBufferPool"/> instead and the two pools
-    /// partition the buffer-size axis without overlap.
+    /// <see cref="ChunkingService.PoolSkipThresholdBytes"/> so any
+    /// chunk at or above the threshold flows to a pool constructed
+    /// with <see cref="LargeChunkBucketSizes"/> instead and the two
+    /// pools partition the buffer-size axis without overlap.
     /// </summary>
-    internal static readonly int[] BucketSizes =
+    public static readonly int[] SmallChunkBucketSizes =
     {
         64 * KB,
         256 * KB,
@@ -107,20 +123,33 @@ public sealed class BudgetedMemoryPool : IDisposable
     };
 
     /// <summary>
+    /// Production bucket geometry for the LARGE-chunk path (formerly
+    /// the <c>LargeChunkBufferPool</c> default). Range covers
+    /// <see cref="ChunkingService.PoolSkipThresholdBytes"/> (16 MB)
+    /// up to the worst-case encrypt-buffer tier ceiling for a 128 MB
+    /// chunk (256 MB).
+    /// </summary>
+    public static readonly int[] LargeChunkBucketSizes =
+    {
+        16 * MB,
+        32 * MB,
+        64 * MB,
+        128 * MB,
+        256 * MB
+    };
+
+    /// <summary>
     /// Per-bucket capacity in number of cached buffers.
     /// <para>
-    /// Sizing rationale: with B27's 16-way file concurrency × 6-way
+    /// Sizing rationale: with B27's 16-way file concurrency x 6-way
     /// chunk concurrency = 96 in-flight chunks worst case, and most
-    /// small-chunk-path chunks landing in the 1 MB or 4 MB bucket on
-    /// the default <see cref="ChunkingService"/> config, a per-bucket
-    /// cap of 32 covers roughly one third of the worst-case in-flight
-    /// count for any single bucket without unbounded growth. The
-    /// bucket caps multiply against <see cref="BucketSizes"/> to give
-    /// the worst-case pool residency:
-    /// 32 × (64 KB + 256 KB + 1 MB + 4 MB + 16 MB) ~= 32 × 21.3 MB =
-    /// ~681 MB. The B52-style global byte cap
-    /// (see <see cref="MaxCachedBytes"/>) is the stricter ceiling that
-    /// production callers actually use.
+    /// chunks landing in one or two buckets on the default
+    /// <see cref="ChunkingService"/> config, a per-bucket cap of 32
+    /// covers roughly one third of the worst-case in-flight count
+    /// without unbounded growth. The bucket caps multiply against
+    /// the configured bucket array to give the worst-case pool
+    /// residency; production callers further bound the total via
+    /// <see cref="MaxCachedBytes"/>.
     /// </para>
     /// <para>
     /// Tuning knob: if the production memory-log shows the pool's
@@ -132,6 +161,7 @@ public sealed class BudgetedMemoryPool : IDisposable
     /// </summary>
     private const int PerBucketCap = 32;
 
+    private readonly int[] _bucketSizes;
     private readonly ConcurrentBag<byte[]>[] _buckets;
     private readonly int[] _bucketCounts;
     private readonly long _maxCachedBytes;
@@ -145,25 +175,31 @@ public sealed class BudgetedMemoryPool : IDisposable
     private int _disposed;
 
     /// <summary>
-    /// Creates a new, empty pool with no global byte cap (only the
-    /// per-bucket cap applies). Equivalent to
-    /// <c>new BudgetedMemoryPool(long.MaxValue)</c>; preserved for
-    /// test and benchmark callers that want the per-bucket-cap-only
-    /// ceiling.
+    /// Creates a new, empty pool with the given bucket geometry and
+    /// no global byte cap (only the per-bucket cap applies).
+    /// Equivalent to <c>new ChunkBufferPool(bucketSizes, long.MaxValue)</c>.
+    /// Use one of the well-known geometries on this class
+    /// (<see cref="SmallChunkBucketSizes"/> or
+    /// <see cref="LargeChunkBucketSizes"/>) unless you have a
+    /// measured reason to deviate.
     /// </summary>
-    public BudgetedMemoryPool() : this(long.MaxValue)
+    /// <param name="bucketSizes">
+    /// Bucket sizes, smallest first, strictly increasing, all
+    /// positive. The array is copied defensively so callers may
+    /// reuse the supplied array.
+    /// </param>
+    public ChunkBufferPool(int[] bucketSizes) : this(bucketSizes, long.MaxValue)
     {
     }
 
     /// <summary>
-    /// Creates a new, empty pool whose total cached residency across
-    /// all buckets is bounded by <paramref name="maxCachedBytes"/>.
-    /// When a <see cref="Return"/> would push
-    /// <see cref="TotalBytesCached"/> above the cap the buffer is
-    /// dropped on the floor (the GC reclaims it) instead of being
-    /// cached, mirroring the per-bucket overflow behaviour and the
-    /// B52 <see cref="LargeChunkBufferPool"/> contract exactly. The
-    /// per-bucket cap (<see cref="PerBucketCap"/>) still applies
+    /// Creates a new, empty pool with the given bucket geometry whose
+    /// total cached residency across all buckets is bounded by
+    /// <paramref name="maxCachedBytes"/>. When a <see cref="Return"/>
+    /// would push <see cref="TotalBytesCached"/> above the cap the
+    /// buffer is dropped on the floor (the GC reclaims it) instead of
+    /// being cached, mirroring the per-bucket overflow behaviour.
+    /// The per-bucket cap (<see cref="PerBucketCap"/>) still applies
     /// independently.
     /// <para>
     /// Production callers in <see cref="BackupOrchestrator"/> derive
@@ -173,21 +209,44 @@ public sealed class BudgetedMemoryPool : IDisposable
     /// disables the global cap.
     /// </para>
     /// </summary>
+    /// <param name="bucketSizes">
+    /// Bucket sizes, smallest first, strictly increasing, all
+    /// positive. The array is copied defensively so callers may
+    /// reuse the supplied array.
+    /// </param>
     /// <param name="maxCachedBytes">
     /// Maximum total bytes the pool may keep cached across every
     /// bucket. Must be positive. Pass <see cref="long.MaxValue"/>
     /// to disable the global cap.
     /// </param>
-    public BudgetedMemoryPool(long maxCachedBytes)
+    public ChunkBufferPool(int[] bucketSizes, long maxCachedBytes)
     {
+        ArgumentNullException.ThrowIfNull(bucketSizes);
+        if (bucketSizes.Length == 0)
+            throw new ArgumentException("Bucket size array must not be empty.", nameof(bucketSizes));
+        for (int i = 0; i < bucketSizes.Length; i++)
+        {
+            if (bucketSizes[i] <= 0)
+                throw new ArgumentOutOfRangeException(nameof(bucketSizes), "All bucket sizes must be positive.");
+            if (i > 0 && bucketSizes[i] <= bucketSizes[i - 1])
+                throw new ArgumentException("Bucket sizes must be strictly increasing.", nameof(bucketSizes));
+        }
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxCachedBytes);
 
+        _bucketSizes = (int[])bucketSizes.Clone();
         _maxCachedBytes = maxCachedBytes;
-        _buckets = new ConcurrentBag<byte[]>[BucketSizes.Length];
-        _bucketCounts = new int[BucketSizes.Length];
-        for (int i = 0; i < BucketSizes.Length; i++)
+        _buckets = new ConcurrentBag<byte[]>[_bucketSizes.Length];
+        _bucketCounts = new int[_bucketSizes.Length];
+        for (int i = 0; i < _bucketSizes.Length; i++)
             _buckets[i] = new ConcurrentBag<byte[]>();
     }
+
+    /// <summary>
+    /// Snapshot of the configured bucket geometry, smallest first.
+    /// Returns a defensive copy; mutating the returned array has no
+    /// effect on the pool.
+    /// </summary>
+    public int[] BucketSizes => (int[])_bucketSizes.Clone();
 
     /// <summary>
     /// Maximum total bytes the pool may keep cached across all
@@ -281,7 +340,7 @@ public sealed class BudgetedMemoryPool : IDisposable
             return (new byte[minimumLength], false);
         }
 
-        var bucketSize = BucketSizes[bucketIndex];
+        var bucketSize = _bucketSizes[bucketIndex];
         if (_buckets[bucketIndex].TryTake(out var cached))
         {
             // Decrement BEFORE marking the rent as pool-served so the
@@ -333,7 +392,7 @@ public sealed class BudgetedMemoryPool : IDisposable
             return;
         }
 
-        var bucketSize = BucketSizes[bucketIndex];
+        var bucketSize = _bucketSizes[bucketIndex];
 
         // Global cap: refuse to cache the buffer when accepting it
         // would push the pool's total residency above
@@ -368,12 +427,12 @@ public sealed class BudgetedMemoryPool : IDisposable
 
         // Defensive zero-out so a buffer that gets recycled cannot
         // leak previous chunk plaintext into a future chunk's
-        // pre-fill window. Cheap relative to the small-chunk-bucket
-        // sizes the pool handles.
+        // pre-fill window. Cheap relative to the bucket sizes the
+        // pool handles.
         Array.Clear(buffer);
 
         _buckets[bucketIndex].Add(buffer);
-        var newTotal = Interlocked.Add(ref _totalBytesCached, BucketSizes[bucketIndex]);
+        var newTotal = Interlocked.Add(ref _totalBytesCached, _bucketSizes[bucketIndex]);
 
         // CAS-max update of the peak. The loop terminates on the
         // first iteration in the uncontended case and is bounded by
@@ -396,11 +455,11 @@ public sealed class BudgetedMemoryPool : IDisposable
     /// range. Returns the SMALLEST bucket whose size is greater than
     /// or equal to <paramref name="minimumLength"/>.
     /// </summary>
-    private static int GetBucketIndex(int minimumLength)
+    private int GetBucketIndex(int minimumLength)
     {
-        for (int i = 0; i < BucketSizes.Length; i++)
+        for (int i = 0; i < _bucketSizes.Length; i++)
         {
-            if (minimumLength <= BucketSizes[i])
+            if (minimumLength <= _bucketSizes[i])
                 return i;
         }
         return -1;
@@ -412,11 +471,11 @@ public sealed class BudgetedMemoryPool : IDisposable
     /// calls for buffers that did not originate from this pool's
     /// shape.
     /// </summary>
-    private static int GetBucketIndexForExactSize(int length)
+    private int GetBucketIndexForExactSize(int length)
     {
-        for (int i = 0; i < BucketSizes.Length; i++)
+        for (int i = 0; i < _bucketSizes.Length; i++)
         {
-            if (length == BucketSizes[i])
+            if (length == _bucketSizes[i])
                 return i;
         }
         return -1;

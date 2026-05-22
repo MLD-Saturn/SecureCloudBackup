@@ -218,12 +218,13 @@ public class BackupMemoryReporterTests
     [Fact]
     public void ReportLineIncludesPoolTelemetryWhenPoolWired()
     {
-        // When a LargeChunkBufferPool is wired, the [mem] line MUST
-        // surface its current cached residency, peak cached residency,
-        // global-cap drop count, and hit rate so the user can see the
-        // pool's contribution to the reported unaccounted gap.
+        // When a ChunkBufferPool is wired on the large-chunk slot,
+        // the [mem] line MUST surface its current cached residency,
+        // peak cached residency, global-cap drop count, and hit rate
+        // so the user can see the pool's contribution to the
+        // reported unaccounted gap.
         using var budget = new MemoryBudget(1024 * 1024);
-        using var pool = new LargeChunkBufferPool(maxCachedBytes: 64L * 1024 * 1024);
+        using var pool = new ChunkBufferPool(ChunkBufferPool.LargeChunkBucketSizes, maxCachedBytes: 64L * 1024 * 1024);
         var lines = new List<string>();
 
         using var reporter = new BackupMemoryReporter(

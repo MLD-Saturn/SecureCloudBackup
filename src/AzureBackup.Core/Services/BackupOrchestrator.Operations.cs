@@ -285,20 +285,20 @@ public partial class BackupOrchestrator
         {
             var config = _databaseService.GetConfiguration();
             using var memoryBudget = MemoryBudget.FromConfig(config, CdcBufferOverhead);
-            // B37: a single LargeChunkBufferPool spans the entire
-            // operation so the recycler is shared across files.
+            // B37: a single large-chunk ChunkBufferPool spans the
+            // entire operation so the recycler is shared across files.
             // B52: cap the pool's cached residency at 25% of the
             // configured budget so the recycler cannot drift past
             // the user's MemoryLimitMB ceiling.
-            using var largeChunkPool = new LargeChunkBufferPool(ComputePoolCapBytes(memoryBudget));
-            // B69 (W5 Phase 3 Commit 1): a single BudgetedMemoryPool
-            // spans the entire operation so the small-chunk recycler
-            // shares the operation's lifetime and the per-core
-            // ArrayPool<byte>.Shared tier caches no longer leak
-            // residency outside the budget. Cap derived from the
-            // active budget so the pool's hidden residency cannot
-            // drift past the user's MemoryLimitMB ceiling.
-            using var smallChunkPool = new BudgetedMemoryPool(ComputeSmallPoolCapBytes(memoryBudget));
+            using var largeChunkPool = new ChunkBufferPool(ChunkBufferPool.LargeChunkBucketSizes, ComputePoolCapBytes(memoryBudget));
+            // B69 (W5 Phase 3 Commit 1): a single small-chunk
+            // ChunkBufferPool spans the entire operation so the
+            // small-chunk recycler shares the operation's lifetime and
+            // the per-core ArrayPool<byte>.Shared tier caches no
+            // longer leak residency outside the budget. Cap derived
+            // from the active budget so the pool's hidden residency
+            // cannot drift past the user's MemoryLimitMB ceiling.
+            using var smallChunkPool = new ChunkBufferPool(ChunkBufferPool.SmallChunkBucketSizes, ComputeSmallPoolCapBytes(memoryBudget));
             // B36: emit a periodic memory snapshot through StatusChanged so
             // the always-visible log pane records budget vs working-set
             // drift during the operation. Wired before BackupFilesCoreAsync
@@ -635,12 +635,12 @@ public partial class BackupOrchestrator
         // residency in each emitted line.
         // B52: cap the pool's cached residency at 25% of the
         // configured budget (see ComputePoolCapBytes).
-        using var largeChunkPool = new LargeChunkBufferPool(ComputePoolCapBytes(memoryBudget));
+        using var largeChunkPool = new ChunkBufferPool(ChunkBufferPool.LargeChunkBucketSizes, ComputePoolCapBytes(memoryBudget));
         // B69 (W5 Phase 3 Commit 1): operation-scoped small-chunk
         // recycler that replaces the per-core ArrayPool<byte>.Shared
         // tier caches on the producer-side small-chunk path. See
         // ComputeSmallPoolCapBytes for the per-budget sizing.
-        using var smallChunkPool = new BudgetedMemoryPool(ComputeSmallPoolCapBytes(memoryBudget));
+        using var smallChunkPool = new ChunkBufferPool(ChunkBufferPool.SmallChunkBucketSizes, ComputeSmallPoolCapBytes(memoryBudget));
         // B36: see MirrorSyncToAzureAsync for the rationale; same pattern
         // here so any backup operation -- not just mirror -- gets the
         // periodic memory snapshot in the always-visible log pane.
@@ -745,8 +745,8 @@ public partial class BackupOrchestrator
     private async Task<(int completed, int failed, long processedBytes)> BackupFilesCoreAsync(
         IList<string> filePaths,
         MemoryBudget memoryBudget,
-        LargeChunkBufferPool largeChunkPool,
-        BudgetedMemoryPool smallChunkPool,
+        ChunkBufferPool largeChunkPool,
+        ChunkBufferPool smallChunkPool,
         IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress,
         bool forceReupload,
         int effectiveFileConcurrency,
