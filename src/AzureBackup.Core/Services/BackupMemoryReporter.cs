@@ -74,6 +74,7 @@ public sealed class BackupMemoryReporter : IDisposable
     private readonly int _gen1Start;
     private readonly int _gen2Start;
     private readonly LargeChunkBufferPool? _largeChunkPool;
+    private readonly BudgetedMemoryPool? _smallChunkPool;
 
     private long _previousStallCount;
     private long _previousOversizedCount;
@@ -104,7 +105,8 @@ public sealed class BackupMemoryReporter : IDisposable
         string opLabel,
         Action<string> emit,
         TimeSpan? interval = null,
-        LargeChunkBufferPool? largeChunkPool = null)
+        LargeChunkBufferPool? largeChunkPool = null,
+        BudgetedMemoryPool? smallChunkPool = null)
     {
         ArgumentNullException.ThrowIfNull(budget);
         ArgumentException.ThrowIfNullOrWhiteSpace(opLabel);
@@ -115,6 +117,7 @@ public sealed class BackupMemoryReporter : IDisposable
         _emit = emit;
         _interval = interval ?? TimeSpan.FromSeconds(30);
         _largeChunkPool = largeChunkPool;
+        _smallChunkPool = smallChunkPool;
 
         // Cache the Process handle. Process.GetCurrentProcess() allocates
         // and snapshots OS-level state on each call; reusing the handle
@@ -191,8 +194,13 @@ public sealed class BackupMemoryReporter : IDisposable
         // remainder. Negative values can occur briefly when the
         // budget was just charged but the allocation has not yet
         // caused a working-set bump; treat as 0.
+        // B69 (W5 Phase 3 Commit 1): the same subtraction now also
+        // accounts for the small-chunk pool's cached residency so the
+        // unaccounted residual stays a true "uncovered" figure after
+        // the small-chunk path migrates off ArrayPool<byte>.Shared.
         var poolCachedNow = _largeChunkPool?.TotalBytesCached ?? 0L;
-        var unaccounted = Math.Max(0, workingSet - used - poolCachedNow);
+        var smallPoolCachedNow = _smallChunkPool?.TotalBytesCached ?? 0L;
+        var unaccounted = Math.Max(0, workingSet - used - poolCachedNow - smallPoolCachedNow);
 
         var budgetText = _budget.IsUnlimited
             ? $"used={used / MB} MB / unlimited (peak={peakUsed / MB} MB)"
@@ -205,13 +213,20 @@ public sealed class BackupMemoryReporter : IDisposable
               $" dropped={_largeChunkPool.TotalReturnsDroppedForCap}," +
               $" hit={_largeChunkPool.HitRate:P0})"
             : string.Empty;
+        var smallPoolText = _smallChunkPool != null
+            ? $" | smPool={_smallChunkPool.TotalBytesCached / MB} MB cached" +
+              $" (peak={_smallChunkPool.PeakBytesCached / MB} MB," +
+              $" dropped={_smallChunkPool.TotalReturnsDroppedForCap}," +
+              $" hit={_smallChunkPool.HitRate:P0})"
+            : string.Empty;
         var line =
             $"{prefix} {_opLabel} t+{elapsed.TotalSeconds:F0}s | budget {budgetText} | " +
             $"stalls +{stallDelta} (total {stalls}) | oversized +{oversizedDelta} (total {oversized}) | " +
             $"gcHeap={gcHeap / MB} MB | gcLoad={gcInfo.MemoryLoadBytes / MB} MB | " +
             $"workingSet={workingSet / MB} MB | privateMem={privateMem / MB} MB | " +
             $"unaccounted={unaccounted / MB} MB | gcCollections=[{gen0Delta},{gen1Delta},{gen2Delta}]" +
-            poolText;
+            poolText +
+            smallPoolText;
 
         _emit(line);
     }

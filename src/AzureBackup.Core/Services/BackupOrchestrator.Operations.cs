@@ -291,6 +291,14 @@ public partial class BackupOrchestrator
             // configured budget so the recycler cannot drift past
             // the user's MemoryLimitMB ceiling.
             using var largeChunkPool = new LargeChunkBufferPool(ComputePoolCapBytes(memoryBudget));
+            // B69 (W5 Phase 3 Commit 1): a single BudgetedMemoryPool
+            // spans the entire operation so the small-chunk recycler
+            // shares the operation's lifetime and the per-core
+            // ArrayPool<byte>.Shared tier caches no longer leak
+            // residency outside the budget. Cap derived from the
+            // active budget so the pool's hidden residency cannot
+            // drift past the user's MemoryLimitMB ceiling.
+            using var smallChunkPool = new BudgetedMemoryPool(ComputeSmallPoolCapBytes(memoryBudget));
             // B36: emit a periodic memory snapshot through StatusChanged so
             // the always-visible log pane records budget vs working-set
             // drift during the operation. Wired before BackupFilesCoreAsync
@@ -300,7 +308,8 @@ public partial class BackupOrchestrator
                 opLabel: "mirror",
                 emit: line => StatusChanged?.Invoke(this, line),
                 interval: MemoryReporterIntervalOverride,
-                largeChunkPool: largeChunkPool);
+                largeChunkPool: largeChunkPool,
+                smallChunkPool: smallChunkPool);
 
             // B54: clamp file-level fan-out against the active budget so a
             // small MemoryLimitMB does not over-subscribe in-flight residency.
@@ -340,7 +349,7 @@ public partial class BackupOrchestrator
             try
             {
                 (completed, failed, bytes) = await BackupFilesCoreAsync(
-                    filesToBackup, memoryBudget, largeChunkPool, adaptedProgress,
+                    filesToBackup, memoryBudget, largeChunkPool, smallChunkPool, adaptedProgress,
                     forceReupload: false, effectiveFileConcurrency, cancellationToken);
             }
             catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
@@ -627,6 +636,11 @@ public partial class BackupOrchestrator
         // B52: cap the pool's cached residency at 25% of the
         // configured budget (see ComputePoolCapBytes).
         using var largeChunkPool = new LargeChunkBufferPool(ComputePoolCapBytes(memoryBudget));
+        // B69 (W5 Phase 3 Commit 1): operation-scoped small-chunk
+        // recycler that replaces the per-core ArrayPool<byte>.Shared
+        // tier caches on the producer-side small-chunk path. See
+        // ComputeSmallPoolCapBytes for the per-budget sizing.
+        using var smallChunkPool = new BudgetedMemoryPool(ComputeSmallPoolCapBytes(memoryBudget));
         // B36: see MirrorSyncToAzureAsync for the rationale; same pattern
         // here so any backup operation -- not just mirror -- gets the
         // periodic memory snapshot in the always-visible log pane.
@@ -635,7 +649,8 @@ public partial class BackupOrchestrator
             opLabel: "backup",
             emit: line => StatusChanged?.Invoke(this, line),
             interval: MemoryReporterIntervalOverride,
-            largeChunkPool: largeChunkPool);
+            largeChunkPool: largeChunkPool,
+            smallChunkPool: smallChunkPool);
 
         // B54: clamp file-level fan-out against the active budget so a
         // small MemoryLimitMB does not admit more files than the budget
@@ -670,7 +685,7 @@ public partial class BackupOrchestrator
         try
         {
             (completed, failed, processedBytes) = await BackupFilesCoreAsync(
-                filePaths, memoryBudget, largeChunkPool, progress, forceReupload,
+                filePaths, memoryBudget, largeChunkPool, smallChunkPool, progress, forceReupload,
                 effectiveFileConcurrency, cancellationToken);
         }
         catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
@@ -731,6 +746,7 @@ public partial class BackupOrchestrator
         IList<string> filePaths,
         MemoryBudget memoryBudget,
         LargeChunkBufferPool largeChunkPool,
+        BudgetedMemoryPool smallChunkPool,
         IProgress<(int fileIndex, int totalFiles, string fileName, long bytesProcessed, long totalBytes, long currentFileBytes, long currentFileSize)>? progress,
         bool forceReupload,
         int effectiveFileConcurrency,
@@ -815,7 +831,7 @@ public partial class BackupOrchestrator
                             p.current, currentFileSize));
                     });
 
-                    var success = await BackupFileAsync(filePath, fileProgress, memoryBudget, largeChunkPool, forceReupload, ct);
+                    var success = await BackupFileAsync(filePath, fileProgress, memoryBudget, largeChunkPool, smallChunkPool, forceReupload, ct);
 
                     if (success)
                     {

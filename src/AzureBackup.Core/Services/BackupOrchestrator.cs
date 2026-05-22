@@ -274,6 +274,42 @@ public partial class BackupOrchestrator : IAsyncDisposable
         return Math.Max(quarter, floor);
     }
 
+    /// <summary>
+    /// B69 (W5 Phase 3 Commit 1): derive the global byte cap for an
+    /// operation-scoped <see cref="BudgetedMemoryPool"/> from the
+    /// active <see cref="MemoryBudget"/>. The small-chunk pool's
+    /// cached residency is bounded by 12.5 percent of the configured
+    /// budget so the combined ceiling for the small-chunk and
+    /// large-chunk recyclers stays below 40 percent of the budget
+    /// (25 percent for the large pool from
+    /// <see cref="ComputePoolCapBytes(MemoryBudget)"/> plus 12.5
+    /// percent here), leaving the majority of the budget available
+    /// for in-flight chunk work.
+    /// <para>
+    /// 12.5 percent was chosen because the small-chunk path's
+    /// worst-case residency is much lower than the large-chunk path's
+    /// -- the small-chunk buckets cap at 16 MB while the large-chunk
+    /// buckets reach 256 MB -- so the small pool needs proportionally
+    /// less headroom to hit a useful hit-rate. A floor of one
+    /// largest-small-bucket-size (16 MB) × 4 = 64 MB keeps the cap
+    /// useful even on a tiny budget.
+    /// </para>
+    /// <para>
+    /// Unlimited budgets fall through to <see cref="long.MaxValue"/>
+    /// so existing benchmark and test harnesses that opt out of the
+    /// budget are unaffected.
+    /// </para>
+    /// </summary>
+    private static long ComputeSmallPoolCapBytes(MemoryBudget budget)
+    {
+        ArgumentNullException.ThrowIfNull(budget);
+        if (budget.IsUnlimited)
+            return long.MaxValue;
+        var eighth = budget.TotalBytes / 8;
+        var floor = 64L * 1024 * 1024;
+        return Math.Max(eighth, floor);
+    }
+
     public event EventHandler<BackupProgressEventArgs>? ProgressChanged;
     public event EventHandler<string>? StatusChanged;
     public event EventHandler<string>? ErrorOccurred;
@@ -948,7 +984,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     public Task<bool> BackupFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, forceReupload: false, cancellationToken);
+        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, smallChunkPool: null, forceReupload: false, cancellationToken);
     }
 
     /// <summary>
@@ -964,7 +1000,21 @@ public partial class BackupOrchestrator : IAsyncDisposable
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
         CancellationToken cancellationToken = default)
-        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, forceReupload: false, cancellationToken);
+        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, smallChunkPool: null, forceReupload: false, cancellationToken);
+
+    /// <summary>
+    /// B37 overload preserved for callers that supply a large-chunk
+    /// pool but no small-chunk pool. New B69 callers should prefer
+    /// the overload that accepts both pools.
+    /// </summary>
+    public Task<bool> BackupFileAsync(
+        string filePath,
+        IProgress<(long current, long total)>? progress,
+        MemoryBudget? memoryBudget,
+        LargeChunkBufferPool? largeChunkPool,
+        bool forceReupload = false,
+        CancellationToken cancellationToken = default)
+        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool, smallChunkPool: null, forceReupload, cancellationToken);
 
     /// <summary>
     /// B37 overload: as above, plus an optional
@@ -991,6 +1041,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
         LargeChunkBufferPool? largeChunkPool,
+        BudgetedMemoryPool? smallChunkPool,
         bool forceReupload = false,
         CancellationToken cancellationToken = default)
     {
@@ -1112,8 +1163,16 @@ public partial class BackupOrchestrator : IAsyncDisposable
                     // consumer mirrors the producer's pool decision via
                     // `ChunkPayload.LargeChunkPool` so the buffer goes
                     // back to the right place after upload.
+                    // B69: pass the operation-scoped BudgetedMemoryPool
+                    // so small-chunk allocations flow through the owned
+                    // bucket bags instead of ArrayPool<byte>.Shared,
+                    // eliminating the per-core tier-cache residency that
+                    // pre-B69 lived outside the active MemoryBudget.
+                    // The consumer mirrors this via
+                    // ChunkPayload.SmallChunkPool the same way it mirrors
+                    // ChunkPayload.LargeChunkPool.
                     var (producedChunks, producedHash) = await _chunkingService.ChunkAndStreamChangedAsync(
-                        filePath, existingHashes, channel.Writer, cdcProgress, memoryBudget, largeChunkPool, cancellationToken);
+                        filePath, existingHashes, channel.Writer, cdcProgress, memoryBudget, largeChunkPool, smallChunkPool, cancellationToken);
                     return (producedChunks, producedHash);
                 }
                 finally
@@ -1205,14 +1264,27 @@ public partial class BackupOrchestrator : IAsyncDisposable
                             extra: $"firstByte=0x{(payload.Length > 0 ? payload.Data[0] : 0):X2}");
                         CryptographicOperations.ZeroMemory(payload.Data.AsSpan(0, payload.Length));
 
-                        // B33: respect the producer's allocation decision.
-                        // Pool-rented buffers go back to the pool; exact
-                        // byte[] allocations get released to the GC by
-                        // dropping the reference. Returning a non-pool
-                        // array via ArrayPool.Return silently corrupts
-                        // the pool's tier buckets, so the flag is
-                        // load-bearing.
-                        if (payload.ReturnToPool)
+                        // B33 / B37 / B69: respect the producer's
+                        // allocation decision. Pool ownership is carried
+                        // on the payload itself so the consumer routes
+                        // to exactly the pool that originally rented
+                        // the buffer:
+                        //   - LargeChunkPool != null  -> large recycler
+                        //   - SmallChunkPool != null  -> small recycler
+                        //   - ReturnToPool == true    -> ArrayPool.Shared
+                        //   - otherwise               -> GC reclaim
+                        // Returning a non-pool array via ArrayPool.Return
+                        // silently corrupts the pool's tier buckets, so
+                        // the order above is load-bearing.
+                        if (payload.LargeChunkPool != null)
+                        {
+                            payload.LargeChunkPool.Return(payload.Data);
+                        }
+                        else if (payload.SmallChunkPool != null)
+                        {
+                            payload.SmallChunkPool.Return(payload.Data);
+                        }
+                        else if (payload.ReturnToPool)
                         {
                             ArrayPool<byte>.Shared.Return(payload.Data);
                         }

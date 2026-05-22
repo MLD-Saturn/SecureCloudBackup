@@ -89,6 +89,19 @@ public class ChunkInfo
 /// <c>ChunkingService.PoolSkipThresholdBytes</c>) and for chunks
 /// produced by callers that did not supply a pool (CDC benchmarks).
 /// </para>
+/// <para>
+/// <c>SmallChunkPool</c> (B69) is the per-operation
+/// <see cref="BudgetedMemoryPool"/> that owns <c>Data</c> when the
+/// chunk used <see cref="ChunkingService"/>'s small-chunk path AND
+/// the orchestrator supplied a pool. <c>null</c> when the chunk took
+/// the large-chunk path (use <c>LargeChunkPool</c> instead), when the
+/// chunk fell back to <see cref="System.Buffers.ArrayPool{T}.Shared"/>
+/// (legacy callers with no pool wired -- <c>ReturnToPool</c> is then
+/// <c>true</c>), or when the chunk was an exact-sized GC allocation.
+/// The consumer's dispatch is "if LargeChunkPool != null, return there;
+/// else if SmallChunkPool != null, return there; else if ReturnToPool,
+/// return to ArrayPool.Shared; else drop".
+/// </para>
 /// </summary>
 public record ChunkPayload(
     ChunkInfo Info,
@@ -96,7 +109,8 @@ public record ChunkPayload(
     int Length,
     long ChargedBytes,
     bool ReturnToPool,
-    LargeChunkBufferPool? LargeChunkPool = null);
+    LargeChunkBufferPool? LargeChunkPool = null,
+    BudgetedMemoryPool? SmallChunkPool = null);
 
 public enum BackupStatus
 {
