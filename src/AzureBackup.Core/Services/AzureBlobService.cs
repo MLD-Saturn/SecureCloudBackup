@@ -358,10 +358,57 @@ public partial class AzureBlobService : IBlobStorageService
     #region Blob Operations
 
     /// <summary>
+    /// B73 (W5 Phase 4 Commit 2): rent an encrypted scratch buffer of at least
+    /// <paramref name="minimumLength"/> bytes. When <paramref name="pool"/> is
+    /// non-null the buffer comes from the pool's bucket geometry (which may
+    /// return a larger buffer rounded up to the next bucket); when
+    /// <paramref name="pool"/> is null the buffer comes from
+    /// <see cref="ArrayPool{T}.Shared"/>. The choice MUST be carried to the
+    /// matching <see cref="ReturnEncryptedBuffer"/> call so a buffer rented
+    /// from one source is not returned to the other.
+    /// </summary>
+    internal static byte[] RentEncryptedBuffer(int minimumLength, ChunkBufferPool? pool)
+        => pool is null
+            ? ArrayPool<byte>.Shared.Rent(minimumLength)
+            : pool.Rent(minimumLength).Buffer;
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2): return an encrypted scratch buffer to the
+    /// source it was rented from. Buffers rented from
+    /// <see cref="ArrayPool{T}.Shared"/> are zeroed on return so the encrypted
+    /// payload does not linger in the per-core tier cache for a future
+    /// consumer to peek at; buffers returned to a <see cref="ChunkBufferPool"/>
+    /// are zeroed by that pool's own <c>Return</c> implementation.
+    /// </summary>
+    internal static void ReturnEncryptedBuffer(byte[] buffer, ChunkBufferPool? pool)
+    {
+        if (pool is null)
+            ArrayPool<byte>.Shared.Return(buffer, clearArray: true);
+        else
+            pool.Return(buffer);
+    }
+
+    /// <summary>
     /// Uploads an encrypted chunk to blob storage.
     /// Uses parallel block transfers for large chunks.
     /// </summary>
-    public async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
+    public Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => UploadChunkAsync(chunkData, chunkHash, encryptedBufferPool: null, storageTier, progress, cancellationToken);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload: rent the encrypted scratch buffer from
+    /// <paramref name="encryptedBufferPool"/> when non-null instead of
+    /// <see cref="ArrayPool{T}.Shared"/>. The encrypted buffer never crosses the
+    /// orchestrator boundary (returned in this method's finally block before the
+    /// SDK call's continuation runs anything else), so routing it through a
+    /// budget-charged <see cref="ChunkBufferPool"/> moves the working-set bytes
+    /// out of the pre-B73 unaccounted gap and into <see cref="MemoryBudget.UsedBytes"/>
+    /// for the same reason B72 moved the plaintext pool's retention there.
+    /// </summary>
+    public async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
@@ -370,7 +417,7 @@ public partial class AzureBlobService : IBlobStorageService
         Log($"UploadChunkAsync: Uploading chunk {chunkHash[..8]}... ({chunkData.Length} bytes) to {storageTier} tier");
 
         var encSize = chunkData.Length + EncryptionService.EncryptionOverhead;
-        var rentedBuffer = ArrayPool<byte>.Shared.Rent(encSize);
+        var rentedBuffer = RentEncryptedBuffer(encSize, encryptedBufferPool);
         try
         {
             var encryptedLength = EncryptAndDiagnose(chunkData.Span, rentedBuffer, chunkHash, "UploadChunkAsync");
@@ -432,7 +479,7 @@ public partial class AzureBlobService : IBlobStorageService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rentedBuffer, clearArray: true);
+            ReturnEncryptedBuffer(rentedBuffer, encryptedBufferPool);
         }
     }
 
@@ -441,7 +488,18 @@ public partial class AzureBlobService : IBlobStorageService
     /// Use this for new files where all chunks are guaranteed to be new.
     /// This reduces API calls by 50% for new file uploads.
     /// </summary>
-    public async Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
+    public Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => UploadChunkDirectAsync(chunkData, chunkHash, encryptedBufferPool: null, storageTier, progress, cancellationToken);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload of <see cref="UploadChunkDirectAsync"/>.
+    /// See the B73 overload of <see cref="UploadChunkAsync"/> for the rationale and
+    /// lifetime contract.
+    /// </summary>
+    public async Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
     {
@@ -450,7 +508,7 @@ public partial class AzureBlobService : IBlobStorageService
         Log($"UploadChunkDirectAsync: Direct upload chunk {chunkHash[..8]}... ({chunkData.Length} bytes) to {storageTier} tier");
 
         var encSize = chunkData.Length + EncryptionService.EncryptionOverhead;
-        var rentedBuffer = ArrayPool<byte>.Shared.Rent(encSize);
+        var rentedBuffer = RentEncryptedBuffer(encSize, encryptedBufferPool);
         try
         {
             var encryptedLength = EncryptAndDiagnose(chunkData.Span, rentedBuffer, chunkHash, "UploadChunkDirectAsync");
@@ -465,7 +523,7 @@ public partial class AzureBlobService : IBlobStorageService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rentedBuffer, clearArray: true);
+            ReturnEncryptedBuffer(rentedBuffer, encryptedBufferPool);
         }
     }
 

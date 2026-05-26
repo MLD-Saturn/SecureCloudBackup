@@ -1231,10 +1231,27 @@ public partial class BackupOrchestrator : IAsyncDisposable
                         // upload, but the consumer's encrypt-Acquire
                         // would block on the producer charge that is
                         // already filling the budget.
+                        //
+                        // B73 (W5 Phase 4 Commit 2): the encrypted scratch
+                        // buffer that AzureBlobService.UploadChunk*Async
+                        // rents is now routed through the operation-scope
+                        // ChunkBufferPool instead of ArrayPool<byte>.Shared.
+                        // Pool selection mirrors the producer-side partition
+                        // in ChunkingService: encrypted size >=
+                        // PoolSkipThresholdBytes -> large pool, else small.
+                        // The small pool also covers buffers below its
+                        // smallest bucket (it falls back to a fresh
+                        // allocation, but Return is still a no-op for
+                        // non-pool-shaped lengths) so the dispatch is
+                        // safe at every chunk size.
+                        var encryptedSize = payload.Length + EncryptionService.EncryptionOverhead;
+                        var encryptedBufferPool = encryptedSize >= ChunkingService.PoolSkipThresholdBytes
+                            ? largeChunkPool
+                            : smallChunkPool;
                         payload.Info.BlobName = isNewFile
-                            ? await _blobService.UploadChunkDirectAsync(chunkData, payload.Info.Hash, storageTier,
+                            ? await _blobService.UploadChunkDirectAsync(chunkData, payload.Info.Hash, encryptedBufferPool, storageTier,
                                 uploadProgress, cancellationToken)
-                            : await _blobService.UploadChunkAsync(chunkData, payload.Info.Hash, storageTier,
+                            : await _blobService.UploadChunkAsync(chunkData, payload.Info.Hash, encryptedBufferPool, storageTier,
                                 uploadProgress, cancellationToken);
 
                         // Check if plaintext was zeroed during upload (race condition indicator).

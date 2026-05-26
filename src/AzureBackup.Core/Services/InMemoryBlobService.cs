@@ -170,6 +170,21 @@ public class InMemoryBlobService : IBlobStorageService
 
     #region Blob Operations
 
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload: the in-memory service does not rent
+    /// an encrypted scratch buffer (the existing path lets <see cref="EncryptionService.Encrypt"/>
+    /// allocate the stored payload directly so the buffer's lifetime IS the blob's
+    /// lifetime), so the supplied <paramref name="encryptedBufferPool"/> is
+    /// ignored. The overload exists so test surfaces and the
+    /// <see cref="IBlobStorageService"/> contract remain symmetric with
+    /// <see cref="AzureBlobService"/>.
+    /// </summary>
+    public virtual Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => UploadChunkAsync(chunkData, chunkHash, storageTier, progress, cancellationToken);
+
     public virtual async Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default)
@@ -253,6 +268,17 @@ public class InMemoryBlobService : IBlobStorageService
 
         return blobName;
     }
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload of <see cref="UploadChunkDirectAsync"/>: the
+    /// in-memory service ignores <paramref name="encryptedBufferPool"/> for the same
+    /// reason given on the <see cref="UploadChunkAsync"/> B73 overload.
+    /// </summary>
+    public virtual Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default)
+        => UploadChunkDirectAsync(chunkData, chunkHash, storageTier, progress, cancellationToken);
 
     /// <summary>
     /// Uploads an encrypted chunk directly without checking if it exists.
@@ -361,7 +387,19 @@ public class InMemoryBlobService : IBlobStorageService
     /// from <see cref="ArrayPool{T}.Shared"/>. Mirrors
     /// <see cref="AzureBlobService.DownloadChunkStreamingAsync(string, ChunkBufferPool?, CancellationToken)"/>.
     /// </summary>
-    public virtual async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+    public virtual Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload: the in-memory service does not maintain a
+    /// separate encrypted scratch buffer (the stored blob bytes ARE the encrypted
+    /// payload), so the <paramref name="encryptedBufferPool"/> parameter is accepted
+    /// for interface symmetry and ignored. The
+    /// <paramref name="plaintextBufferPool"/> contract is unchanged from B71.
+    /// </summary>
+    public virtual async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+        ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
+        CancellationToken cancellationToken = default)
     {
         var data = await DownloadChunkAsync(blobName, cancellationToken);
         byte[] rented = plaintextBufferPool is null

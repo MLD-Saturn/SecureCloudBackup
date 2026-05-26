@@ -87,6 +87,20 @@ public interface IBlobStorageService : IAsyncDisposable
         IProgress<long>? progress = null, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload: rent the encrypted scratch buffer from the
+    /// caller-supplied <see cref="ChunkBufferPool"/> when non-null instead of
+    /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>. The encrypted buffer's lifetime
+    /// is strictly scoped to this method's synchronous try/finally (it never crosses
+    /// the producer/consumer channel boundary) so the pool reference is consumed end-to-end
+    /// inside the call. Passing <see langword="null"/> preserves the pre-B73 behaviour
+    /// (rent and return via <see cref="System.Buffers.ArrayPool{T}.Shared"/>).
+    /// </summary>
+    Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Uploads an encrypted chunk directly without checking if it exists.
     /// Use this for new files where all chunks are guaranteed to be new.
     /// This reduces API calls by 50% for new file uploads.
@@ -97,6 +111,17 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <param name="progress">Optional progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
     Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash, 
+        StorageTier storageTier = StorageTier.Hot,
+        IProgress<long>? progress = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload of <see cref="UploadChunkDirectAsync"/> that
+    /// rents the encrypted scratch buffer from the caller-supplied
+    /// <see cref="ChunkBufferPool"/> when non-null. See the <see cref="UploadChunkAsync"/>
+    /// B73 overload for the rationale and lifetime contract.
+    /// </summary>
+    Task<string> UploadChunkDirectAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
+        ChunkBufferPool? encryptedBufferPool,
         StorageTier storageTier = StorageTier.Hot,
         IProgress<long>? progress = null, CancellationToken cancellationToken = default);
 
@@ -157,6 +182,21 @@ public interface IBlobStorageService : IAsyncDisposable
     /// for the return-ownership contract.
     /// </summary>
     Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload that additionally lets the caller supply
+    /// an <paramref name="encryptedBufferPool"/> for the encrypted scratch buffer
+    /// used during the download. The encrypted buffer's lifetime is strictly scoped
+    /// to this method's synchronous try/finally (it never crosses the
+    /// producer/consumer channel boundary so it is returned BEFORE the method
+    /// exits). Passing <see langword="null"/> for <paramref name="encryptedBufferPool"/>
+    /// preserves the pre-B73 behaviour (encrypted scratch rented and returned via
+    /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>). The
+    /// <paramref name="plaintextBufferPool"/> contract is unchanged from B71.
+    /// </summary>
+    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+        ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
+        CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Downloads a chunk and attempts best-effort decryption, skipping CRC32 verification.

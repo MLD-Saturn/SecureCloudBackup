@@ -778,6 +778,20 @@ public partial class RestoreService
                         var selectedPool = chunk.Length >= ChunkingService.PoolSkipThresholdBytes
                             ? largeChunkPool
                             : smallChunkPool;
+                        // B73 (W5 Phase 4 Commit 2): mirror the plaintext pool
+                        // selection for the encrypted scratch buffer that
+                        // AzureBlobService.DownloadChunkStreamingAsync rents.
+                        // Partition is on encrypted size (plaintext + EncryptionOverhead)
+                        // so a plaintext chunk that lands exactly on the 16 MB
+                        // boundary is routed to the large pool because its
+                        // encrypted form (+37 bytes) clears the threshold. The
+                        // encrypted buffer's lifetime is strictly internal to
+                        // the download call so the source-pool reference does
+                        // NOT need to be pinned on the per-chunk channel tuple
+                        // the way the plaintext source does in B71.
+                        var selectedEncryptedPool = (chunk.Length + EncryptionService.EncryptionOverhead) >= ChunkingService.PoolSkipThresholdBytes
+                            ? largeChunkPool
+                            : smallChunkPool;
                         // Two-phase memory budget for accurate memory modeling:
                         // Phase A: Acquire 2× chunk size before download (encrypted + plaintext overlap during DecryptInto)
                         // Phase B: Release 1× after download returns (encrypted buffer freed inside blob service)
@@ -819,7 +833,7 @@ public partial class RestoreService
                             {
                                 try
                                 {
-                                    (chunkBuffer, chunkLength) = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, selectedPool, linkedCts.Token);
+                                    (chunkBuffer, chunkLength) = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, selectedPool, selectedEncryptedPool, linkedCts.Token);
                                     break; // success
                                 }
                                 catch (Exception ex) when (attempt < MaxChunkRetries && IsTransientError(ex))

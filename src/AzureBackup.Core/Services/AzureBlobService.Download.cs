@@ -215,7 +215,25 @@ public partial class AzureBlobService
     /// method exits) and the per-core tier-cache retention that the recycler
     /// avoids only matters for buffers whose lifetime spans the channel.
     /// </summary>
-    public async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+    public Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
+
+    /// <summary>
+    /// B73 (W5 Phase 4 Commit 2) overload: in addition to the B71
+    /// <paramref name="plaintextBufferPool"/>, also let the caller supply a
+    /// <paramref name="encryptedBufferPool"/> for the encrypted scratch buffer.
+    /// The encrypted buffer is returned in this method's finally block before
+    /// the method exits, so routing it through a budget-charged
+    /// <see cref="ChunkBufferPool"/> moves the working-set bytes out of the
+    /// pre-B73 unaccounted gap (the <see cref="ArrayPool{T}.Shared"/> per-core
+    /// tier cache) and into <see cref="MemoryBudget.UsedBytes"/> for the same
+    /// reason B72 moved the plaintext pool's retention there. Passing
+    /// <see langword="null"/> for <paramref name="encryptedBufferPool"/>
+    /// preserves the pre-B73 behaviour.
+    /// </summary>
+    public async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+        ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
+        CancellationToken cancellationToken = default)
     {
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
@@ -236,8 +254,8 @@ public partial class AzureBlobService
             var storedContentHash = properties.Value.ContentHash;
             TotalOperations++;
 
-            // Rent buffer from pool for encrypted download
-            var rentedEncrypted = ArrayPool<byte>.Shared.Rent((int)contentLength);
+            // B73: rent encrypted scratch through the supplied pool when present.
+            var rentedEncrypted = RentEncryptedBuffer((int)contentLength, encryptedBufferPool);
             try
             {
                 // Download with parallel ranges into a MemoryStream backed by the rented buffer
@@ -281,7 +299,7 @@ public partial class AzureBlobService
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(rentedEncrypted);
+                ReturnEncryptedBuffer(rentedEncrypted, encryptedBufferPool);
             }
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
