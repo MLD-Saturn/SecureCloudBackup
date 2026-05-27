@@ -260,7 +260,7 @@ Follow-ups deferred from B27 (each can become its own future workstream when pri
 
 ## Completed workstreams (recent)
 
-- **B75 (commit `<pending>`, 2026-05-27)**: committable per-benchmark markdown summary. New `BenchmarkSummaryWriter` writes one `{BenchmarkType}-summary.md` per `Summary` into `BenchmarkDotNet.Artifacts/results/` (next to the CSV) so the relevant portions of a run -- per-case Mean/StdErr/StdDev, total wall-clock estimate, fidelity columns, noisy-iteration callouts -- become diff-friendly and overwritable across runs. Hook wired into `Program.Main` after `BenchmarkSwitcher.Run(args)` returns; writer NEVER throws so a post-run failure cannot tear down a multi-hour benchmark. Format helpers promoted to internal + new `InternalsVisibleTo` from benchmarks to tests so 25 new tests pin every format-shape invariant + no-throw + argument-validation contracts. 1003/1003 tests pass (+25 vs B74). See architectural fact #37.
+- **B75 (commit `e119d1e`, 2026-05-27)**: committable per-benchmark markdown summary.
 
 - **B74 (commit `b0402ae`, 2026-05-27)**: W5 Phase 4 Commit 3 -- three-fix cluster (A + B + C2)
 
@@ -331,7 +331,7 @@ If running from inside Visual Studio (which is the typical user environment), th
 
 | Hash | Message |
 |---|---|
-| `<pending>` | B75: committable per-benchmark markdown summary. New BenchmarkSummaryWriter writes one {BenchmarkType}-summary.md per Summary into BenchmarkDotNet.Artifacts/results/ next to the CSV with per-case Mean/StdErr/StdDev + total wall-clock estimate + fidelity columns + noisy-iteration callouts. Hook wired into Program.Main after BenchmarkSwitcher.Run returns; writer NEVER throws so a post-run failure cannot tear down a multi-hour benchmark. Format helpers promoted to internal + new InternalsVisibleTo from benchmarks to tests + new metadata-only ProjectReference from tests to benchmarks; 25 new BenchmarkSummaryWriterTests pin every format-shape invariant + no-throw + argument-validation contracts. 1003/1003 tests pass |
+| `e119d1e` | B75: committable per-benchmark markdown summary.
 | `b0402ae` | B74: W5 Phase 4 Commit 3 -- three-fix cluster (A+B+C2)
 | `3a9e6a0` | B73: W5 Phase 4 Commit 2 -- encrypted-buffer pool routing.
 | `6334deb` | B72: W5 Phase 4 Commit 1 -- pool-retention budget charging.
