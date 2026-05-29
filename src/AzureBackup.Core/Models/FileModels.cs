@@ -74,20 +74,26 @@ public class ChunkInfo
 /// upload. <c>true</c> matches the pre-B33 behaviour. <c>false</c> means
 /// <c>Data</c> was either an exact-sized GC allocation that must be
 /// dropped on the floor (legacy B33 path with no pool) OR is owned by
-/// <c>LargeChunkPool</c> and must be returned there instead -- the
-/// consumer's dispatch is "if LargeChunkPool != null, return there;
+/// <c>BufferPool</c> and must be returned there instead -- the
+/// consumer's dispatch is "if BufferPool != null, return there;
 /// else if ReturnToPool, return to ArrayPool.Shared; else drop".
 /// Returning a non-pool array to the shared pool silently corrupts
 /// the pool's invariants, so the flag is load-bearing.
 /// </para>
 /// <para>
-/// <c>LargeChunkPool</c> (B37) is the per-operation
-/// <see cref="LargeChunkBufferPool"/> that owns <c>Data</c> when the
-/// chunk skipped <see cref="System.Buffers.ArrayPool{T}.Shared"/> AND
-/// the orchestrator supplied a pool. <c>null</c> for chunks that flow
-/// through the shared pool (small chunks below
-/// <c>ChunkingService.PoolSkipThresholdBytes</c>) and for chunks
-/// produced by callers that did not supply a pool (CDC benchmarks).
+/// <c>BufferPool</c> (B70, the unification of B37's
+/// <c>LargeChunkBufferPool</c> and B69's <c>BudgetedMemoryPool</c>) is
+/// the per-operation <see cref="ChunkBufferPool"/> that owns
+/// <c>Data</c>. The same field carries either the small-chunk-path
+/// pool (configured with
+/// <see cref="ChunkBufferPool.SmallChunkBucketSizes"/>) or the
+/// large-chunk-path pool (configured with
+/// <see cref="ChunkBufferPool.LargeChunkBucketSizes"/>); the consumer
+/// does not care which geometry it is because the return contract is
+/// identical. <c>null</c> for chunks produced by callers that did not
+/// supply a pool (CDC benchmarks) and for chunks that fell back to
+/// <see cref="System.Buffers.ArrayPool{T}.Shared"/> (in which case
+/// <c>ReturnToPool</c> is <c>true</c>).
 /// </para>
 /// </summary>
 public record ChunkPayload(
@@ -96,7 +102,7 @@ public record ChunkPayload(
     int Length,
     long ChargedBytes,
     bool ReturnToPool,
-    LargeChunkBufferPool? LargeChunkPool = null);
+    ChunkBufferPool? BufferPool = null);
 
 public enum BackupStatus
 {

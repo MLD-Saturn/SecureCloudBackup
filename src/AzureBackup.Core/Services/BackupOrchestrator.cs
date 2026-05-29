@@ -86,6 +86,25 @@ public partial class BackupOrchestrator : IAsyncDisposable
     public int? MaxParallelFileBackupsOverride { get; set; }
 
     /// <summary>
+    /// W5 Phase 1: optional per-instance override for the
+    /// <see cref="BackupMemoryReporter"/> sampling cadence. The
+    /// production default of 30 s (see the reporter's class summary)
+    /// is appropriate for long-running backups but loses sub-30s
+    /// peaks during a benchmark iteration. Setting this to e.g.
+    /// <c>TimeSpan.FromMilliseconds(100)</c> gives the
+    /// <c>MemoryFidelityCollector</c> in the benchmark project a
+    /// dense enough sample stream to derive defensible
+    /// <c>MaxUnaccounted_MB</c> and <c>OvershootRatio</c> columns.
+    /// Defaults to <c>null</c> -- production behaviour is unchanged
+    /// when the property is left unset, and the reporter falls back
+    /// to its 30 s default. Intended for benchmarks only; do NOT
+    /// set this on a production orchestrator instance, the cost of
+    /// 10 samples / second is negligible per-call but the resulting
+    /// log volume is not.
+    /// </summary>
+    public TimeSpan? MemoryReporterIntervalOverride { get; set; }
+
+    /// <summary>
     /// Effective per-file chunk-upload concurrency. Reads
     /// <see cref="MaxParallelChunkUploadsOverride"/> when set,
     /// falls back to the production constant. Snapshotted once at
@@ -242,7 +261,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// budget are unaffected.
     /// </para>
     /// </summary>
-    private static long ComputePoolCapBytes(MemoryBudget budget)
+    internal static long ComputePoolCapBytes(MemoryBudget budget)
     {
         ArgumentNullException.ThrowIfNull(budget);
         if (budget.IsUnlimited)
@@ -253,6 +272,43 @@ public partial class BackupOrchestrator : IAsyncDisposable
         // disabled on a small budget.
         var floor = 256L * 1024 * 1024;
         return Math.Max(quarter, floor);
+    }
+
+    /// <summary>
+    /// B69 (W5 Phase 3 Commit 1): derive the global byte cap for an
+    /// operation-scoped <see cref="ChunkBufferPool"/> constructed with
+    /// <see cref="ChunkBufferPool.SmallChunkBucketSizes"/> from the
+    /// active <see cref="MemoryBudget"/>. The small-chunk pool's
+    /// cached residency is bounded by 12.5 percent of the configured
+    /// budget so the combined ceiling for the small-chunk and
+    /// large-chunk recyclers stays below 40 percent of the budget
+    /// (25 percent for the large pool from
+    /// <see cref="ComputePoolCapBytes(MemoryBudget)"/> plus 12.5
+    /// percent here), leaving the majority of the budget available
+    /// for in-flight chunk work.
+    /// <para>
+    /// 12.5 percent was chosen because the small-chunk path's
+    /// worst-case residency is much lower than the large-chunk path's
+    /// -- the small-chunk buckets cap at 16 MB while the large-chunk
+    /// buckets reach 256 MB -- so the small pool needs proportionally
+    /// less headroom to hit a useful hit-rate. A floor of one
+    /// largest-small-bucket-size (16 MB) x 4 = 64 MB keeps the cap
+    /// useful even on a tiny budget.
+    /// </para>
+    /// <para>
+    /// Unlimited budgets fall through to <see cref="long.MaxValue"/>
+    /// so existing benchmark and test harnesses that opt out of the
+    /// budget are unaffected.
+    /// </para>
+    /// </summary>
+    internal static long ComputeSmallPoolCapBytes(MemoryBudget budget)
+    {
+        ArgumentNullException.ThrowIfNull(budget);
+        if (budget.IsUnlimited)
+            return long.MaxValue;
+        var eighth = budget.TotalBytes / 8;
+        var floor = 64L * 1024 * 1024;
+        return Math.Max(eighth, floor);
     }
 
     public event EventHandler<BackupProgressEventArgs>? ProgressChanged;
@@ -929,7 +985,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     public Task<bool> BackupFileAsync(string filePath, CancellationToken cancellationToken = default)
     {
-        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, forceReupload: false, cancellationToken);
+        return BackupFileAsync(filePath, progress: null, memoryBudget: null, largeChunkPool: null, smallChunkPool: null, forceReupload: false, cancellationToken);
     }
 
     /// <summary>
@@ -945,11 +1001,25 @@ public partial class BackupOrchestrator : IAsyncDisposable
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
         CancellationToken cancellationToken = default)
-        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, forceReupload: false, cancellationToken);
+        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool: null, smallChunkPool: null, forceReupload: false, cancellationToken);
+
+    /// <summary>
+    /// B37 overload preserved for callers that supply a large-chunk
+    /// pool but no small-chunk pool. New B69 callers should prefer
+    /// the overload that accepts both pools.
+    /// </summary>
+    public Task<bool> BackupFileAsync(
+        string filePath,
+        IProgress<(long current, long total)>? progress,
+        MemoryBudget? memoryBudget,
+        ChunkBufferPool? largeChunkPool,
+        bool forceReupload = false,
+        CancellationToken cancellationToken = default)
+        => BackupFileAsync(filePath, progress, memoryBudget, largeChunkPool, smallChunkPool: null, forceReupload, cancellationToken);
 
     /// <summary>
     /// B37 overload: as above, plus an optional
-    /// <see cref="LargeChunkBufferPool"/> shared across the operation.
+    /// <see cref="ChunkBufferPool"/> shared across the operation.
     /// When supplied, large-chunk allocations flow through the bounded
     /// LOH recycler instead of the GC, eliminating the gen-2 retention
     /// pressure that B36 surfaced after B30/B33/B34 landed. Pass
@@ -971,7 +1041,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
         string filePath,
         IProgress<(long current, long total)>? progress,
         MemoryBudget? memoryBudget,
-        LargeChunkBufferPool? largeChunkPool,
+        ChunkBufferPool? largeChunkPool,
+        ChunkBufferPool? smallChunkPool,
         bool forceReupload = false,
         CancellationToken cancellationToken = default)
     {
@@ -1086,15 +1157,24 @@ public partial class BackupOrchestrator : IAsyncDisposable
                     // charged at rent time. The consumer below no longer
                     // re-charges -- it only releases the amount the
                     // producer charged, which is carried on the payload.
-                    // B37: pass the operation-scoped LargeChunkBufferPool
-                    // so large-chunk allocations flow through the bounded
+                    // B37: pass the operation-scoped large-chunk pool so
+                    // large-chunk allocations flow through the bounded
                     // LOH recycler instead of `new byte[]`, removing the
                     // gen-2 retention pressure from the heap. The
                     // consumer mirrors the producer's pool decision via
-                    // `ChunkPayload.LargeChunkPool` so the buffer goes
-                    // back to the right place after upload.
+                    // `ChunkPayload.BufferPool` so the buffer goes back
+                    // to the right place after upload.
+                    // B69: pass the operation-scoped small-chunk pool so
+                    // small-chunk allocations flow through the owned
+                    // bucket bags instead of ArrayPool<byte>.Shared,
+                    // eliminating the per-core tier-cache residency that
+                    // pre-B69 lived outside the active MemoryBudget. The
+                    // same ChunkPayload.BufferPool field carries the
+                    // small pool when the small path was taken; the
+                    // consumer's return cascade does not need to know
+                    // which geometry it is.
                     var (producedChunks, producedHash) = await _chunkingService.ChunkAndStreamChangedAsync(
-                        filePath, existingHashes, channel.Writer, cdcProgress, memoryBudget, largeChunkPool, cancellationToken);
+                        filePath, existingHashes, channel.Writer, cdcProgress, memoryBudget, largeChunkPool, smallChunkPool, cancellationToken);
                     return (producedChunks, producedHash);
                 }
                 finally
@@ -1151,10 +1231,49 @@ public partial class BackupOrchestrator : IAsyncDisposable
                         // upload, but the consumer's encrypt-Acquire
                         // would block on the producer charge that is
                         // already filling the budget.
+                        //
+                        // B73 (W5 Phase 4 Commit 2): the encrypted scratch
+                        // buffer that AzureBlobService.UploadChunk*Async
+                        // rents is now routed through the operation-scope
+                        // ChunkBufferPool instead of ArrayPool<byte>.Shared.
+                        // Pool selection mirrors the producer-side partition
+                        // in ChunkingService: encrypted size >=
+                        // PoolSkipThresholdBytes -> large pool, else small.
+                        // The small pool also covers buffers below its
+                        // smallest bucket (it falls back to a fresh
+                        // allocation, but Return is still a no-op for
+                        // non-pool-shaped lengths) so the dispatch is
+                        // safe at every chunk size.
+                        //
+                        // B74 (W5 Phase 4 Commit 3, Fix C2): revert B73's
+                        // LARGE-pool encrypted-buffer routing. The
+                        // ChunkBufferPool never evicts under GC pressure
+                        // (by design -- see B37 rationale), while
+                        // ArrayPool<byte>.Shared trims its per-core tier
+                        // caches at every gen-2 collection via the BCL's
+                        // Gen2GcCallback. For large-chunk workloads
+                        // (LargeFileConfig, encrypted form >= 16 MB) the
+                        // pre-B73 GC trim was doing real work, and B73's
+                        // routing pinned those bytes at the high-water
+                        // mark instead. Reverting the large branch to
+                        // ArrayPool restores the steady-state decay the
+                        // production media-library / large-file workloads
+                        // depend on. The small-pool routing is kept
+                        // because (a) the small-pool retention is
+                        // bounded by the 12.5%-of-budget / 64 MB-floor
+                        // cap so it cannot dominate residency, and (b)
+                        // the B72 retention charge already attributes
+                        // its cached bytes to the budget so it is
+                        // strictly an improvement over ArrayPool's
+                        // un-attributed per-core caches.
+                        var encryptedSize = payload.Length + EncryptionService.EncryptionOverhead;
+                        var encryptedBufferPool = encryptedSize >= ChunkingService.PoolSkipThresholdBytes
+                            ? null
+                            : smallChunkPool;
                         payload.Info.BlobName = isNewFile
-                            ? await _blobService.UploadChunkDirectAsync(chunkData, payload.Info.Hash, storageTier,
+                            ? await _blobService.UploadChunkDirectAsync(chunkData, payload.Info.Hash, encryptedBufferPool, storageTier,
                                 uploadProgress, cancellationToken)
-                            : await _blobService.UploadChunkAsync(chunkData, payload.Info.Hash, storageTier,
+                            : await _blobService.UploadChunkAsync(chunkData, payload.Info.Hash, encryptedBufferPool, storageTier,
                                 uploadProgress, cancellationToken);
 
                         // Check if plaintext was zeroed during upload (race condition indicator).
@@ -1186,14 +1305,23 @@ public partial class BackupOrchestrator : IAsyncDisposable
                             extra: $"firstByte=0x{(payload.Length > 0 ? payload.Data[0] : 0):X2}");
                         CryptographicOperations.ZeroMemory(payload.Data.AsSpan(0, payload.Length));
 
-                        // B33: respect the producer's allocation decision.
-                        // Pool-rented buffers go back to the pool; exact
-                        // byte[] allocations get released to the GC by
-                        // dropping the reference. Returning a non-pool
-                        // array via ArrayPool.Return silently corrupts
-                        // the pool's tier buckets, so the flag is
-                        // load-bearing.
-                        if (payload.ReturnToPool)
+                        // B33 / B37 / B69 / B70: respect the producer's
+                        // allocation decision. Pool ownership is carried
+                        // on the payload itself so the consumer routes
+                        // to exactly the pool that originally rented
+                        // the buffer:
+                        //   - BufferPool != null   -> owned recycler
+                        //                            (small or large)
+                        //   - ReturnToPool == true -> ArrayPool.Shared
+                        //   - otherwise            -> GC reclaim
+                        // Returning a non-pool array via ArrayPool.Return
+                        // silently corrupts the pool's tier buckets, so
+                        // the order above is load-bearing.
+                        if (payload.BufferPool != null)
+                        {
+                            payload.BufferPool.Return(payload.Data);
+                        }
+                        else if (payload.ReturnToPool)
                         {
                             ArrayPool<byte>.Shared.Return(payload.Data);
                         }
