@@ -295,6 +295,8 @@ Orphaned chunks are blobs in Azure that no file references. They waste storage.
 3. Use **Select All** or check individual rows.
 4. Click **Delete Selected** to remove them from Azure.
 
+The scan computes its "no file references this chunk" verdict from a snapshot taken when you click **Scan for Orphans**. If a backup runs (or a deduplication hit re-references a chunk) between the scan and the delete, the cleanup step re-checks the authoritative reference count for each chunk immediately before deleting it. Any chunk that became referenced again in the meantime is skipped rather than deleted — this prevents accidentally deleting a chunk a file still depends on, which would otherwise surface much later as an unexplained missing-blob restore failure. Skipped chunks are reported in the cleanup summary and a warning is written to the application log so the skip is visible.
+
 ### Index management
 
 | Action | What it does |
@@ -344,6 +346,7 @@ Key controls:
 - **History expander** — last 10 runs, click a row to see its failures.
 - **Auto-export bundle on failure** checkbox — when enabled, the first failure in a run automatically writes a diagnostic ZIP to the data directory. The bundle excludes the encrypted database and salt files (sensitive material is redacted), so it is safe to share in a bug report.
 - **Auto-repair on failure** checkbox (B43) — defaults to **on**. When enabled, the engine silently re-uploads and re-checks any file that fails for a repairable reason (missing-blob, wrong-size, md5-mismatch, crc-mismatch, decrypt-failed, byte-differ). Disable it for a forensic run that needs to see the un-repaired failure shape (the failure row and `.diag` file are then preserved exactly as the first pass produced them).
+- **Deep verify (download every chunk)** checkbox — defaults to **off**. The normal check is cheap: for each chunk it does a structural HEAD request (does the blob exist, is it the expected size) and compares Azure's stored Content-MD5 against a trusted baseline. That cheap path cannot see two failure modes, because Azure HEAD returns the *stored* metadata recorded at upload time rather than a fresh hash of the bytes: (1) at-rest byte corruption that happens after upload while the stored metadata is unchanged, and (2) the first time a chunk is ever checked, the cheap path trusts Azure's current MD5 as the baseline without downloading the body — so a chunk that was already corrupt when first observed would canonise its corrupt state and pass forever after. Turning on **Deep verify** forces a full body download and envelope verification (CRC32 + AES-GCM tag) for *every* chunk, closing both blind spots. It also defers capturing a first-time MD5 baseline until the body download proves the bytes are intact. This costs body-byte bandwidth for every chunk, so leave it off for a quick check and turn it on for a thorough monthly audit or when troubleshooting a restore that failed despite a clean check.
 - Per-file `.diag` files for failures can be opened in your default editor or revealed in the file manager via right-click.
 
 ### Automatic repair on failure (B42)

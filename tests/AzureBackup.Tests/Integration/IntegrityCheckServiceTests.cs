@@ -870,6 +870,94 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         Assert.True(File.Exists(failure.DiagFilePath!));
     }
 
+    [Fact]
+    public async Task DeepVerify_ChunkCorruptAtFirstObservation_DoesNotCanoniseCorruptBaseline()
+    {
+        // Cause 2 mitigation: with a null persisted MD5 (legacy / pre-D6
+        // chunk), the cheap path captures Azure's CURRENT MD5 as the
+        // trusted baseline WITHOUT downloading the body -- so a chunk that
+        // was already corrupt at first observation would canonise its
+        // corrupt MD5 and pass forever after. DeepVerify defers the
+        // baseline capture until a body download proves the bytes decrypt
+        // and pass envelope CRC. A corrupt chunk therefore (a) fails the
+        // run and (b) leaves its expected MD5 still null so it is re-checked.
+        var f = await SeedOneFileAsync("deep-tofu.bin", RandomBytes(4096));
+        var hash = f.Chunks[0].Hash;
+        var blobName = $"chunks/{hash}";
+
+        // Simulate the legacy "never captured a baseline" state.
+        ClearExpectedMd5(hash);
+        // Corrupt the body in place (size preserved, so T1 structural is
+        // clean and only a body download can detect it).
+        _blobService.TestOnlyCorruptByte(blobName, byteIndex: 25);
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "DeepVerify TOFU guard",
+            AutoExportBundleOnFailure = false,
+            AutoRepairOnFailure = false,
+            DeepVerify = true
+        });
+
+        Assert.Equal(0, result.Run.FilesPassed);
+        Assert.True(result.Run.FilesFailedT2 + result.Run.FilesFailedT3 > 0,
+            "Deep verify must download the body and detect the corruption");
+        // The corrupt MD5 must NOT have been canonised as the baseline.
+        Assert.Null(_databaseService.GetChunkExpectedMd5(hash));
+    }
+
+    [Fact]
+    public async Task DeepVerify_CleanLegacyChunk_CapturesBaselineAfterBodyVerification()
+    {
+        // Cause 2 mitigation, happy path: a clean chunk with a null
+        // persisted MD5 still gets its baseline captured -- but only AFTER
+        // the body download verifies the bytes. The run passes and the
+        // baseline is now populated so future cheap checks have something
+        // to compare against.
+        var f = await SeedOneFileAsync("deep-clean.bin", RandomBytes(4096));
+        var hash = f.Chunks[0].Hash;
+        ClearExpectedMd5(hash);
+        Assert.Null(_databaseService.GetChunkExpectedMd5(hash));
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "DeepVerify clean baseline",
+            AutoExportBundleOnFailure = false,
+            DeepVerify = true
+        });
+
+        Assert.Equal(1, result.Run.FilesPassed);
+        Assert.Equal(0, result.Run.FilesFailedT1 + result.Run.FilesFailedT2 + result.Run.FilesFailedT3);
+        // Baseline captured only after the body proved intact.
+        Assert.NotNull(_databaseService.GetChunkExpectedMd5(hash));
+    }
+
+    [Fact]
+    public async Task DeepVerify_CleanChunkWithBaseline_PassesAndDoesNotByteDiffer()
+    {
+        // Cause 1 mitigation: deep verify forces a body download even when
+        // T1 is clean (this is what catches at-rest corruption Azure HEAD
+        // cannot see). A genuinely clean, unmodified file must still PASS:
+        // the forced T2 succeeds and the engine must NOT escalate to a T3
+        // local byte-compare that would false-positive on an
+        // intentionally-changed local file.
+        var f = await SeedOneFileAsync("deep-pass.bin", RandomBytes(4096));
+
+        var result = await _integrityService.RunAsync(new IntegrityCheckOptions
+        {
+            FileIds = new[] { f.Id },
+            ScopeSummary = "DeepVerify clean pass",
+            AutoExportBundleOnFailure = false,
+            DeepVerify = true
+        });
+
+        Assert.Equal(1, result.Run.FilesPassed);
+        Assert.Equal(0, result.Run.FilesFailedT1 + result.Run.FilesFailedT2 + result.Run.FilesFailedT3);
+        Assert.Empty(result.Failures);
+    }
+
     private static byte[] RandomBytes(int size)
     {
         var b = new byte[size];

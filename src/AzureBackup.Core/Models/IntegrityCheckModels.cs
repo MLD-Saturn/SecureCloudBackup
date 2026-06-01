@@ -71,6 +71,34 @@ public sealed class IntegrityCheckOptions
     /// </para>
     /// </summary>
     public bool AutoRepairOnFailure { get; init; } = true;
+
+    /// <summary>
+    /// When true the engine forces a full T2 body download + envelope
+    /// CRC/AES-GCM verification on EVERY chunk it checks, instead of the
+    /// cheap T1-only structural+MD5 fast path. This closes the two
+    /// production blind spots where a chunk that is intact in Azure's
+    /// stored metadata (length + Content-MD5) but corrupt in its actual
+    /// bytes passes the integrity check yet fails later at restore time:
+    /// <list type="bullet">
+    ///   <item><b>At-rest byte corruption (cause 1):</b> Azure HEAD
+    ///     returns the <i>stored</i> Content-MD5 property recorded at
+    ///     upload time, not a fresh hash of the bytes. If the bytes rot
+    ///     after upload while the stored property is unchanged, T1 cannot
+    ///     see it; only a body download recomputes the envelope CRC.</item>
+    ///   <item><b>Trust-on-first-use baseline (cause 2):</b> the first
+    ///     time a chunk is observed with a null persisted expected MD5,
+    ///     the cheap path captures Azure's <i>current</i> MD5 as the
+    ///     trusted baseline without ever downloading the body. Deep
+    ///     verify downloads and CRC-checks the body BEFORE the MD5 is
+    ///     trusted, so a chunk that was already corrupt at first
+    ///     observation cannot canonise its corrupt state.</item>
+    /// </list>
+    /// Deep verify costs body-byte bandwidth for every chunk (gated by
+    /// the engine's T2 concurrency cap) and is therefore opt-in. The
+    /// default false preserves the cheap-by-default behaviour; the UI
+    /// exposes it as a "Deep verify (download every chunk)" toggle.
+    /// </summary>
+    public bool DeepVerify { get; init; }
 }
 
 /// <summary>

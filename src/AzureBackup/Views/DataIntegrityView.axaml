@@ -37,6 +37,10 @@
                               IsChecked="{Binding AutoRepairOnFailure}"
                               ToolTip.Tip="When a file fails with a repairable reason (missing-blob, wrong-size, md5-mismatch, crc-mismatch, decrypt-failed, byte-differ), force a re-upload and re-check that one file. If the second pass is clean, suppress the failure entirely (no diag, no row in failures). Disable for a forensic run that needs to see the un-repaired failure shape."
                               VerticalAlignment="Center"/>
+                    <CheckBox Content="Deep verify (download every chunk)"
+                              IsChecked="{Binding DeepVerify}"
+                              ToolTip.Tip="Download and envelope-verify the body of every chunk instead of the cheap structural + stored-MD5 check. Catches at-rest byte corruption that Azure HEAD metadata cannot see, and verifies a chunk's bytes before trusting its first-observed MD5 baseline. Costs body-byte bandwidth for every chunk, so leave off for a quick check and turn on for a thorough audit."
+                              VerticalAlignment="Center"/>
                     <Button Content="_Check Now"
                             Command="{Binding CheckNowCommand}"/>
                     <Button Content="Cancel"

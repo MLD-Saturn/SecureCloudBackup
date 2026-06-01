@@ -104,6 +104,49 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CleanupOrphansAsync_ChunkReferencedAgainAfterScan_SkipsDeletion()
+    {
+        // Cause 3 mitigation: the orphan scan computes its "0 references"
+        // verdict from a snapshot. A backup (or dedup hit) that references
+        // the chunk again AFTER the scan but BEFORE cleanup must not lead
+        // to deletion -- doing so would orphan a live file and surface as
+        // a missing-blob restore failure later. CleanupOrphansAsync now
+        // re-checks the authoritative reverse index immediately before
+        // deleting and skips any candidate that became referenced again.
+        var hash = "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6";
+        var chunkData = new byte[4096];
+        Random.Shared.NextBytes(chunkData);
+        await _blobService.UploadChunkDirectAsync(chunkData, hash, StorageTier.Cool);
+
+        // The stale scan verdict: an orphan entry with 0 references.
+        var staleOrphanEntry = new ChunkIndexEntry
+        {
+            ChunkHash = hash,
+            SizeBytes = 4096,
+            CurrentTier = StorageTier.Cool,
+            ReferenceCount = 0,
+            ReferencingFiles = []
+        };
+
+        // Simulate the race: a backup references the chunk again between
+        // the scan and the cleanup call.
+        _indexService.AddReference(hash, @"C:\reappeared.txt", 0, 4096, StorageTier.Cool, true);
+        Assert.Equal(1, _databaseService.GetReferenceCountForChunk(hash));
+
+        // Act
+        var result = await _indexService.CleanupOrphansAsync(new[] { staleOrphanEntry });
+
+        // Assert - the chunk was NOT deleted and was counted as skipped.
+        Assert.Equal(0, result.ChunksDeleted);
+        Assert.Equal(0, result.FailedDeletions);
+        Assert.Equal(1, result.SkippedStillReferenced);
+        Assert.Equal(0, result.BytesFreed);
+
+        var exists = await _blobService.BlobExistsAsync($"chunks/{hash}");
+        Assert.True(exists, "Re-referenced chunk must survive cleanup");
+    }
+
+    [Fact]
     public async Task FullOrphanDetectionWorkflow_EndToEnd()
     {
         // Arrange - Simulate a file backup then deletion scenario

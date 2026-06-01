@@ -122,6 +122,21 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
     private bool _autoRepairOnFailure = true;
 
     /// <summary>
+    /// When on, the next integrity check downloads and envelope-verifies
+    /// the body of EVERY chunk instead of using the cheap T1 structural +
+    /// stored-MD5 fast path. This catches two production blind spots where
+    /// a chunk passes the cheap check but fails later at restore time:
+    /// at-rest byte corruption that Azure HEAD metadata cannot see, and
+    /// the trust-on-first-use window where a chunk corrupt at first
+    /// observation would canonise its corrupt MD5 as the trusted baseline.
+    /// Default OFF because it costs body-byte bandwidth for every chunk;
+    /// bound to a "Deep verify (download every chunk)" checkbox.
+    /// Maps to <see cref="IntegrityCheckOptions.DeepVerify"/>.
+    /// </summary>
+    [ObservableProperty]
+    private bool _deepVerify;
+
+    /// <summary>
     /// D10: count of chunks awaiting MD5 backfill. Drives the visibility
     /// and label of the "Promote pre-D6 chunks" button. Refreshed on
     /// tree-load and after each backfill run.
@@ -466,7 +481,8 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
             FileIds = fileIds,
             ScopeSummary = scopeSummary,
             AutoExportBundleOnFailure = AutoExportBundleOnFailure,
-            AutoRepairOnFailure = AutoRepairOnFailure
+            AutoRepairOnFailure = AutoRepairOnFailure,
+            DeepVerify = DeepVerify
         };
 
         var progress = new Progress<IntegrityCheckProgress>(p =>
@@ -552,7 +568,8 @@ public partial class DataIntegrityViewModel : ViewModelBase, IDisposable
             IsReCheckOfFailures = true,
             ParentRunId = parentRun.Id,
             AutoExportBundleOnFailure = AutoExportBundleOnFailure,
-            AutoRepairOnFailure = AutoRepairOnFailure
+            AutoRepairOnFailure = AutoRepairOnFailure,
+            DeepVerify = DeepVerify
         };
 
         var progress = new Progress<IntegrityCheckProgress>(p =>

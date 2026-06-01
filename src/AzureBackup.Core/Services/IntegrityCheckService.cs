@@ -268,6 +268,7 @@ public sealed class IntegrityCheckService
                     var (fileFailures, autoRepaired) = await CheckOneFileAsync(
                         fileId, runId, corpus, t1Sem, t2Sem,
                         options.AutoRepairOnFailure,
+                        options.DeepVerify,
                         ct);
                     var processed = Interlocked.Increment(ref filesProcessed);
                     if (autoRepaired) Interlocked.Increment(ref filesAutoRepaired);
@@ -514,6 +515,7 @@ public sealed class IntegrityCheckService
         IReadOnlyDictionary<int, BackedUpFile> corpus,
         SemaphoreSlim t1Sem, SemaphoreSlim t2Sem,
         bool autoRepair,
+        bool deepVerify,
         CancellationToken cancellationToken)
     {
         if (!corpus.TryGetValue(fileId, out var fileFromDb))
@@ -533,7 +535,7 @@ public sealed class IntegrityCheckService
         }
 
         // First pass.
-        var firstPass = await RunOnePassAsync(fileFromDb, fileId, runId, t1Sem, t2Sem, cancellationToken);
+        var firstPass = await RunOnePassAsync(fileFromDb, fileId, runId, t1Sem, t2Sem, deepVerify, cancellationToken);
 
         // Decide whether auto-repair is in play and worth attempting.
         var canRepair = autoRepair
@@ -604,7 +606,7 @@ public sealed class IntegrityCheckService
             return (firstPass.Failures, false);
         }
 
-        var secondPass = await RunOnePassAsync(refreshed, fileId, runId, t1Sem, t2Sem, cancellationToken);
+        var secondPass = await RunOnePassAsync(refreshed, fileId, runId, t1Sem, t2Sem, deepVerify, cancellationToken);
 
         if (secondPass.Failures.Count == 0)
         {
@@ -670,6 +672,7 @@ public sealed class IntegrityCheckService
     private async Task<(List<IntegrityCheckFailure> Failures, FileOperationDiagnostics? Diag)> RunOnePassAsync(
         BackedUpFile fileFromDb, int fileId, int runId,
         SemaphoreSlim t1Sem, SemaphoreSlim t2Sem,
+        bool deepVerify,
         CancellationToken cancellationToken)
     {
         var failures = new List<IntegrityCheckFailure>();
@@ -695,7 +698,7 @@ public sealed class IntegrityCheckService
             foreach (var chunk in fileFromDb.Chunks)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, t1Sem, t2Sem, cancellationToken);
+                await CheckOneChunkAsync(fileFromDb, chunk, runId, EnsureDiag, failures, t1Sem, t2Sem, deepVerify, cancellationToken);
             }
 
             // Flush the diag if it was created (i.e., any failure). The
@@ -779,6 +782,7 @@ public sealed class IntegrityCheckService
         List<IntegrityCheckFailure> failures,
         SemaphoreSlim t1Sem,
         SemaphoreSlim t2Sem,
+        bool deepVerify,
         CancellationToken cancellationToken)
     {
         var blobName = $"chunks/{chunk.Hash}";
@@ -847,17 +851,41 @@ public sealed class IntegrityCheckService
         //     null -- the broader integrity feature is unsupported on
         //     LiteDB anyway.
         var md5Mismatch = false;
+        // Cause 2 mitigation: when DeepVerify is on, defer capturing the
+        // trust-on-first-use baseline until AFTER a successful T2 body
+        // download has proven the bytes decrypt and pass envelope CRC.
+        // Otherwise a chunk that was already corrupt at first observation
+        // would canonise its corrupt MD5 as the trusted baseline and pass
+        // every cheap check forever after.
+        var deferBaselineCapture = false;
         if (azureMd5 != null && azureMd5.Length == 16)
         {
             var persistedMd5 = _databaseService.GetChunkExpectedMd5(chunk.Hash);
             if (persistedMd5 == null)
             {
-                // First observation: capture as expected. We deliberately
-                // swallow exceptions here -- the integrity check is read-
-                // only from the user's perspective and a write failure
-                // shouldn't fail the run.
-                try { _databaseService.SetChunkExpectedMd5(chunk.Hash, azureMd5); }
-                catch (Exception ex) { Log($"SetChunkExpectedMd5({chunk.Hash}): {ex.Message}"); }
+                if (deepVerify)
+                {
+                    // Do NOT trust Azure's current MD5 yet. The T2 download
+                    // below verifies the body; we capture the baseline only
+                    // after that succeeds (see post-download block).
+                    deferBaselineCapture = true;
+                    Log($"DeepVerify: deferring TOFU MD5 baseline for chunk {chunk.Hash[..8]}... " +
+                        $"until body download verifies it (file '{file.LocalPath}', chunk {chunk.Index})");
+                }
+                else
+                {
+                    // Cheap path: capture as expected. We deliberately
+                    // swallow exceptions here -- the integrity check is read-
+                    // only from the user's perspective and a write failure
+                    // shouldn't fail the run. We log the unverified capture
+                    // so a later restore failure on this chunk can be
+                    // correlated to the trust-on-first-use window.
+                    Log($"TOFU baseline captured WITHOUT body verification for chunk {chunk.Hash[..8]}... " +
+                        $"(file '{file.LocalPath}', chunk {chunk.Index}). Run a DeepVerify check to confirm " +
+                        $"the bytes match this MD5.");
+                    try { _databaseService.SetChunkExpectedMd5(chunk.Hash, azureMd5); }
+                    catch (Exception ex) { Log($"SetChunkExpectedMd5({chunk.Hash}): {ex.Message}"); }
+                }
             }
             else if (!CryptographicOperations.FixedTimeEquals(persistedMd5, azureMd5))
             {
@@ -872,12 +900,15 @@ public sealed class IntegrityCheckService
         }
 
         // -------- T2: full blob --------
-        // Escalate when T1 found ANY problem (missing-size mismatch OR D6
-        // md5-mismatch). The cheap path stays cheap for clean chunks; a
-        // chunk with bad bytes pays the T2 price for the envelope-level
-        // evidence (and T3 byte-compare against local).
+        // Escalate when T1 found ANY problem (wrong-size OR D6 md5-mismatch),
+        // when DeepVerify forces a body download on every chunk (cause 1:
+        // at-rest byte corruption that Azure HEAD metadata cannot see), or
+        // when we deferred a TOFU baseline capture pending body verification
+        // (cause 2). The cheap path stays cheap for clean chunks unless the
+        // caller opted into DeepVerify.
         var t1Failed = contentLength != expectedEncryptedLength || md5Mismatch;
-        if (!t1Failed) return;
+        var needBody = t1Failed || deepVerify || deferBaselineCapture;
+        if (!needBody) return;
 
         byte[]? decrypted = null;
         Metrics?.RecordDecision("integrity-check-tier-escalation", new Dictionary<string, object?>
@@ -885,7 +916,8 @@ public sealed class IntegrityCheckService
             ["file"] = file.LocalPath,
             ["chunk"] = chunk.Hash,
             ["from"] = "T1",
-            ["to"] = "T2"
+            ["to"] = "T2",
+            ["reason"] = t1Failed ? "t1-failure" : deepVerify ? "deep-verify" : "tofu-baseline-capture"
         });
         // T2 (and T3 byte-compare which depends on T2's decrypted bytes)
         // are gated by t2Sem to bound download bandwidth on a heavily-
@@ -928,6 +960,34 @@ public sealed class IntegrityCheckService
         finally
         {
             t2Sem.Release();
+        }
+
+        // Cause 2 mitigation: the body download above passed envelope CRC +
+        // AES-GCM tag, so the bytes are now PROVEN intact. Only now is it
+        // safe to capture the trust-on-first-use MD5 baseline. Doing it
+        // here (rather than on the cheap T1 path) closes the window where a
+        // chunk corrupt at first observation would have canonised its
+        // corrupt MD5 as the trusted expected value.
+        if (deferBaselineCapture && azureMd5 != null && azureMd5.Length == 16)
+        {
+            Log($"DeepVerify: body verified -- capturing TOFU MD5 baseline for chunk {chunk.Hash[..8]}... " +
+                $"(file '{file.LocalPath}', chunk {chunk.Index})");
+            try { _databaseService.SetChunkExpectedMd5(chunk.Hash, azureMd5); }
+            catch (Exception ex) { Log($"SetChunkExpectedMd5({chunk.Hash}): {ex.Message}"); }
+        }
+
+        // Cause 1 mitigation: when the body download was forced purely by
+        // DeepVerify (or a deferred baseline capture) and there was no
+        // actual T1 failure, the chunk is confirmed intact remotely. We do
+        // NOT escalate to the T3 local byte-compare here: a legitimately
+        // changed local file would otherwise produce a byte-differ false
+        // positive on every chunk of every deep-verified file. T3 stays
+        // reserved for chunks that already showed a real T1 problem.
+        if (!t1Failed)
+        {
+            Log($"DeepVerify: chunk {chunk.Hash[..8]}... body intact (CRC+tag OK) " +
+                $"for file '{file.LocalPath}', chunk {chunk.Index}");
+            return;
         }
 
         // -------- T3: byte compare against local file --------

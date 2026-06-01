@@ -219,6 +219,15 @@ public class CleanupResult
     public int FailedDeletions { get; set; }
 
     /// <summary>
+    /// Number of orphan candidates that were skipped at delete time
+    /// because a fresh reverse-index re-check found they had become
+    /// referenced again since the orphan scan ran. Skipping them
+    /// prevents deleting a chunk that a file still depends on, which
+    /// would surface much later as a missing-blob restore failure.
+    /// </summary>
+    public int SkippedStillReferenced { get; set; }
+
+    /// <summary>
     /// Error messages for failed deletions.
     /// </summary>
     public List<string> Errors { get; set; } = [];

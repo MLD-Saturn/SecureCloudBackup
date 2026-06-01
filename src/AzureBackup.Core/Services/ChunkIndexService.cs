@@ -27,6 +27,19 @@ public partial class ChunkIndexService
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [ChunkIndex] {message}");
     }
 
+    /// <summary>
+    /// Unconditional diagnostic warning. Unlike <see cref="Log"/> (which is
+    /// compiled out unless DIAGNOSTICLOG is defined), this always raises
+    /// <see cref="DiagnosticLog"/> so safety-critical events -- such as an
+    /// orphan-cleanup candidate that turned out to still be referenced --
+    /// reach the application log in every build configuration.
+    /// </summary>
+    private void Warn(string message)
+    {
+        var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
+        DiagnosticLog?.Invoke(this, $"[{timestamp}] [ChunkIndex] WARNING: {message}");
+    }
+
     public ChunkIndexService(LocalDatabaseService databaseService, IBlobStorageService blobService, EncryptionService encryptionService)
     {
         ArgumentNullException.ThrowIfNull(databaseService);
@@ -395,6 +408,31 @@ public partial class ChunkIndexService
             {
                 try
                 {
+                    // Cause 3 mitigation: re-validate the candidate against
+                    // the canonical reverse index INSIDE the cleanup op,
+                    // immediately before deleting. The orphan scan computed
+                    // its "0 references" verdict from a snapshot taken
+                    // earlier; a backup that ran in the meantime (or a
+                    // concurrent dedup hit) can have referenced this chunk
+                    // again. Deleting it anyway would orphan a live file and
+                    // surface much later as an unexplained missing-blob
+                    // restore failure. GetReferenceCountForChunk reads the
+                    // authoritative chunk_file_refs table, not the cached
+                    // ReferenceCount column the scan used.
+                    var liveRefCount = _databaseService.GetReferenceCountForChunk(orphan.ChunkHash);
+                    if (liveRefCount > 0)
+                    {
+                        Warn($"Skipping delete of chunk {orphan.ChunkHash[..Math.Min(16, orphan.ChunkHash.Length)]}... -- " +
+                            $"it became referenced again ({liveRefCount} file(s)) since the orphan scan ran. " +
+                            $"Deleting it would have caused a missing-blob restore failure.");
+                        lock (resultLock)
+                        {
+                            result.SkippedStillReferenced++;
+                        }
+                        Interlocked.Increment(ref deleted);
+                        return;
+                    }
+
                     await _blobService.DeleteBlobAsync($"chunks/{orphan.ChunkHash}", ct);
                     _databaseService.DeleteChunkIndexEntry(orphan.ChunkHash);
 
@@ -423,6 +461,7 @@ public partial class ChunkIndexService
             });
 
         Log($"Cleanup complete: {result.ChunksDeleted} deleted, {result.FailedDeletions} failed, " +
+            $"{result.SkippedStillReferenced} skipped (re-referenced), " +
             $"{FormatHelper.FormatBytes(result.BytesFreed)} freed");
 
         return result;
