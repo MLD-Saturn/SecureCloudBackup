@@ -719,7 +719,7 @@ public partial class RestoreService
         {
             ["files"] = fileList.Count,
             ["maxParallelFileRestores"] = MaxParallelFileRestores,
-            ["memoryBudgetMb"] = memoryBudget.IsUnlimited ? "unlimited" : (memoryBudget.TotalBytes / (1024 * 1024)).ToString(),
+            ["memoryBudgetMb"] = memoryBudget.IsUnlimited ? "unlimited" : FormatHelper.FormatBytes(memoryBudget.TotalBytes),
             ["memoryBudgetEnabled"] = config.MemoryLimitEnabled,
             ["processors"] = Environment.ProcessorCount
         });
@@ -893,7 +893,7 @@ public partial class RestoreService
             // entering the pipeline above the new ceiling.
             restoreTasks.Add(Task.Run(async () =>
             {
-                var perFileTasks = new List<Task>(largeFiles.Count);
+                var perFileTasks = new List<Task>();
                 foreach (var item in largeFiles)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
