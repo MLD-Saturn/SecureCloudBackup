@@ -43,7 +43,26 @@ splitting long pipelines across lines.
 ## Git commit policy
 
 When code changes reach a logical stopping point in a git repository,
-commit the modifications immediately with a meaningful message. Rules:
+**you MUST commit** the modifications immediately with a meaningful
+message. Committing is mandatory, not optional. Leaving finished
+changes uncommitted "for the user to review" is a policy violation:
+the user reviews work through git history, not through the working
+tree.
+
+**Definition of a logical stopping point.** All three of these hold:
+(1) the build is clean, (2) the relevant tests pass, and (3) the
+required `AGENT_CONTEXT.md` / `docs/` updates are done. When all three
+are true, commit before yielding your turn. Do not end a response with
+the work left in an uncommitted state.
+
+**Anti-pattern to avoid (this has actually happened).** Do NOT end a
+task with changes staged or unstaged but uncommitted, and do NOT
+announce "I have not committed -- the changes are staged for you to
+review." "Never push" does NOT mean "never commit." The two rules are
+independent: commit locally every time, then stop. The push is the
+only step the user performs manually.
+
+Rules:
 
 - **Before running `git commit`, audit `AGENT_CONTEXT.md` against the
   staged change.** That file contains a numbered "Pre-commit checklist"
