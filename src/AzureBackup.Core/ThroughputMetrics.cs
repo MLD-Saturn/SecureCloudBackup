@@ -22,6 +22,25 @@ public sealed class ThroughputMetrics : IDisposable
 {
     private readonly string _metricsDirectory;
     private readonly ConcurrentQueue<MetricsRecord> _pendingRecords = new();
+
+    // Serializes every flush so concurrent file workers can persist records
+    // without racing on the shared append-only writer. The queue stays
+    // lock-free for enqueue; only the disk drain is serialized.
+    private readonly object _flushLock = new();
+
+    // Long-lived writer kept open across flushes. Reopening the file per
+    // flush is wasteful when restoring tens of thousands of files, so the
+    // handle is created once and reused. _writerFilePath tracks which daily
+    // file the handle points at so a UTC day rollover can swap it cleanly.
+    private StreamWriter? _writer;
+    private string? _writerFilePath;
+    private bool _disposed;
+
+    // FileStream buffer for the persistent append handle. 64 KiB amortizes
+    // syscall overhead across the many small per-file JSONL rows produced by
+    // a large restore without holding meaningful memory.
+    private const int WriterBufferBytes = 64 * 1024;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingDefault,
@@ -62,6 +81,23 @@ public sealed class ThroughputMetrics : IDisposable
         metrics.Type = "file";
         metrics.Timestamp = DateTime.UtcNow;
         _pendingRecords.Enqueue(metrics);
+    }
+
+    /// <summary>
+    /// Records per-file metrics and immediately persists all pending records
+    /// to disk. Use this from restore/backup file workers so each completed
+    /// file becomes visible in the JSONL file as it finishes, instead of only
+    /// at operation completion. Thread-safe: enqueue is lock-free and the
+    /// disk drain is serialized on a shared writer, so tens of thousands of
+    /// concurrent file completions persist without racing the append handle.
+    /// </summary>
+    public void RecordFileAndFlush(FileMetrics metrics)
+    {
+        ArgumentNullException.ThrowIfNull(metrics);
+        metrics.Type = "file";
+        metrics.Timestamp = DateTime.UtcNow;
+        _pendingRecords.Enqueue(metrics);
+        Flush();
     }
 
     /// <summary>
@@ -145,26 +181,95 @@ public sealed class ThroughputMetrics : IDisposable
     }
 
     /// <summary>
-    /// Writes all pending records to the daily JSONL file.
+    /// Drains all pending records to the daily JSONL file using a long-lived
+    /// append writer. Serialized on <see cref="_flushLock"/> so concurrent
+    /// callers cannot interleave writes or race the shared handle. Best-effort:
+    /// failures never propagate to the main operation.
     /// </summary>
     private void Flush()
     {
+        lock (_flushLock)
+        {
+            if (_disposed)
+                return;
+
+            try
+            {
+                var writer = GetOrCreateWriter();
+                if (writer is null)
+                    return;
+
+                var wrote = false;
+                while (_pendingRecords.TryDequeue(out var record))
+                {
+                    var json = JsonSerializer.Serialize(record, record.GetType(), JsonOptions);
+                    writer.WriteLine(json);
+                    wrote = true;
+                }
+
+                // Flush the StreamWriter and underlying FileStream so records
+                // hit the OS file cache immediately and survive a process exit
+                // that bypasses Dispose. We deliberately do not FlushToDisk()
+                // every call (no fsync per file) — that would serialize 50 GB
+                // restores behind disk latency for best-effort telemetry.
+                if (wrote)
+                    writer.Flush();
+            }
+            catch
+            {
+                // Best-effort — metrics must never break the main operation.
+                // Drop the writer so the next flush rebuilds it; a transient
+                // handle fault (e.g., disk full) should not wedge telemetry.
+                DisposeWriter();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Returns the open append writer for today's file, creating it (or
+    /// swapping it on a UTC day rollover) as needed. Must be called under
+    /// <see cref="_flushLock"/>.
+    /// </summary>
+    private StreamWriter? GetOrCreateWriter()
+    {
         var filePath = GetDailyFilePath();
 
+        if (_writer is not null && string.Equals(_writerFilePath, filePath, StringComparison.Ordinal))
+            return _writer;
+
+        // Day rolled over (or first write): close yesterday's handle and open
+        // today's. FileShare.Read lets external tooling tail the JSONL file.
+        DisposeWriter();
+
+        var stream = new FileStream(
+            filePath,
+            FileMode.Append,
+            FileAccess.Write,
+            FileShare.Read,
+            WriterBufferBytes);
+        _writer = new StreamWriter(stream);
+        _writerFilePath = filePath;
+        return _writer;
+    }
+
+    /// <summary>
+    /// Closes and clears the persistent writer. Must be called under
+    /// <see cref="_flushLock"/>.
+    /// </summary>
+    private void DisposeWriter()
+    {
         try
         {
-            using var stream = new FileStream(filePath, FileMode.Append, FileAccess.Write, FileShare.Read);
-            using var writer = new StreamWriter(stream);
-
-            while (_pendingRecords.TryDequeue(out var record))
-            {
-                var json = JsonSerializer.Serialize(record, record.GetType(), JsonOptions);
-                writer.WriteLine(json);
-            }
+            _writer?.Dispose();
         }
         catch
         {
-            // Best-effort — metrics must never break the main operation
+            // Best-effort — a failing close must not surface to callers.
+        }
+        finally
+        {
+            _writer = null;
+            _writerFilePath = null;
         }
     }
 
@@ -202,9 +307,38 @@ public sealed class ThroughputMetrics : IDisposable
 
     public void Dispose()
     {
-        // Flush any remaining records on dispose
-        if (!_pendingRecords.IsEmpty)
-            Flush();
+        lock (_flushLock)
+        {
+            if (_disposed)
+                return;
+
+            // Drain anything still queued, then close the persistent handle.
+            // We inline the drain here (rather than calling Flush()) so the
+            // _disposed guard can be set before releasing the lock, preventing
+            // a late concurrent Flush() from reopening the writer.
+            try
+            {
+                var writer = GetOrCreateWriter();
+                if (writer is not null)
+                {
+                    while (_pendingRecords.TryDequeue(out var record))
+                    {
+                        var json = JsonSerializer.Serialize(record, record.GetType(), JsonOptions);
+                        writer.WriteLine(json);
+                    }
+                    writer.Flush();
+                }
+            }
+            catch
+            {
+                // Best-effort — disposal must never throw.
+            }
+            finally
+            {
+                DisposeWriter();
+                _disposed = true;
+            }
+        }
     }
 }
 

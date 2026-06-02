@@ -459,7 +459,7 @@ public partial class RestoreService
             {
                 restoreFileStopwatch.Stop();
                 var singleElapsed = restoreFileStopwatch.Elapsed.TotalSeconds;
-                Metrics?.RecordFile(new FileMetrics
+                Metrics?.RecordFileAndFlush(new FileMetrics
                 {
                     Operation = "restore",
                     Path = file.LocalPath,
@@ -1385,7 +1385,7 @@ public partial class RestoreService
         // Record per-file restore pipeline metrics
         fileStopwatch.Stop();
         var fileElapsed = fileStopwatch.Elapsed.TotalSeconds;
-        Metrics?.RecordFile(new FileMetrics
+        Metrics?.RecordFileAndFlush(new FileMetrics
         {
             Operation = "restore",
             Path = file.LocalPath,

@@ -33,6 +33,17 @@ public class ThroughputMetricsRecordDecisionTests : IDisposable
     private string TodayJsonl() =>
         Path.Combine(_tempDir, $"throughput-{DateTime.UtcNow:yyyy-MM-dd}.jsonl");
 
+    // ThroughputMetrics keeps a long-lived append writer open while the sink
+    // is alive, so a reader must opt into FileShare.ReadWrite (the default
+    // File.ReadAllLines requests FileShare.Read and throws IOException against
+    // the open write handle). External log-tailing tooling reads the same way.
+    private static string[] ReadAllSharedLines(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd().Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    }
+
     [Fact]
     public void RecordDecision_WritesImmediately_ToDailyJsonl()
     {
@@ -49,7 +60,7 @@ public class ThroughputMetricsRecordDecisionTests : IDisposable
 
         var jsonlPath = TodayJsonl();
         Assert.True(File.Exists(jsonlPath), "Decision record must be flushed to disk immediately");
-        var line = File.ReadAllLines(jsonlPath).Single();
+        var line = ReadAllSharedLines(jsonlPath).Single();
         Assert.Contains("\"type\":\"decision\"", line);
         Assert.Contains("\"reason\":\"backup-concurrency\"", line);
         Assert.Contains("\"files\":\"100\"", line);
@@ -65,7 +76,7 @@ public class ThroughputMetricsRecordDecisionTests : IDisposable
 
         metrics.RecordDecision("legacy-fallback");
 
-        var line = File.ReadAllLines(TodayJsonl()).Single();
+        var line = ReadAllSharedLines(TodayJsonl()).Single();
         Assert.Contains("\"type\":\"decision\"", line);
         Assert.Contains("\"reason\":\"legacy-fallback\"", line);
     }
@@ -98,7 +109,7 @@ public class ThroughputMetricsRecordDecisionTests : IDisposable
             ["nullField"] = null
         });
 
-        var line = File.ReadAllLines(TodayJsonl()).Single();
+        var line = ReadAllSharedLines(TodayJsonl()).Single();
         Assert.Contains("\"stall_count\":\"7\"", line);
         Assert.Contains("\"budget_mb\":\"256\"", line);
         Assert.Contains("\"unlimited\":\"False\"", line);
@@ -116,7 +127,7 @@ public class ThroughputMetricsRecordDecisionTests : IDisposable
         metrics.RecordDecision("decision-2");
         metrics.RecordDecision("decision-3");
 
-        var lines = File.ReadAllLines(TodayJsonl());
+        var lines = ReadAllSharedLines(TodayJsonl());
         Assert.Equal(3, lines.Length);
         Assert.Contains("decision-1", lines[0]);
         Assert.Contains("decision-2", lines[1]);

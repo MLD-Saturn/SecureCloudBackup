@@ -20,6 +20,24 @@ public class ThroughputMetricsTests : IDisposable
         catch { /* best-effort cleanup */ }
     }
 
+    // ThroughputMetrics keeps a long-lived append writer open while the sink
+    // is alive, so a reader must opt into FileShare.ReadWrite to tail the
+    // file (exactly what external log-tailing tooling does). The default
+    // File.ReadAllText/ReadAllLines request FileShare.Read, which conflicts
+    // with the open write handle and throws IOException.
+    private static string ReadAllSharedText(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+
+    private static string[] ReadAllSharedLines(string path)
+    {
+        return ReadAllSharedText(path)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries);
+    }
+
     [Fact]
     public void WhenCreatedThenDirectoryIsCreated()
     {
@@ -61,7 +79,7 @@ public class ThroughputMetricsTests : IDisposable
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
         Assert.Single(files);
 
-        var lines = File.ReadAllLines(files[0]);
+        var lines = ReadAllSharedLines(files[0]);
         Assert.Equal(2, lines.Length);
         Assert.Contains("\"type\":\"file\"", lines[0]);
         Assert.Contains("\"type\":\"op\"", lines[1]);
@@ -99,7 +117,7 @@ public class ThroughputMetricsTests : IDisposable
         });
 
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
-        var content = File.ReadAllText(files[0]);
+        var content = ReadAllSharedText(files[0]);
 
         Assert.Contains("\"budget_stalls\":3", content);
         Assert.Contains("\"retries\":1", content);
@@ -123,7 +141,7 @@ public class ThroughputMetricsTests : IDisposable
         });
 
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
-        var content = File.ReadAllText(files[0]);
+        var content = ReadAllSharedText(files[0]);
 
         // Failed = 0 should be omitted due to WhenWritingDefault
         Assert.DoesNotContain("\"failed\"", content);
@@ -151,6 +169,50 @@ public class ThroughputMetricsTests : IDisposable
     }
 
     [Fact]
+    public void WhenRecordFileAndFlushThenRecordIsVisibleWhileSinkIsOpen()
+    {
+        using var metrics = new ThroughputMetrics(_testDir);
+
+        metrics.RecordFileAndFlush(new FileMetrics
+        {
+            Operation = "restore",
+            Path = "per-file.bin",
+            Bytes = 4096
+        });
+
+        // No Dispose / no operation flush: the per-file record must already be
+        // on disk because RecordFileAndFlush flushes the long-lived writer.
+        var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
+        Assert.Single(files);
+
+        var content = ReadAllSharedText(files[0]);
+        Assert.Contains("per-file.bin", content);
+        Assert.Contains("\"type\":\"file\"", content);
+    }
+
+    [Fact]
+    public void WhenMultipleRecordFileAndFlushThenAllAppendedToSameOpenFile()
+    {
+        using var metrics = new ThroughputMetrics(_testDir);
+
+        for (var i = 0; i < 5; i++)
+        {
+            metrics.RecordFileAndFlush(new FileMetrics
+            {
+                Operation = "restore",
+                Path = $"file{i}.bin",
+                Bytes = i * 1000
+            });
+        }
+
+        var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
+        Assert.Single(files);
+
+        var lines = ReadAllSharedLines(files[0]);
+        Assert.Equal(5, lines.Length);
+    }
+
+    [Fact]
     public void WhenMultipleRecordsThenAppendedToSameFile()
     {
         using var metrics = new ThroughputMetrics(_testDir);
@@ -175,7 +237,7 @@ public class ThroughputMetricsTests : IDisposable
         var files = Directory.GetFiles(_testDir, "throughput-*.jsonl");
         Assert.Single(files);
 
-        var lines = File.ReadAllLines(files[0]);
+        var lines = ReadAllSharedLines(files[0]);
         Assert.Equal(6, lines.Length); // 5 file records + 1 op record
     }
 
@@ -232,7 +294,7 @@ public class ThroughputMetricsTests : IDisposable
             ThroughputMBps = 1.0
         });
 
-        var content = File.ReadAllText(Directory.GetFiles(_testDir, "throughput-*.jsonl")[0]);
+        var content = ReadAllSharedText(Directory.GetFiles(_testDir, "throughput-*.jsonl")[0]);
         Assert.Contains("\"throughput_mbytes_per_sec\":1", content);
         Assert.DoesNotContain("\"throughput_mbps\"", content);
         Assert.DoesNotContain("\"throughput_m_bps\"", content);
