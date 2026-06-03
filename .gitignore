@@ -54,6 +54,9 @@ coverage*.json
 *.cobertura.xml
 output.cobertura.xml
 
+# ReportGenerator HTML/text output
+coveragereport/
+
 # NCrunch
 *.ncrunch*
 _NCrunch_*

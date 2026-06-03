@@ -104,6 +104,37 @@ public class PathHelperTests
         Assert.Equal(Path.Combine("C:", "Users", "me"), result);
     }
 
+    [Fact]
+    public void WhenAllPathsAreBareFilenamesThenReturnsEmpty()
+    {
+        // Bare filenames have no directory component, so there is no
+        // common root to compute. Path.GetDirectoryName returns "" for
+        // each, they are filtered out, and the helper returns empty.
+        var paths = new[] { "a.txt", "b.txt" };
+
+        var result = PathHelper.FindCommonRoot(paths);
+
+        Assert.Equal(string.Empty, result);
+    }
+
+    [Fact]
+    public void WhenPathsHaveNoSharedRootThenReturnsEmpty()
+    {
+        // Two distinct roots share no prefix. The helper walks the
+        // candidate root up its parent chain; when the parent chain is
+        // exhausted without a match it returns empty rather than a
+        // bogus partial root.
+        var paths = new[]
+        {
+            Path.Combine("C:", "alpha", "a.txt"),
+            Path.Combine("D:", "beta", "b.txt")
+        };
+
+        var result = PathHelper.FindCommonRoot(paths);
+
+        Assert.Equal(string.Empty, result);
+    }
+
     #endregion
 
     #region GetDisplayName

@@ -113,4 +113,75 @@ public class SystemMemoryHelperTests
 
         Assert.Equal(MemoryLimitSeverity.Safe, severity);
     }
+
+    [Theory]
+    [InlineData(1 * GB, 8 * GB, MemoryLimitSeverity.Safe)]        // 12.5% -> well under 50%.
+    [InlineData(4 * GB, 8 * GB, MemoryLimitSeverity.Safe)]        // exactly 50% is still Safe (<= 0.5).
+    [InlineData(5 * GB, 8 * GB, MemoryLimitSeverity.Aggressive)]  // 62.5% -> in (0.5, 0.8].
+    [InlineData(6 * GB, 8 * GB, MemoryLimitSeverity.Aggressive)]  // exactly 75% -> still in (0.5, 0.8].
+    [InlineData(7 * GB, 8 * GB, MemoryLimitSeverity.Dangerous)]   // 87.5% -> over 0.8.
+    public void GetSeverity_AtRatio_ReturnsExpectedBand(long selectedBytes, long totalBytes, MemoryLimitSeverity expected)
+    {
+        var selectedMB = (int)(selectedBytes / MB);
+
+        var actual = SystemMemoryHelper.GetSeverity(selectedMB, totalBytes);
+
+        Assert.Equal(expected, actual);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void GetSeverity_NonPositiveTotal_ReturnsSafe(long totalBytes)
+    {
+        // Detection failure must not paint the slider red; with no
+        // known total there is no basis to call any value dangerous.
+        var actual = SystemMemoryHelper.GetSeverity(8192, totalBytes);
+
+        Assert.Equal(MemoryLimitSeverity.Safe, actual);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void GetMemorySteps_NonPositiveTotal_ReturnsSingleMinStep(long totalBytes)
+    {
+        // On a host where physical RAM cannot be detected the slider
+        // must still offer exactly one valid detent (the floor) so the
+        // UI has something to bind to.
+        var steps = SystemMemoryHelper.GetMemorySteps(totalBytes);
+
+        Assert.Equal([SystemMemoryHelper.MinLimitMB], steps);
+    }
+
+    [Fact]
+    public void GetMemorySteps_PowerOfTwoTotal_ProducesDoublingDetents()
+    {
+        // 8 GB total -> 512, 1024, 2048, 4096, 8192. Every detent is a
+        // power-of-two MB value and the final detent equals total RAM.
+        var steps = SystemMemoryHelper.GetMemorySteps(8L * GB);
+
+        Assert.Equal([512, 1024, 2048, 4096, 8192], steps);
+    }
+
+    [Fact]
+    public void GetMemorySteps_NonPowerOfTwoTotal_AppendsTotalAsFinalDetent()
+    {
+        // 6 GB total -> doubling stops at 4096 (next would be 8192 > total),
+        // so the actual total (6144) is appended so the user can select
+        // their full RAM. The final detent must equal total RAM.
+        var steps = SystemMemoryHelper.GetMemorySteps(6L * GB);
+
+        Assert.Equal(6144, steps[^1]);
+        Assert.Equal(512, steps[0]);
+    }
+
+    [Fact]
+    public void GetMemorySteps_AllDetentsAreAscending()
+    {
+        var steps = SystemMemoryHelper.GetMemorySteps(12L * GB);
+
+        for (var i = 1; i < steps.Length; i++)
+            Assert.True(steps[i] > steps[i - 1], $"step {i} ({steps[i]}) must exceed step {i - 1} ({steps[i - 1]})");
+    }
 }

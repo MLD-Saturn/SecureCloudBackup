@@ -86,6 +86,16 @@ public class FormatHelperTests
         Assert.Equal(expected, FormatHelper.FormatDuration(seconds));
     }
 
+    [Theory]
+    [InlineData(86400, "1d 0h 0m")]    // exactly 24h rolls into the days branch.
+    [InlineData(90000, "1d 1h 0m")]    // 25h.
+    [InlineData(100000, "1d 3h 46m")]  // 27h 46m -> 1 day, 3h, 46m.
+    [InlineData(200000, "2d 7h 33m")]  // 55h 33m -> 2 days, 7h, 33m.
+    public void WhenDurationOneDayOrMoreThenFormatsAsDaysHoursAndMinutes(double seconds, string expected)
+    {
+        Assert.Equal(expected, FormatHelper.FormatDuration(seconds));
+    }
+
     [Fact]
     public void WhenDurationNegativeThenThrowsArgumentOutOfRangeException()
     {
