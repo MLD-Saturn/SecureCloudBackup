@@ -651,6 +651,118 @@ public partial class MainWindowViewModel
         }
     }
 
+    /// <summary>
+    /// B80: opens the salt recovery-code panel and renders the recovery code
+    /// for the active catalog's <c>.salt</c> sidecar. The salt is not a secret
+    /// (it only makes Argon2id key derivation unique per install), so showing it
+    /// does not weaken the zero-knowledge guarantee -- the password remains the
+    /// only secret. The code lets the user restore the salt file if it is ever
+    /// deleted by mistake.
+    /// </summary>
+    [RelayCommand]
+    private void ShowSaltRecoveryCode()
+    {
+        IsSaltRecoveryPending = true;
+        SaltRecoveryCodeInput = string.Empty;
+        SaltRecoveryCodeDisplay = string.Empty;
+
+        var saltPath = AppMode.DatabasePath + ".salt";
+        if (!File.Exists(saltPath))
+        {
+            AddLog($"Salt file not found at {saltPath}. Unlock a catalog first so the salt exists, " +
+                   "or restore it below if you have a recovery code.");
+            return;
+        }
+
+        try
+        {
+            var salt = File.ReadAllBytes(saltPath);
+            if (salt.Length != SaltRecoveryCode.SaltSize)
+            {
+                AddLog($"Salt file is corrupted (expected {SaltRecoveryCode.SaltSize} bytes, " +
+                       $"got {salt.Length}). A recovery code cannot be generated.");
+                return;
+            }
+
+            SaltRecoveryCodeDisplay = SaltRecoveryCode.Encode(salt);
+            AddLog("Salt recovery code generated. Write it down and store it somewhere safe. " +
+                   "It restores the salt file only -- it is NOT a password backup.");
+        }
+        catch (IOException ex)
+        {
+            AddLog($"Could not read the salt file: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// B80: cancels the salt recovery panel and clears its fields.
+    /// </summary>
+    [RelayCommand]
+    private void CancelSaltRecovery()
+    {
+        IsSaltRecoveryPending = false;
+        SaltRecoveryCodeDisplay = string.Empty;
+        SaltRecoveryCodeInput = string.Empty;
+    }
+
+    /// <summary>
+    /// B80: restores the active catalog's <c>.salt</c> sidecar from a recovery
+    /// code the user typed in. The code is checksum-validated before any file is
+    /// written, so a typo is rejected up front instead of silently restoring the
+    /// wrong salt (which would surface later as an opaque unlock failure). If a
+    /// salt file already exists it is left untouched unless its bytes differ.
+    /// </summary>
+    [RelayCommand]
+    private void RestoreSaltFromRecoveryCode()
+    {
+        if (string.IsNullOrWhiteSpace(SaltRecoveryCodeInput))
+        {
+            AddLog("Enter a recovery code to restore the salt file.");
+            return;
+        }
+
+        byte[] salt;
+        try
+        {
+            salt = SaltRecoveryCode.Decode(SaltRecoveryCodeInput);
+        }
+        catch (FormatException ex)
+        {
+            AddLog($"Invalid recovery code: {ex.Message}");
+            return;
+        }
+
+        var saltPath = AppMode.DatabasePath + ".salt";
+        if (File.Exists(saltPath))
+        {
+            var existing = File.ReadAllBytes(saltPath);
+            if (existing.AsSpan().SequenceEqual(salt))
+            {
+                AddLog("The salt file already matches this recovery code. Nothing to restore.");
+                IsSaltRecoveryPending = false;
+                SaltRecoveryCodeInput = string.Empty;
+                return;
+            }
+
+            AddLog($"A different salt file already exists at {saltPath}. Delete it first if you are " +
+                   "sure you want to replace it with the recovery code.");
+            return;
+        }
+
+        try
+        {
+            File.WriteAllBytes(saltPath, salt);
+            AddLog($"Salt file restored from recovery code at {saltPath}. " +
+                   "You can now unlock the catalog with your password.");
+            IsSaltRecoveryPending = false;
+            SaltRecoveryCodeInput = string.Empty;
+        }
+        catch (IOException ex)
+        {
+            AddLog($"Could not write the salt file: {ex.Message}");
+        }
+    }
+
     #endregion
 
     // Cached Azure file paths from the last successful refresh.

@@ -422,6 +422,39 @@
                                     ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from Azure metadata."/>
                         </StackPanel>
                     </StackPanel>
+
+                    <!-- B80: Salt recovery code -->
+                    <Separator Margin="0,8,0,0"/>
+                    <TextBlock Text="Salt file recovery code" FontWeight="SemiBold" Margin="0,8,0,0"/>
+                    <TextBlock TextWrapping="Wrap" Opacity="0.8"
+                               Text="The catalog is unlocked from a small .salt file stored next to the database. If that file is deleted by mistake you cannot unlock the catalog, even with the correct password. Generate a recovery code now and write it down: it lets you recreate the salt file later. The salt is not a secret and the code is NOT a substitute for your password -- it only restores the salt file; if you forget your password nothing can recover your data."/>
+
+                    <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding !IsSaltRecoveryPending}">
+                        <Button Content="Salt Recovery Code..."
+                                Command="{Binding ShowSaltRecoveryCodeCommand}"
+                                ToolTip.Tip="Show the recovery code for the current salt file, or restore the salt file from a code."/>
+                    </StackPanel>
+
+                    <StackPanel IsVisible="{Binding IsSaltRecoveryPending}" Spacing="6">
+                        <TextBlock Text="Your recovery code (write this down):"/>
+                        <TextBox Text="{Binding SaltRecoveryCodeDisplay}" IsReadOnly="True"
+                                 FontFamily="Consolas, monospace"
+                                 Watermark="Unlock a catalog first so a salt file exists"/>
+
+                        <TextBlock Text="Restore the salt file from a recovery code:" Margin="0,8,0,0"/>
+                        <TextBox Text="{Binding SaltRecoveryCodeInput}"
+                                 FontFamily="Consolas, monospace"
+                                 Watermark="Type or paste a recovery code"/>
+
+                        <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,4,0,0">
+                            <Button Content="Close"
+                                    Command="{Binding CancelSaltRecoveryCommand}"/>
+                            <Button Content="Restore Salt File"
+                                    Command="{Binding RestoreSaltFromRecoveryCodeCommand}"
+                                    Background="SteelBlue" Foreground="White"
+                                    ToolTip.Tip="Validate the recovery code and recreate the salt file next to the database."/>
+                        </StackPanel>
+                    </StackPanel>
                 </StackPanel>
             </Border>
             </StackPanel>

@@ -475,6 +475,17 @@ When the rebuild completes you can unlock the active catalog with the same passw
 
 If a catalog already exists at the active path when you click **Confirm Rebuild**, it is itself quarantined first (under a fresh timestamp) so the rebuild never silently overwrites in-progress state. Failure modes (wrong password, missing file, wrong-sized salt sidecar) are surfaced as user-readable lines in the Logs view; on any failure the active catalog file is **not** created.
 
+### Danger Zone — Salt File Recovery Code
+
+Your catalog is unlocked using a small `.salt` file stored next to the database (`backup.db.salt`). The salt makes the key derivation unique to your installation. If that file is **deleted by mistake**, the catalog can no longer be unlocked — even with the correct password — because a different salt derives a different key. The **Salt Recovery Code** feature protects against exactly that accident.
+
+Click **Salt Recovery Code...** in the Settings danger zone to expand the panel. It has two parts:
+
+- **Your recovery code** — a short, hyphen-grouped code (for example `K7M2Q-9XR4T-...`) generated from the current salt file. Write it down and keep it somewhere safe. The code uses only easy-to-read characters (no `I`, `L`, `O`, or `U`) and includes a built-in checksum so a typo is caught when you restore.
+- **Restore the salt file from a recovery code** — type or paste a previously saved code and click **Restore Salt File**. The code is checksum-validated before anything is written; if it is mistyped the restore is rejected up front. The salt file is recreated next to the database, after which you can unlock the catalog with your password as normal.
+
+Important: the salt is **not** a secret and the recovery code is **not** a password backup. It only restores the salt file. If you forget your password, nothing can recover your data — that is the point of the zero-knowledge design. If a salt file already exists, restoring is a no-op when the code matches it, and is refused (to avoid clobbering) when it differs.
+
 ---
 
 ## Logs and diagnostic bundles
