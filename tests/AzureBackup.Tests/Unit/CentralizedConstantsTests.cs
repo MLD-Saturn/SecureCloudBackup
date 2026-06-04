@@ -24,6 +24,36 @@ public class CentralizedConstantsTests
     }
 
     [Fact]
+    public void ByteSizesMBLongIsOneMebibyte()
+    {
+        Assert.Equal(1_048_576L, ByteSizes.MBLong);
+    }
+
+    [Fact]
+    public void ByteSizesMBLongEqualsMB()
+    {
+        Assert.Equal(ByteSizes.MB, ByteSizes.MBLong);
+    }
+
+    [Fact]
+    public void ByteSizesMBLongIsLongTyped()
+    {
+        Assert.IsType<long>(ByteSizes.MBLong);
+    }
+
+    [Fact]
+    public void ByteSizesMBLongMultiplyDoesNotOverflowInt()
+    {
+        // 8192 * MB would overflow Int32 (8,589,934,592 > int.MaxValue);
+        // using MBLong promotes the product to 64-bit so it computes correctly.
+        const int selectedMB = 8192;
+
+        var bytes = selectedMB * ByteSizes.MBLong;
+
+        Assert.Equal(8_589_934_592L, bytes);
+    }
+
+    [Fact]
     public void Argon2DegreeOfParallelismIsEight()
     {
         Assert.Equal(8, KdfParameters.Argon2DegreeOfParallelism);

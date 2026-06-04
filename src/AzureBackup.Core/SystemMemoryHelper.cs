@@ -44,7 +44,7 @@ public static class SystemMemoryHelper
             var totalBytes = GetTotalPhysicalMemoryBytes();
             var heapBytes = GC.GetTotalMemory(forceFullCollection: false);
 
-            var osReserve = Math.Max(totalBytes / 4, 1024L * MB);
+            var osReserve = Math.Max(totalBytes / 4, 1024 * MBLong);
             var available = totalBytes - heapBytes - osReserve;
             return Math.Max(available, 0);
         }
@@ -93,7 +93,7 @@ public static class SystemMemoryHelper
         if (totalPhysicalBytes <= 0)
             return MemoryLimitSeverity.Safe;
 
-        var ratio = (double)((long)selectedMB * MB) / totalPhysicalBytes;
+        var ratio = (double)(selectedMB * MBLong) / totalPhysicalBytes;
         return ratio switch
         {
             <= 0.5 => MemoryLimitSeverity.Safe,
