@@ -276,7 +276,6 @@ public partial class ChunkIndexService
                     .ToList();
 
                 // Parallel deletion of incomplete metadata and orphaned chunks
-                const int maxParallelDeletes = 128;
                 int deletedCount = 0;
                 int deletedMetadata = 0;
                 int deletedChunks = 0;
@@ -285,7 +284,7 @@ public partial class ChunkIndexService
                     blobsToDelete,
                     new ParallelOptions
                     {
-                        MaxDegreeOfParallelism = maxParallelDeletes,
+                        MaxDegreeOfParallelism = MaxParallelDeletes,
                         CancellationToken = cancellationToken
                     },
                     async (item, ct) =>

@@ -1,3 +1,5 @@
+using static AzureBackup.Core.ByteSizes;
+
 namespace AzureBackup.Core;
 
 /// <summary>
@@ -8,8 +10,6 @@ namespace AzureBackup.Core;
 /// </summary>
 public static class SystemMemoryHelper
 {
-    private const long MB = 1024L * 1024;
-
     /// <summary>
     /// Minimum memory limit the user can select (512 MB).
     /// </summary>
@@ -93,7 +93,7 @@ public static class SystemMemoryHelper
         if (totalPhysicalBytes <= 0)
             return MemoryLimitSeverity.Safe;
 
-        var ratio = (double)(selectedMB * MB) / totalPhysicalBytes;
+        var ratio = (double)((long)selectedMB * MB) / totalPhysicalBytes;
         return ratio switch
         {
             <= 0.5 => MemoryLimitSeverity.Safe,

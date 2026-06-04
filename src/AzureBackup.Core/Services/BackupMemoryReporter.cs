@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using static AzureBackup.Core.ByteSizes;
 
 namespace AzureBackup.Core.Services;
 
@@ -61,8 +62,6 @@ namespace AzureBackup.Core.Services;
 /// </summary>
 public sealed class BackupMemoryReporter : IDisposable
 {
-    private const long MB = 1024L * 1024;
-
     private readonly MemoryBudget _budget;
     private readonly string _opLabel;
     private readonly Action<string> _emit;

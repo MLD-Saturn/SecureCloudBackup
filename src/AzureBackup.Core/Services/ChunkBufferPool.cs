@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using static AzureBackup.Core.ByteSizes;
 
 namespace AzureBackup.Core.Services;
 
@@ -100,9 +101,6 @@ namespace AzureBackup.Core.Services;
 /// </summary>
 public sealed class ChunkBufferPool : IDisposable
 {
-    private const int KB = 1024;
-    private const int MB = 1024 * 1024;
-
     /// <summary>
     /// Production bucket geometry for the SMALL-chunk path (formerly
     /// the <c>BudgetedMemoryPool</c> default). Range starts at 64 KB

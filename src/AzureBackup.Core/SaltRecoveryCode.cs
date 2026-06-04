@@ -29,7 +29,7 @@ namespace AzureBackup.Core;
 public static class SaltRecoveryCode
 {
     /// <summary>The salt the recovery code round-trips, in bytes.</summary>
-    public const int SaltSize = 16;
+    public const int SaltSize = KdfParameters.SaltSize;
 
     // Crockford Base32 symbol set (excludes I, L, O, U).
     private const string Alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";

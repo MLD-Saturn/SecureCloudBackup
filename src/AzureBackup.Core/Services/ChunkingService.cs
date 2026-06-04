@@ -3,6 +3,7 @@ using System.Collections.Frozen;
 using System.Security.Cryptography;
 using System.Threading.Channels;
 using AzureBackup.Core.Models;
+using static AzureBackup.Core.ByteSizes;
 
 namespace AzureBackup.Core.Services;
 
@@ -16,10 +17,6 @@ namespace AzureBackup.Core.Services;
 public class ChunkingService
 {
     #region Chunk Size Constants
-
-    // Size constants for readability
-    private const int KB = 1024;
-    private const int MB = KB * KB;
 
     // Default chunking parameters
     private const int DefaultMinChunkSize = 64 * KB;       // 64 KB minimum chunk

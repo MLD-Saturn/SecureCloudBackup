@@ -16,6 +16,13 @@ public partial class ChunkIndexService
     private const string IndexBackupBlobName = "index/chunk-index-backup.enc";
 
     /// <summary>
+    /// Fan-out for the parallel blob-deletion loops in orphan cleanup and
+    /// incomplete-metadata cleanup. Shared by both <see cref="ChunkIndexService"/>
+    /// partials so the two cleanup paths stay in lockstep.
+    /// </summary>
+    private const int MaxParallelDeletes = 128;
+
+    /// <summary>
     /// Event raised for diagnostic logging.
     /// </summary>
     public event EventHandler<string>? DiagnosticLog;
@@ -393,7 +400,6 @@ public partial class ChunkIndexService
         Log($"Starting parallel cleanup of {orphans.Count} orphaned chunks...");
         var result = new CleanupResult { CleanedAt = DateTime.UtcNow };
 
-        const int maxParallelDeletes = 128;
         int deleted = 0;
         object resultLock = new();
 
@@ -401,7 +407,7 @@ public partial class ChunkIndexService
             orphans,
             new ParallelOptions
             {
-                MaxDegreeOfParallelism = maxParallelDeletes,
+                MaxDegreeOfParallelism = MaxParallelDeletes,
                 CancellationToken = cancellationToken
             },
             async (orphan, ct) =>
