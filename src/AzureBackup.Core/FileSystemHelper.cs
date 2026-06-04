@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Security.Cryptography;
 
 namespace AzureBackup.Core;
@@ -125,7 +126,7 @@ public static class FileSystemHelper
                 using var stream = new FileStream(
                     path, FileMode.Open, FileAccess.Write, FileShare.Read);
 
-                var rented = System.Buffers.ArrayPool<byte>.Shared.Rent(64 * 1024);
+                var rented = ArrayPool<byte>.Shared.Rent(64 * 1024);
                 try
                 {
                     var remaining = fileSize;
@@ -144,7 +145,7 @@ public static class FileSystemHelper
                 }
                 finally
                 {
-                    System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+                    ArrayPool<byte>.Shared.Return(rented);
                 }
             }
 

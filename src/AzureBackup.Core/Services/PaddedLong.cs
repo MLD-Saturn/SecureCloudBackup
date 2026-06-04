@@ -1,5 +1,4 @@
 using System.Runtime.InteropServices;
-using System.Threading;
 
 namespace AzureBackup.Core.Services;
 

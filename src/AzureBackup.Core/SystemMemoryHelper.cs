@@ -74,11 +74,12 @@ public static class SystemMemoryHelper
             step *= 2;
         }
 
-        // Ensure the last step doesn't exceed total RAM
+        // Ensure the last detent equals total RAM. The loop only ever appends
+        // values <= totalMB, so reaching this branch guarantees steps[^1] != totalMB;
+        // the previously-nested guard was always true and has been removed.
         if (steps.Count == 0 || steps[^1] < totalMB)
         {
-            if (steps.Count == 0 || steps[^1] != totalMB)
-                steps.Add(totalMB);
+            steps.Add(totalMB);
         }
 
         return [.. steps];
