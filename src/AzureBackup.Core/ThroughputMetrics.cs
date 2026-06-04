@@ -59,6 +59,33 @@ public sealed class ThroughputMetrics : IDisposable
     private const int RetentionDays = 30;
 
     /// <summary>
+    /// Bytes in one megabyte. Named so the throughput formula reads in
+    /// megabytes-per-second rather than an anonymous <c>1024 * 1024</c>.
+    /// </summary>
+    private const long BytesPerMegabyte = 1024L * 1024;
+
+    /// <summary>
+    /// Computes effective throughput in MEGABYTES per second from a byte
+    /// count and an elapsed-seconds measurement, returning 0 when no time
+    /// has elapsed (so a zero-duration sample cannot divide by zero).
+    /// <para>
+    /// This is the single canonical home for the <c>bytes / elapsed / MB</c>
+    /// formula that populates <see cref="FileMetrics.ThroughputMBps"/> and
+    /// <see cref="OperationMetrics.ThroughputMBps"/>. It was previously
+    /// inlined at seven call sites across the backup and restore pipelines;
+    /// the B43 factor-of-8 label bug (see the rename note on
+    /// <see cref="FileMetrics.ThroughputMBps"/>) is exactly the class of
+    /// error that a scattered unit-bearing formula invites, so it now lives
+    /// in one place where the unit can be reasoned about once.
+    /// </para>
+    /// </summary>
+    /// <param name="bytes">Bytes transferred during the measured window.</param>
+    /// <param name="elapsedSeconds">Wall-clock duration of the window, in seconds.</param>
+    /// <returns>Megabytes per second, or 0 when <paramref name="elapsedSeconds"/> is not positive.</returns>
+    internal static double ComputeThroughputMBps(long bytes, double elapsedSeconds)
+        => elapsedSeconds > 0 ? bytes / elapsedSeconds / BytesPerMegabyte : 0;
+
+    /// <summary>
     /// Creates a new metrics logger that writes to the specified directory.
     /// The directory is created if it does not exist.
     /// </summary>

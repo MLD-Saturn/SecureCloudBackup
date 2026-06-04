@@ -1451,7 +1451,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 ChunkMin = chunks.Min(c => c.Length),
                 ChunkMax = chunks.Max(c => c.Length),
                 ElapsedSeconds = fileElapsed,
-                ThroughputMBps = fileElapsed > 0 ? totalFileSize / fileElapsed / (1024 * 1024) : 0,
+                ThroughputMBps = ThroughputMetrics.ComputeThroughputMBps(totalFileSize, fileElapsed),
                 NewChunks = chunksToUpload.Count,
                 DedupChunks = chunks.Count - chunksToUpload.Count,
                 Tier = storageTier.ToString()

@@ -299,4 +299,39 @@ public class ThroughputMetricsTests : IDisposable
         Assert.DoesNotContain("\"throughput_mbps\"", content);
         Assert.DoesNotContain("\"throughput_m_bps\"", content);
     }
+
+    [Fact]
+    public void WhenComputeThroughputForOneMegabyteOverOneSecondThenReturnsOneMBps()
+    {
+        var result = ThroughputMetrics.ComputeThroughputMBps(1_048_576, 1.0);
+
+        Assert.Equal(1.0, result);
+    }
+
+    [Fact]
+    public void WhenComputeThroughputForTwoFiftySixMegabytesOverEightSecondsThenReturnsThirtyTwoMBps()
+    {
+        var result = ThroughputMetrics.ComputeThroughputMBps(268_435_456, 8.0);
+
+        Assert.Equal(32.0, result);
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-0.5)]
+    [InlineData(-1000.0)]
+    public void WhenComputeThroughputWithNonPositiveElapsedThenReturnsZero(double elapsedSeconds)
+    {
+        var result = ThroughputMetrics.ComputeThroughputMBps(1_048_576, elapsedSeconds);
+
+        Assert.Equal(0.0, result);
+    }
+
+    [Fact]
+    public void WhenComputeThroughputWithZeroBytesThenReturnsZero()
+    {
+        var result = ThroughputMetrics.ComputeThroughputMBps(0, 5.0);
+
+        Assert.Equal(0.0, result);
+    }
 }

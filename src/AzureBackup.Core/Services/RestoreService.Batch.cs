@@ -361,7 +361,7 @@ public partial class RestoreService
             Failed = result.FilesErrored,
             Bytes = mirrorBytes,
             ElapsedSeconds = mirrorElapsed,
-            ThroughputMBps = mirrorElapsed > 0 ? mirrorBytes / mirrorElapsed / (1024 * 1024) : 0,
+            ThroughputMBps = ThroughputMetrics.ComputeThroughputMBps(mirrorBytes, mirrorElapsed),
             FileConcurrency = mirrorEffectiveConcurrency,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
             CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
@@ -834,7 +834,7 @@ public partial class RestoreService
             Bytes = result.TotalBytesRestored,
             Chunks = fileList.Sum(f => f.file.Chunks.Count),
             ElapsedSeconds = opElapsed,
-            ThroughputMBps = opElapsed > 0 ? result.TotalBytesRestored / opElapsed / (1024 * 1024) : 0,
+            ThroughputMBps = ThroughputMetrics.ComputeThroughputMBps(result.TotalBytesRestored, opElapsed),
             FileConcurrency = effectiveConcurrencyMetric,
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
             BudgetStalls = (int)memoryBudget.StallCount,
