@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using static AzureBackup.Core.ByteSizes;
 
 namespace AzureBackup.Core;
 
@@ -39,7 +40,7 @@ public sealed class ThroughputMetrics : IDisposable
     // FileStream buffer for the persistent append handle. 64 KiB amortizes
     // syscall overhead across the many small per-file JSONL rows produced by
     // a large restore without holding meaningful memory.
-    private const int WriterBufferBytes = 64 * 1024;
+    private const int WriterBufferBytes = 64 * KB;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -57,12 +58,6 @@ public sealed class ThroughputMetrics : IDisposable
     /// Maximum age of metrics files before cleanup (30 days).
     /// </summary>
     private const int RetentionDays = 30;
-
-    /// <summary>
-    /// Bytes in one megabyte. Named so the throughput formula reads in
-    /// megabytes-per-second rather than an anonymous <c>1024 * 1024</c>.
-    /// </summary>
-    private const long BytesPerMegabyte = 1024L * 1024;
 
     /// <summary>
     /// Computes effective throughput in MEGABYTES per second from a byte
@@ -83,7 +78,7 @@ public sealed class ThroughputMetrics : IDisposable
     /// <param name="elapsedSeconds">Wall-clock duration of the window, in seconds.</param>
     /// <returns>Megabytes per second, or 0 when <paramref name="elapsedSeconds"/> is not positive.</returns>
     internal static double ComputeThroughputMBps(long bytes, double elapsedSeconds)
-        => elapsedSeconds > 0 ? bytes / elapsedSeconds / BytesPerMegabyte : 0;
+        => elapsedSeconds > 0 ? bytes / elapsedSeconds / MBLong : 0;
 
     /// <summary>
     /// Creates a new metrics logger that writes to the specified directory.
@@ -152,7 +147,7 @@ public sealed class ThroughputMetrics : IDisposable
             Timestamp = DateTime.UtcNow,
             Operation = operation,
             Processors = Environment.ProcessorCount,
-            TotalRamMb = (int)(SystemMemoryHelper.GetTotalPhysicalMemoryBytes() / (1024 * 1024)),
+            TotalRamMb = (int)(SystemMemoryHelper.GetTotalPhysicalMemoryBytes() / MBLong),
             MemoryBudgetMb = memoryBudgetMb,
             MemoryBudgetEnabled = memoryBudgetEnabled,
             Is64Bit = Environment.Is64BitProcess,
