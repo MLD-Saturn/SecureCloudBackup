@@ -136,10 +136,14 @@ public partial class RestoreService
                 SecurityPolicyType.InvalidBlobName);
         }
         
-        // Check against cached sensitive system directories
+        // Check against cached sensitive system directories. Use a
+        // separator-boundary containment check (PathHelper.IsWithinDirectory)
+        // rather than a bare StartsWith: the latter would also reject siblings
+        // such as "C:\ProgramFilesData" when "C:\Program Files" is protected,
+        // and would not reliably treat the directory itself versus a descendant.
         foreach (var sensitiveDir in SensitiveDirectories)
         {
-            if (fullPath.StartsWith(sensitiveDir, StringComparison.OrdinalIgnoreCase))
+            if (PathHelper.IsWithinDirectory(fullPath, sensitiveDir))
             {
                 throw new SecurityPolicyException(
                     $"Cannot restore to protected system directory: {sensitiveDir}",

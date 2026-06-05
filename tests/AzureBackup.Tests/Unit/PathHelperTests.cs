@@ -173,4 +173,82 @@ public class PathHelperTests
     }
 
     #endregion
+
+    #region IsWithinDirectory
+
+    [Fact]
+    public void WhenCandidateIsDescendantThenReturnsTrue()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+        var candidate = Path.Combine(root, "sub", "file.txt");
+
+        Assert.True(PathHelper.IsWithinDirectory(candidate, root));
+    }
+
+    [Fact]
+    public void WhenCandidateIsTheDirectoryItselfThenReturnsTrue()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+
+        Assert.True(PathHelper.IsWithinDirectory(root, root));
+    }
+
+    [Fact]
+    public void WhenCandidateIsDirectoryWithTrailingSeparatorThenReturnsTrue()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+        var candidate = root + Path.DirectorySeparatorChar;
+
+        Assert.True(PathHelper.IsWithinDirectory(candidate, root));
+    }
+
+    [Fact]
+    public void WhenCandidateIsSiblingWithSharedPrefixThenReturnsFalse()
+    {
+        // The boundary bug: "C:\abk-rootData" shares the "abk-root" prefix but is
+        // NOT inside "abk-root". A bare StartsWith without a separator boundary
+        // would wrongly return true here.
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+        var sibling = Path.Combine(Path.GetTempPath(), "abk-rootData", "file.txt");
+
+        Assert.False(PathHelper.IsWithinDirectory(sibling, root));
+    }
+
+    [Fact]
+    public void WhenCandidateEscapesViaTraversalThenReturnsFalse()
+    {
+        // A crafted relative path that climbs out of the root resolves to a
+        // location outside it; IsWithinDirectory must reject it.
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+        var escaping = Path.Combine(root, "..", "..", "Windows", "evil.dll");
+
+        Assert.False(PathHelper.IsWithinDirectory(escaping, root));
+    }
+
+    [Fact]
+    public void WhenCandidateOnDifferentRootThenReturnsFalse()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+        var elsewhere = Path.Combine(Path.GetTempPath(), "abk-other", "file.txt");
+
+        Assert.False(PathHelper.IsWithinDirectory(elsewhere, root));
+    }
+
+    [Fact]
+    public void WhenCandidatePathIsWhitespaceThenThrows()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "abk-root");
+
+        Assert.Throws<ArgumentException>(() => PathHelper.IsWithinDirectory("   ", root));
+    }
+
+    [Fact]
+    public void WhenDirectoryIsWhitespaceThenThrows()
+    {
+        var candidate = Path.Combine(Path.GetTempPath(), "abk-root", "file.txt");
+
+        Assert.Throws<ArgumentException>(() => PathHelper.IsWithinDirectory(candidate, "   "));
+    }
+
+    #endregion
 }

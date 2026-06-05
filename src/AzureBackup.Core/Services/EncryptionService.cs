@@ -358,6 +358,31 @@ public class EncryptionService : IDisposable
     /// Encrypts data using AES-256-GCM with integrity protection.
     /// Format: [4-byte magic][1-byte version][12-byte nonce][ciphertext][16-byte tag][4-byte CRC32]
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Nonce strategy (deliberate, do not change to a counter).</b> The 96-bit
+    /// nonce is generated per message with <see cref="RandomNumberGenerator"/>.
+    /// Random AES-GCM nonces have a birthday bound: collision probability stays
+    /// negligible (&lt; 2^-32) up to roughly 2^32 encryptions under a single key.
+    /// For this application that ceiling corresponds to ~4.3 billion <em>unique</em>
+    /// content-addressed chunks under one password — on the order of hundreds of
+    /// terabytes of de-duplicated data — which is not reachable for a desktop
+    /// backup tool's realistic lifetime.
+    /// </para>
+    /// <para>
+    /// A deterministic counter nonce was explicitly rejected. GCM nonce REUSE is
+    /// catastrophic (it leaks the XOR of two plaintexts and enables tag forgery),
+    /// far worse than the random-nonce birthday bound, and a counter would have to
+    /// be persisted and incremented without ever repeating. This app deliberately
+    /// CLONES its catalog (restore, rebuild-from-Azure, and quarantine recovery all
+    /// copy the database that holds the key material); a persisted counter would
+    /// travel with the clone and guarantee reuse across the original and the copy
+    /// under the same key. Random nonces are stateless and have no such failure
+    /// mode, so they are the correct choice here. If the unique-chunk count per key
+    /// ever realistically approaches 2^32, the right mitigation is key rotation
+    /// (re-deriving a fresh key), NOT a counter nonce.
+    /// </para>
+    /// </remarks>
     public byte[] Encrypt(ReadOnlySpan<byte> plaintext)
     {
         Span<byte> keyCopy = stackalloc byte[KeySize];
@@ -379,7 +404,8 @@ public class EncryptionService : IDisposable
             result[offset] = CurrentFormatVersion;
             offset += 1;
 
-            // Generate nonce directly into result buffer
+            // Per-message random 96-bit nonce. See the nonce-strategy note on
+            // this method for why this is random rather than a counter.
             var nonceSpan = result.AsSpan(offset, NonceSize);
             RandomNumberGenerator.Fill(nonceSpan);
             offset += NonceSize;
@@ -430,6 +456,8 @@ public class EncryptionService : IDisposable
             destination[offset] = CurrentFormatVersion;
             offset += 1;
 
+            // Per-message random 96-bit nonce. See the nonce-strategy note on
+            // Encrypt(ReadOnlySpan{byte}) for why this is random rather than a counter.
             var nonceSpan = destination.Slice(offset, NonceSize);
             RandomNumberGenerator.Fill(nonceSpan);
             offset += NonceSize;

@@ -200,6 +200,23 @@ public partial class RestoreService
 
                 var relativePath = PathHelper.GetRelativePathFromBase(backupFile.LocalPath, sourceBasePath);
                 var targetPath = Path.Combine(targetDirectory, relativePath);
+
+                // Defense in depth (INFO-1): the relative path is derived from
+                // backup metadata (backupFile.LocalPath), which is attacker-
+                // controlled if the Azure store is compromised. GetRelativePathFromBase
+                // already collapses non-contained paths to a bare filename and
+                // RestoreFileAsync rejects ".." segments, but we additionally
+                // assert the resolved target stays under the chosen target
+                // directory before recording or creating anything. A crafted
+                // entry that escapes the root is skipped (not aborting the whole
+                // batch) and surfaced as an error.
+                if (!PathHelper.IsWithinDirectory(targetPath, targetDirectory))
+                {
+                    ErrorOccurred?.Invoke(this,
+                        $"Skipping '{backupFile.LocalPath}': resolved restore path escapes the target directory");
+                    return;
+                }
+
                 expectedLocalFiles.TryAdd(targetPath, 0);
 
                 var targetDir = Path.GetDirectoryName(targetPath);
@@ -1052,10 +1069,14 @@ public partial class RestoreService
         Log($"RestoreFilesWithRemappingAsync: [{done}/{totalFiles}] '{Path.GetFileName(file.LocalPath)}' -> '{targetPath}' ({file.FileSize} bytes, {file.Chunks.Count} chunks)");
         progress?.Report((done, totalFiles, file.LocalPath));
 
-        // Security: Validate target path doesn't contain suspicious patterns
-        var normalizedPath = Path.GetFullPath(targetPath);
-        if (normalizedPath.Contains(".." + Path.DirectorySeparatorChar) || 
-            normalizedPath.Contains(".." + Path.AltDirectorySeparatorChar))
+        // Security: reject path traversal. The check must run on the RAW
+        // targetPath: Path.GetFullPath resolves ".." segments away, so testing
+        // the normalized path for ".." can never catch a real traversal (a
+        // crafted "root\..\..\Windows\x" normalizes to "C:\Windows\x" with no
+        // ".." left). Split the raw path into segments and reject any literal
+        // ".." segment, mirroring RestoreService.ValidateRestorePath.
+        var rawSegments = targetPath.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (rawSegments.Any(s => s == ".."))
         {
             Log($"RestoreFilesWithRemappingAsync: Skipping suspicious path: {targetPath}");
             lock (resultLock)
@@ -1065,6 +1086,8 @@ public partial class RestoreService
             ErrorOccurred?.Invoke(this, $"Invalid target path (contains path traversal): {targetPath}");
             return;
         }
+
+        var normalizedPath = Path.GetFullPath(targetPath);
 
         // Ensure target directory exists
         var targetDir = Path.GetDirectoryName(normalizedPath);
