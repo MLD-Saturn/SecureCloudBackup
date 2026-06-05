@@ -214,6 +214,12 @@ public abstract class BackupBenchmarkBase
         // production cadence and the collector observes nothing.
         if (EnableMemoryFidelityTracking)
         {
+            // The benchmark project builds in Release, so the orchestrator's
+            // EnableMemoryTelemetry gate defaults to false (no DIAGNOSTICLOG).
+            // Force it on here: the MemoryFidelityCollector below IS the
+            // StatusChanged subscriber that consumes the [mem] stream, so the
+            // reporter must run for the fidelity columns to populate.
+            Orchestrator.EnableMemoryTelemetry = true;
             Orchestrator.MemoryReporterIntervalOverride = MemoryReporterIntervalOverride;
             _fidelityHook = MemoryFidelityCollector.Instance.CreateLineHandler();
             Orchestrator.StatusChanged += _fidelityHook;

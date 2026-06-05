@@ -105,6 +105,35 @@ public partial class BackupOrchestrator : IAsyncDisposable
     public TimeSpan? MemoryReporterIntervalOverride { get; set; }
 
     /// <summary>
+    /// Gates the periodic <see cref="BackupMemoryReporter"/> that emits the
+    /// <c>[mem]</c> snapshot lines during a backup/mirror operation.
+    /// <para>
+    /// Defaults to the <c>DIAGNOSTICLOG</c> compile state: <c>true</c> in
+    /// Debug (where the log sink exists), <c>false</c> in Release. There is no
+    /// point sampling <see cref="System.Diagnostics.Process.WorkingSet64"/>,
+    /// refreshing the process handle, and building the snapshot string ~once
+    /// per interval when no sink will persist it -- in a Release build every
+    /// <c>[mem]</c> line is computed and discarded. Disabling the reporter
+    /// there removes that wasted per-interval work entirely.
+    /// </para>
+    /// <para>
+    /// The benchmark project (which builds in Release, so <c>DIAGNOSTICLOG</c>
+    /// is undefined) sets this to <c>true</c> explicitly: its
+    /// <c>MemoryFidelityCollector</c> subscribes to <see cref="StatusChanged"/>
+    /// and depends on the <c>[mem]</c> stream to populate the fidelity columns.
+    /// Set it to <c>true</c> on a Release production instance only for a
+    /// targeted diagnostic session where a <see cref="StatusChanged"/> subscriber
+    /// is actually capturing the lines.
+    /// </para>
+    /// </summary>
+    public bool EnableMemoryTelemetry { get; set; } =
+#if DIAGNOSTICLOG
+        true;
+#else
+        false;
+#endif
+
+    /// <summary>
     /// Effective per-file chunk-upload concurrency. Reads
     /// <see cref="MaxParallelChunkUploadsOverride"/> when set,
     /// falls back to the production constant. Snapshotted once at

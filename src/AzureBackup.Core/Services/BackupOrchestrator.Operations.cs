@@ -316,13 +316,19 @@ public partial class BackupOrchestrator
             // the always-visible log pane records budget vs working-set
             // drift during the operation. Wired before BackupFilesCoreAsync
             // so the initial sample captures pre-fan-out state.
-            using var memReporter = new BackupMemoryReporter(
-                memoryBudget,
-                opLabel: "mirror",
-                emit: line => StatusChanged?.Invoke(this, line),
-                interval: MemoryReporterIntervalOverride,
-                largeChunkPool: largeChunkPool,
-                smallChunkPool: smallChunkPool);
+            // Gated on EnableMemoryTelemetry (DIAGNOSTICLOG by default): when
+            // no sink will persist the [mem] lines there is no point paying
+            // for the per-interval sampling, so the reporter is not even
+            // constructed. A null `using` is a valid no-op.
+            using var memReporter = EnableMemoryTelemetry
+                ? new BackupMemoryReporter(
+                    memoryBudget,
+                    opLabel: "mirror",
+                    emit: line => StatusChanged?.Invoke(this, line),
+                    interval: MemoryReporterIntervalOverride,
+                    largeChunkPool: largeChunkPool,
+                    smallChunkPool: smallChunkPool)
+                : null;
 
             // B54: clamp file-level fan-out against the active budget so a
             // small MemoryLimitMB does not over-subscribe in-flight residency.
@@ -668,13 +674,17 @@ public partial class BackupOrchestrator
         // B36: see MirrorSyncToAzureAsync for the rationale; same pattern
         // here so any backup operation -- not just mirror -- gets the
         // periodic memory snapshot in the always-visible log pane.
-        using var memReporter = new BackupMemoryReporter(
-            memoryBudget,
-            opLabel: "backup",
-            emit: line => StatusChanged?.Invoke(this, line),
-            interval: MemoryReporterIntervalOverride,
-            largeChunkPool: largeChunkPool,
-            smallChunkPool: smallChunkPool);
+        // Gated on EnableMemoryTelemetry (DIAGNOSTICLOG by default); see the
+        // mirror site for why the reporter is skipped when no sink exists.
+        using var memReporter = EnableMemoryTelemetry
+            ? new BackupMemoryReporter(
+                memoryBudget,
+                opLabel: "backup",
+                emit: line => StatusChanged?.Invoke(this, line),
+                interval: MemoryReporterIntervalOverride,
+                largeChunkPool: largeChunkPool,
+                smallChunkPool: smallChunkPool)
+            : null;
 
         // B54: clamp file-level fan-out against the active budget so a
         // small MemoryLimitMB does not admit more files than the budget
