@@ -58,8 +58,31 @@ namespace AzureBackup.Benchmarks;
 /// wall-clock-timing-sensitive, so start-low produces large run-to-run
 /// variance at link latencies, while start-ceiling is deterministic and fast.
 /// Clean Mean-based convergence numbers are therefore NOT obtainable from this
-/// N=2 in-memory benchmark; raising <c>iterationCount</c> (or a real-account
-/// run) would be needed for a polished convergence table.
+/// N=2 in-memory benchmark.
+/// </para>
+///
+/// <para>
+/// <b>SUPERSEDED for the convergence question by a deterministic test.</b>
+/// Because this benchmark measures a time-gated controller against a real wall
+/// clock, its Means are intrinsically noisy and a higher iteration count only
+/// burns minutes without removing the variance. The authoritative, noise-free
+/// instrument is <c>AzureBackup.Tests.AimdRampConvergenceTests</c>, which drives
+/// the same <see cref="BandwidthScheduler"/> through an injected fake clock over
+/// a modeled link with a bandwidth knee -- every run is bit-for-bit identical.
+/// Its findings (which CONFIRM and sharpen the decision below): start-low DOES
+/// converge to the knee (so the ramp is a startup transient, not a permanent
+/// ceiling) in ~8 s on a ~1 Gbps link and ~18 s on a ~2 Gbps link; the
+/// start-low-vs-start-ceiling throughput penalty is 12.6% / 6.1% / 3.0% / 1.2% /
+/// 0.6% at 30 / 60 / 120 / 300 / 600 s backups on ~1 Gbps and 30.7% / 15.0% /
+/// 7.4% / 2.9% / 1.5% on ~2 Gbps -- i.e. it decays ~1/duration and is material
+/// ONLY for short-to-moderate backups (&lt;= ~2 min) on fast links, negligible
+/// (&lt; 2%) for backups &gt;= 5 min. The test also surfaced that the scheduler
+/// climbs only on an OBSERVED throughput improvement (not by speculative
+/// probing), so on a real noisy link start-low's climb is even less
+/// predictable than the fixed-arithmetic ramp implied. This benchmark is
+/// retained as the LATENCY-PATH regression instrument (it still exercises the
+/// real pipeline under simulated latency); for the startup-policy numbers, read
+/// <c>AimdRampConvergenceTests</c>.
 /// </para>
 ///
 /// <para>
