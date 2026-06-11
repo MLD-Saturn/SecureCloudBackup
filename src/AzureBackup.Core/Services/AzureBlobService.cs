@@ -1,9 +1,11 @@
 using System.Buffers;
 using System.Diagnostics;
+using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Azure;
 using Azure.Core;
+using Azure.Core.Pipeline;
 using Azure.Identity;
 using Azure.Storage;
 using Azure.Storage.Blobs;
@@ -35,6 +37,68 @@ public partial class AzureBlobService : IBlobStorageService
         MaximumTransferSize = 8 * 1024 * 1024,  // 8 MB blocks for large files
         InitialTransferSize = 8 * 1024 * 1024   // Start with 8 MB initial transfer
     };
+
+    // W6 Phase 4 (Item 4): a single process-wide HTTP handler shared by every
+    // BlobServiceClient this service constructs. Reusing one handler keeps the
+    // connection pool warm across reconnects instead of tearing it down and
+    // rebuilding it on every Connect call, which matters for sustained
+    // multi-Gbps transfers that open many concurrent block requests.
+    private static readonly SocketsHttpHandler SharedHttpHandler = new()
+    {
+        // Recycle pooled connections periodically so a long-running backup or
+        // restore picks up Azure Storage load-balancer / DNS changes without a
+        // process restart. A stale connection pinned to a rebalanced storage
+        // node is a classic cause of a transfer that silently drops to a
+        // fraction of the link's capacity.
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        // Do NOT cap parallel connections per host. The orchestrator's own
+        // MemoryBudget and file/chunk concurrency ceilings govern how much work
+        // is in flight; a multi-Gbps transfer needs many concurrent block
+        // uploads/downloads and an artificial per-server cap would serialise
+        // them. int.MaxValue is the SocketsHttpHandler default; setting it
+        // explicitly documents the intent and guards against a future default
+        // change.
+        MaxConnectionsPerServer = int.MaxValue
+    };
+
+    // Wraps the shared handler. The HttpClient and transport live for the
+    // process lifetime and are intentionally never disposed (the standard
+    // shared-HttpClient pattern); disposing them would tear down the warm
+    // connection pool the handler exists to preserve.
+    private static readonly HttpClientTransport SharedTransport = new(new HttpClient(SharedHttpHandler));
+
+    /// <summary>
+    /// W6 Phase 4 (Item 4): builds the <see cref="BlobClientOptions"/> applied
+    /// to every <see cref="BlobServiceClient"/> this service constructs. Pre-W6
+    /// the clients were created with no options and inherited the SDK defaults;
+    /// this factory makes the retry policy, the per-try network timeout, and
+    /// the transport explicit and tuned for sustained high-throughput
+    /// transfers.
+    /// <para>
+    /// The SDK-level exponential-backoff retry handles transient throttling
+    /// (HTTP 503) and network blips at the request layer. It is complementary
+    /// to -- not a replacement for -- the app-level integrity retry in
+    /// <see cref="UploadWithIntegrityRetryAsync"/> (MD5 mismatch) and the
+    /// per-chunk download retry loop in the restore pipeline (which also feeds
+    /// the AIMD bandwidth scheduler).
+    /// </para>
+    /// </summary>
+    internal static BlobClientOptions CreateClientOptions()
+    {
+        var options = new BlobClientOptions
+        {
+            Transport = SharedTransport
+        };
+        options.Retry.Mode = RetryMode.Exponential;
+        options.Retry.MaxRetries = 5;
+        options.Retry.Delay = TimeSpan.FromMilliseconds(800);
+        options.Retry.MaxDelay = TimeSpan.FromSeconds(30);
+        // Per-try ceiling: generous enough for an 8 MB block on a slow link but
+        // bounded so a hung socket is retried instead of stalling the whole
+        // transfer indefinitely.
+        options.Retry.NetworkTimeout = TimeSpan.FromSeconds(100);
+        return options;
+    }
 
     /// <summary>
     /// B53 (W3 Phase B): chunk-size-gated upload transfer options. The Azure
@@ -235,9 +299,9 @@ public partial class AzureBlobService : IBlobStorageService
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         
-        _serviceClient = new BlobServiceClient(connectionString);
+        _serviceClient = new BlobServiceClient(connectionString, CreateClientOptions());
         _containerClient = _serviceClient.GetBlobContainerClient(containerName);
-        
+
         // Create container if it doesn't exist
         await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
         Log("ConnectAsync: Connection established successfully");
@@ -254,7 +318,7 @@ public partial class AzureBlobService : IBlobStorageService
             ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
             ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
             
-            BlobServiceClient testClient = new(connectionString);
+            BlobServiceClient testClient = new(connectionString, CreateClientOptions());
             var testContainer = testClient.GetBlobContainerClient(containerName);
             
             // Try to get container properties or create it
@@ -296,9 +360,9 @@ public partial class AzureBlobService : IBlobStorageService
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentNullException.ThrowIfNull(credential);
         
-        _serviceClient = new BlobServiceClient(blobServiceUri, credential);
+        _serviceClient = new BlobServiceClient(blobServiceUri, credential, CreateClientOptions());
         _containerClient = _serviceClient.GetBlobContainerClient(containerName);
-        
+
         // Create container if it doesn't exist
         await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
         Log("ConnectWithEntraIdAsync: Connection established successfully");
@@ -317,7 +381,7 @@ public partial class AzureBlobService : IBlobStorageService
             ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
             ArgumentNullException.ThrowIfNull(credential);
             
-            BlobServiceClient testClient = new(blobServiceUri, credential);
+            BlobServiceClient testClient = new(blobServiceUri, credential, CreateClientOptions());
             var testContainer = testClient.GetBlobContainerClient(containerName);
             
             // Try to get container properties or create it
