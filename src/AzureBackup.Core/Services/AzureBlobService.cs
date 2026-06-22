@@ -1336,7 +1336,10 @@ public partial class AzureBlobService : IBlobStorageService
                     0, encryptedData.Length, md5Valid: false,
                     extra: $"expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)}");
                 Log($"{caller}: MD5 MISMATCH for {blobName}");
-                throw new DataIntegrityException(
+                // DownloadIntegrityException (not the base DataIntegrityException) so the
+                // restore pipeline recognises this as a re-downloadable, transient transfer
+                // corruption and retries the chunk before falling back to recovery.
+                throw new DownloadIntegrityException(
                     $"Download integrity check failed for {blobName} - data corrupted during transfer", blobName);
             }
         }

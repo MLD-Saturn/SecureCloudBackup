@@ -55,6 +55,7 @@ public partial class ActiveFileProgressViewModel : ViewModelBase
         FileOperationStatus.Complete => "Complete ✓",
         FileOperationStatus.Failed => "Failed ✗",
         FileOperationStatus.Retrying => "Retrying...",
+        FileOperationStatus.Recovering => "Recovering...",
         _ => string.Empty
     };
 

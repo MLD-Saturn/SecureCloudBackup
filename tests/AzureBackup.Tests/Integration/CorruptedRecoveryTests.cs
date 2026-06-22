@@ -1,5 +1,7 @@
 using AzureBackup.Tests.Infrastructure;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
+using AzureBackup.Core;
 using AzureBackup.Core.Models;
 using AzureBackup.Core.Services;
 
@@ -243,6 +245,91 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         Assert.Equal(backedUp.FileSize, recoveredInfo.Length);
     }
 
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenMd5MismatchTransient_RetriesAndSucceeds()
+    {
+        // Arrange — every chunk download reports an MD5 mismatch the first 5 times, then
+        // succeeds. The restore must re-download the chunk (up to MaxIntegrityRetries) and
+        // restore normally WITHOUT falling back to the best-effort recovery path.
+        Md5RetryBlobService blobService = new(_encryptionService, throwsPerBlob: 5);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "md5_retry.bin", 100 * 1024);
+        blobService.FailuresEnabled = true;
+
+        var targetPath = Path.Combine(_restoreDirectory, "md5_retry.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
+
+        // Assert — restored via retries; recovery (best-effort) never invoked.
+        Assert.Single(result.SuccessfulFiles);
+        Assert.Empty(result.CorruptedRecoveryFiles);
+        Assert.Equal(0, blobService.BestEffortCalls);
+        // Each chunk: 5 failed downloads + 1 success = 6 attempts.
+        Assert.All(backedUp.Chunks, c => Assert.Equal(6, blobService.AttemptsFor(c.BlobName)));
+        Assert.True(File.Exists(targetPath));
+    }
+
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenMd5MismatchPersistent_ExhaustsFiveRetriesThenRecovers()
+    {
+        // Arrange — every chunk download always reports an MD5 mismatch. After exhausting the
+        // 5 retries (6 total download attempts) the file falls back to best-effort recovery,
+        // which restores the (intact) data.
+        Md5RetryBlobService blobService = new(_encryptionService, throwsPerBlob: int.MaxValue);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "md5_persistent.bin", 100 * 1024);
+        blobService.FailuresEnabled = true;
+
+        var targetPath = Path.Combine(_restoreDirectory, "md5_persistent.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
+
+        // Assert — at least one chunk was re-downloaded the full 6 times (1 initial + 5 retries)
+        // before recovery took over, and best-effort recovery then restored the data.
+        Assert.Equal(6, backedUp.Chunks.Max(c => blobService.AttemptsFor(c.BlobName)));
+        Assert.True(blobService.BestEffortCalls > 0, "Recovery (best-effort) should run after the 5 MD5 retries are exhausted");
+        Assert.Single(result.SuccessfulFiles);
+    }
+
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_DuringRecovery_ReportsRecoveringProgressToCompletion()
+    {
+        // Arrange — multi-chunk file whose normal download is corrupted (post-decrypt hash
+        // mismatch) so it drops into recovery; chunk index 1 is unrecoverable (zero-filled).
+        PartialRecoveryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "recover_progress.bin", 3 * 1024 * 1024);
+        Assert.True(backedUp.Chunks.Count >= 3, $"Need >=3 chunks, got {backedUp.Chunks.Count}");
+        blobService.CorruptNormalDownloads = true;
+        blobService.UnrecoverableChunkIndices.Add(1);
+
+        var targetPath = Path.Combine(_restoreDirectory, "recover_progress.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+        var capturing = new CapturingFileByteProgress();
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(
+            filesWithPaths, overwriteExisting: true, fileByteProgress: capturing);
+
+        // Assert — the file went through recovery and reported byte progress under the
+        // Recovering status all the way to 100% (so the Progress tab row advances and clears).
+        Assert.Single(result.CorruptedRecoveryFiles);
+        await WaitForAsync(() => capturing.Snapshot().Any(r => r.status == FileOperationStatus.Recovering));
+        var recovering = capturing.Snapshot().Where(r => r.status == FileOperationStatus.Recovering).ToList();
+        Assert.NotEmpty(recovering);
+        Assert.Contains(recovering, r => r.bytesCompleted == r.fileSize && r.fileSize == backedUp.FileSize);
+    }
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)
@@ -289,6 +376,39 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         _databaseService.SaveBackedUpFile(backedUp);
 
         return backedUp;
+    }
+
+    /// <summary>
+    /// Captures the per-file byte-progress reports (bytes, size, index, status) emitted by
+    /// the restore pipeline so a test can assert recovery reported progress under the
+    /// Recovering status all the way to completion.
+    /// </summary>
+    private sealed class CapturingFileByteProgress
+        : IProgress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>
+    {
+        private readonly ConcurrentQueue<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)> _reports = new();
+
+        public void Report((long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status) value)
+            => _reports.Enqueue(value);
+
+        public IReadOnlyList<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)> Snapshot()
+            => _reports.ToArray();
+    }
+
+    /// <summary>
+    /// Polls <paramref name="condition"/> until it returns true or the timeout elapses. Used
+    /// because the restore pipeline marshals byte-progress reports through an inner
+    /// Progress&lt;T&gt; (thread pool), so a report can arrive shortly after the awaited
+    /// operation returns.
+    /// </summary>
+    private static async Task WaitForAsync(Func<bool> condition, int timeoutMs = 5000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(20);
+        }
     }
 
     #endregion
@@ -433,5 +553,45 @@ internal class PartialRecoveryBlobService : InMemoryBlobService
             return null;
 
         return await base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+    }
+}
+
+/// <summary>
+/// Blob service that throws a <see cref="DownloadIntegrityException"/> (simulated download-time
+/// Content-MD5 mismatch) for the first N download attempts of each chunk, then returns good
+/// data. Used to verify the restore pipeline re-downloads a chunk on an MD5 mismatch up to
+/// MaxIntegrityRetries times before falling back to recovery. The per-blob attempt counter
+/// makes the double deterministic regardless of how many chunks the file has.
+/// </summary>
+internal sealed class Md5RetryBlobService : InMemoryBlobService
+{
+    private readonly int _throwsPerBlob;
+    private readonly ConcurrentDictionary<string, int> _attempts = new(StringComparer.Ordinal);
+    private int _bestEffortCalls;
+
+    public Md5RetryBlobService(EncryptionService encryptionService, int throwsPerBlob)
+        : base(encryptionService) => _throwsPerBlob = throwsPerBlob;
+
+    /// <summary>When false the double behaves normally; set true after backup to start failing downloads.</summary>
+    public bool FailuresEnabled { get; set; }
+
+    /// <summary>Number of best-effort (recovery) download calls observed.</summary>
+    public int BestEffortCalls => Volatile.Read(ref _bestEffortCalls);
+
+    /// <summary>Total normal-download attempts recorded for a given chunk blob.</summary>
+    public int AttemptsFor(string blobName) => _attempts.TryGetValue(blobName, out var n) ? n : 0;
+
+    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        var attempt = _attempts.AddOrUpdate(blobName, 1, (_, n) => n + 1);
+        if (FailuresEnabled && attempt <= _throwsPerBlob)
+            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {blobName}", blobName);
+        return await base.DownloadChunkAsync(blobName, cancellationToken);
+    }
+
+    public override Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref _bestEffortCalls);
+        return base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
     }
 }

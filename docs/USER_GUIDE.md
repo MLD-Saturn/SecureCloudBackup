@@ -192,7 +192,9 @@ When you select a folder node in the Azure tree, a **Remap path** panel appears.
 4. A SHA-256 hash check verifies end-to-end integrity against the stored metadata.
 5. The file is written to the destination.
 
-You need the same password that was used during backup. There is no recovery path.
+**If a chunk fails its download integrity check** (the encrypted bytes do not match the blob's stored Content-MD5 — usually a transient transfer glitch), that single chunk is re-downloaded automatically, up to five times, before the file is treated as damaged. If every retry still fails, the file drops into **corrupted recovery**: each chunk is re-fetched best-effort, any chunk that still decrypts is kept and any chunk that cannot be recovered is zero-filled, and the result is written to a `__corrupted__` subfolder next to the destination (a fully-recoverable file is promoted straight to the normal destination instead). While a file is recovering, its row on the progress panel shows the **Recovering...** status and continues to advance to 100%, so a recovering file is never mistaken for a stalled one. Recovery outcomes are summarised on the progress panel and written to the Logs view and a per-file `.diag` file.
+
+You need the same password that was used during backup. There is no password recovery path: if you forget it, the data is unrecoverable by design.
 
 ---
 

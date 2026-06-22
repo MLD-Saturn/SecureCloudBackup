@@ -145,7 +145,7 @@ public partial class RestoreService
         string targetDirectory,
         string sourceBasePath,
         IProgress<(int current, int total, string file, string action)>? progress = null,
-        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress = null,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>? fileByteProgress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(backupFiles);
@@ -270,10 +270,10 @@ public partial class RestoreService
 
             // Adapt byte progress to remap filtered indices → original file list indices
             var adaptedByteProgress = fileByteProgress != null
-                ? new Progress<(long bytesCompleted, long fileSize, int fileIndex)>(p =>
+                ? new Progress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>(p =>
                 {
                     var originalIndex = restoreIndexToOriginalIndex[p.fileIndex];
-                    fileByteProgress.Report((p.bytesCompleted, p.fileSize, originalIndex));
+                    fileByteProgress.Report((p.bytesCompleted, p.fileSize, originalIndex, p.status));
                 })
                 : null;
 
@@ -407,6 +407,7 @@ public partial class RestoreService
         string targetPath,
         bool overwriteExisting,
         IProgress<(long current, long total)>? fileProgress,
+        IProgress<(long current, long total)>? recoveryProgress,
         string logPrefix,
         MemoryBudget? memoryBudget,
         BandwidthScheduler? bandwidthScheduler,
@@ -447,7 +448,7 @@ public partial class RestoreService
             Log($"{logPrefix} Attempting corrupted recovery");
             StatusChanged?.Invoke(this, $"Attempting corrupted recovery: {Path.GetFileName(file.LocalPath)}");
 
-            var recovery = await AttemptCorruptedRecoveryAsync(file, targetPath, diag, cancellationToken);
+            var recovery = await AttemptCorruptedRecoveryAsync(file, targetPath, diag, recoveryProgress, cancellationToken);
             if (recovery.HasValue)
             {
                 var (recoveredPath, unrecoverableChunks) = recovery.Value;
@@ -609,6 +610,7 @@ public partial class RestoreService
         BackedUpFile file,
         string originalTargetPath,
         FileOperationDiagnostics? diag,
+        IProgress<(long current, long total)>? progress,
         CancellationToken cancellationToken)
     {
         var dir = Path.GetDirectoryName(originalTargetPath) ?? string.Empty;
@@ -625,6 +627,7 @@ public partial class RestoreService
             var sortedChunks = file.Chunks.OrderBy(c => c.Index).ToList();
             var unrecoverableChunks = 0;
             var recoveredChunks = 0;
+            long bytesWritten = 0;
 
             // Shared zero buffer for efficient zero-fill (max 1 MB, reused across chunks)
             var zeroBuffer = new byte[Math.Min(1024 * 1024, sortedChunks.Max(c => c.Length))];
@@ -660,6 +663,13 @@ public partial class RestoreService
                     unrecoverableChunks++;
                     Log($"AttemptCorruptedRecoveryAsync: '{Path.GetFileName(file.LocalPath)}' chunk {chunk.Index} UNRECOVERABLE, zero-filled ({chunk.Length} bytes)");
                 }
+
+                // Report recovery byte progress so the Progress tab row advances (and reaches
+                // 100% / FileCompleted) while the file is being rebuilt, instead of freezing at
+                // the partial value left by the failed normal pass. Both branches wrote chunk.Length
+                // bytes; sum(chunk.Length) == file.FileSize was validated before recovery began.
+                bytesWritten += chunk.Length;
+                progress?.Report((bytesWritten, file.FileSize));
 
                 // Early bailout: if no chunks have been recovered so far and we've tried several,
                 // the data is likely entirely unrecoverable (e.g., wrong key scenario)
@@ -794,7 +804,7 @@ public partial class RestoreService
         IEnumerable<(BackedUpFile file, string targetPath)> filesWithPaths,
         bool overwriteExisting = false,
         IProgress<(int current, int total, string file)>? progress = null,
-        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress = null,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>? fileByteProgress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(filesWithPaths);
@@ -897,7 +907,7 @@ public partial class RestoreService
         bool overwriteExisting,
         MemoryBudget memoryBudget,
         IProgress<(int current, int total, string file)>? progress,
-        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>? fileByteProgress,
         CancellationToken cancellationToken)
     {
         RestoreResult result = new();
@@ -1055,7 +1065,7 @@ public partial class RestoreService
         int totalFiles,
         bool overwriteExisting,
         IProgress<(int current, int total, string file)>? progress,
-        IProgress<(long bytesCompleted, long fileSize, int fileIndex)>? fileByteProgress,
+        IProgress<(long bytesCompleted, long fileSize, int fileIndex, FileOperationStatus status)>? fileByteProgress,
         RestoreResult result,
         object resultLock,
         int[] completedFiles,
@@ -1097,15 +1107,21 @@ public partial class RestoreService
             Directory.CreateDirectory(targetDir);
         }
 
-        // Create byte-level progress reporter for this file
+        // Create byte-level progress reporters for this file. The normal restore path
+        // reports Downloading; the corrupted-recovery path reports Recovering so the
+        // Progress tab row shows the file is being actively rebuilt rather than frozen.
         var individualFileProgress = fileByteProgress != null
             ? new Progress<(long current, long total)>(p =>
-                fileByteProgress.Report((p.current, file.FileSize, fileIndex)))
+                fileByteProgress.Report((p.current, file.FileSize, fileIndex, FileOperationStatus.Downloading)))
+            : null;
+        var recoveryFileProgress = fileByteProgress != null
+            ? new Progress<(long current, long total)>(p =>
+                fileByteProgress.Report((p.current, file.FileSize, fileIndex, FileOperationStatus.Recovering)))
             : null;
 
         var logPrefix = $"RestoreFilesWithRemappingAsync: [{done}/{totalFiles}]";
         var (outcome, recoveredPath, unrecoverableChunks) = await RestoreFileWithRecoveryAsync(
-            file, normalizedPath, overwriteExisting, individualFileProgress, logPrefix, memoryBudget, bandwidthScheduler,
+            file, normalizedPath, overwriteExisting, individualFileProgress, recoveryFileProgress, logPrefix, memoryBudget, bandwidthScheduler,
             largeChunkPool, smallChunkPool, cancellationToken);
 
         lock (resultLock)

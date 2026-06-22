@@ -29,6 +29,24 @@ public class DataIntegrityException : Exception
 }
 
 /// <summary>
+/// Specialization of <see cref="DataIntegrityException"/> for a download-time
+/// Content-MD5 mismatch: the encrypted bytes that arrived do not match the
+/// blob's stored Content-MD5. This is almost always transient in-transit
+/// corruption, so the restore pipeline re-downloads the affected chunk a
+/// bounded number of times before the data is handed to the best-effort
+/// recovery path. It is a distinct type so the retry classifier can target
+/// ONLY this case and never, e.g., a 404 "chunk not found" (which is also a
+/// <see cref="DataIntegrityException"/> but is permanent).
+/// </summary>
+public sealed class DownloadIntegrityException : DataIntegrityException
+{
+    public DownloadIntegrityException(string message, string affectedResource)
+        : base(message, affectedResource)
+    {
+    }
+}
+
+/// <summary>
 /// Exception thrown when security policy is violated.
 /// </summary>
 public class SecurityPolicyException : Exception

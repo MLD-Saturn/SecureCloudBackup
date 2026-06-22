@@ -42,7 +42,15 @@ public enum FileOperationStatus
     Verifying,
     Complete,
     Failed,
-    Retrying
+    Retrying,
+
+    /// <summary>
+    /// The file failed its normal restore (e.g. a chunk integrity failure) and is
+    /// being rebuilt by the best-effort corrupted-recovery path. Shown on the
+    /// per-file progress row so the user can see the file is actively recovering
+    /// rather than frozen.
+    /// </summary>
+    Recovering
 }
 
 /// <summary>

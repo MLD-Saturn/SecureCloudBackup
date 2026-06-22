@@ -393,7 +393,7 @@ public partial class MainWindowViewModel
                 }
             });
 
-            Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
+            Progress<(long bytesCompleted, long fileSize, int fileIndex, AzureBackup.Core.Models.FileOperationStatus status)> byteProgress = new(p =>
             {
                 var fileName = Path.GetFileName(filesToSync[p.fileIndex].LocalPath);
                 var isSmall = filesToSync[p.fileIndex].FileSize <= SmallFileThreshold;
@@ -404,7 +404,7 @@ public partial class MainWindowViewModel
                     {
                         Type = AzureBackup.Core.Models.OperationProgressType.FileStarted,
                         FileIndex = p.fileIndex, FileName = fileName, FileSize = p.fileSize,
-                        FileStatus = AzureBackup.Core.Models.FileOperationStatus.Downloading,
+                        FileStatus = p.status,
                         TotalBytesProcessed = Volatile.Read(ref totalBytesProcessed), TotalBytes = totalBytes,
                         TotalFilesCompleted = completedFileSet.Count, TotalFiles = filesToSync.Count
                     });
@@ -422,7 +422,7 @@ public partial class MainWindowViewModel
                         Type = AzureBackup.Core.Models.OperationProgressType.FileProgress,
                         FileIndex = p.fileIndex, FileName = fileName, FileSize = p.fileSize,
                         FileBytesProcessed = p.bytesCompleted,
-                        FileStatus = AzureBackup.Core.Models.FileOperationStatus.Downloading,
+                        FileStatus = p.status,
                         TotalBytesProcessed = totalProcessed, TotalBytes = totalBytes,
                         TotalFilesCompleted = completedFileSet.Count, TotalFiles = filesToSync.Count
                     });
@@ -545,7 +545,7 @@ public partial class MainWindowViewModel
 
         Progress<(int current, int total, string file)> fileProgress = new(_ => { });
 
-        Progress<(long bytesCompleted, long fileSize, int fileIndex)> byteProgress = new(p =>
+        Progress<(long bytesCompleted, long fileSize, int fileIndex, AzureBackup.Core.Models.FileOperationStatus status)> byteProgress = new(p =>
         {
             var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
             var isSmall = filesWithPaths[p.fileIndex].file.FileSize <= SmallFileThreshold;
@@ -559,7 +559,7 @@ public partial class MainWindowViewModel
                     FileIndex = p.fileIndex,
                     FileName = fileName,
                     FileSize = p.fileSize,
-                    FileStatus = AzureBackup.Core.Models.FileOperationStatus.Downloading,
+                    FileStatus = p.status,
                     TotalBytesProcessed = Volatile.Read(ref totalBytesProcessed),
                     TotalBytes = totalBytes,
                     TotalFilesCompleted = completedFileSet.Count,
@@ -582,7 +582,7 @@ public partial class MainWindowViewModel
                     FileName = fileName,
                     FileSize = p.fileSize,
                     FileBytesProcessed = p.bytesCompleted,
-                    FileStatus = AzureBackup.Core.Models.FileOperationStatus.Downloading,
+                    FileStatus = p.status,
                     TotalBytesProcessed = totalProcessed,
                     TotalBytes = totalBytes,
                     TotalFilesCompleted = completedFileSet.Count,
