@@ -309,6 +309,9 @@ public partial class MainWindowViewModel
             long totalBytesProcessed = 0;
             var startedFileSet = new ConcurrentDictionary<int, byte>();
             var completedFileSet = new ConcurrentDictionary<int, byte>();
+            // Small files promoted to an individual recovering row (see the restore callback).
+            var recoveringSmallFileSet = new ConcurrentDictionary<int, byte>();
+            var rowStartedSet = new ConcurrentDictionary<int, byte>();
             int mirrorSmallCompleted = 0;
             long mirrorSmallBytes = 0;
 
@@ -398,6 +401,11 @@ public partial class MainWindowViewModel
                 var fileName = Path.GetFileName(filesToSync[p.fileIndex].LocalPath);
                 var isSmall = filesToSync[p.fileIndex].FileSize <= SmallFileThreshold;
 
+                // A recovering small file is promoted to its own row for the rest of the operation.
+                if (isSmall && p.status == AzureBackup.Core.Models.FileOperationStatus.Recovering)
+                    recoveringSmallFileSet.TryAdd(p.fileIndex, 0);
+                var asIndividualRow = !isSmall || recoveringSmallFileSet.ContainsKey(p.fileIndex);
+
                 // Terminal outcome (see the restore byteProgress callback for rationale): Complete
                 // removes the row, Recovered keeps it visible (partial data loss), Failed keeps it.
                 if (p.status is AzureBackup.Core.Models.FileOperationStatus.Complete
@@ -424,7 +432,7 @@ public partial class MainWindowViewModel
                     return;
                 }
 
-                if (startedFileSet.TryAdd(p.fileIndex, 0) && !isSmall)
+                if (asIndividualRow && rowStartedSet.TryAdd(p.fileIndex, 0))
                 {
                     ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
                     {
@@ -441,7 +449,7 @@ public partial class MainWindowViewModel
                 var delta = p.bytesCompleted - previousBytes;
                 var totalProcessed = Interlocked.Add(ref totalBytesProcessed, delta);
 
-                if (!isSmall)
+                if (asIndividualRow)
                 {
                     ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
                     {
@@ -457,7 +465,7 @@ public partial class MainWindowViewModel
                 // Detect file completion — normal Downloading path only (Recovering finalizes via terminal status).
                 if (p.status == AzureBackup.Core.Models.FileOperationStatus.Downloading && p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
                 {
-                    if (isSmall)
+                    if (!asIndividualRow)
                     {
                         var sc = Interlocked.Increment(ref mirrorSmallCompleted);
                         var sb = Interlocked.Add(ref mirrorSmallBytes, p.fileSize);
@@ -565,8 +573,14 @@ public partial class MainWindowViewModel
         // totalBytesProcessed is a running total updated via Interlocked.Add — O(1) per update.
         var perFileBytes = new long[filesWithPaths.Count];
         long totalBytesProcessed = 0;
-        var startedFileSet = new ConcurrentDictionary<int, byte>();
         var completedFileSet = new ConcurrentDictionary<int, byte>();
+        // Small files that entered corrupted-recovery: promoted from the aggregate small-file
+        // group to their own progress row so the user can watch them recover rather than having
+        // their recovery hidden inside the group total.
+        var recoveringSmallFileSet = new ConcurrentDictionary<int, byte>();
+        // Files for which a FileStarted row has been emitted (large files on first byte, or a
+        // small file at the moment it is promoted to an individual recovering row).
+        var rowStartedSet = new ConcurrentDictionary<int, byte>();
         int smallFilesCompleted = 0;
         long smallFilesBytesProcessed = 0;
 
@@ -576,6 +590,12 @@ public partial class MainWindowViewModel
         {
             var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
             var isSmall = filesWithPaths[p.fileIndex].file.FileSize <= SmallFileThreshold;
+
+            // A recovering small file is promoted to its own row for the rest of the operation.
+            if (isSmall && p.status == AzureBackup.Core.Models.FileOperationStatus.Recovering)
+                recoveringSmallFileSet.TryAdd(p.fileIndex, 0);
+            // Render as an individual row when it is a large file OR a small file that recovered.
+            var asIndividualRow = !isSmall || recoveringSmallFileSet.ContainsKey(p.fileIndex);
 
             // Terminal outcome (emitted once per file by the restore wrapper): Complete removes
             // the row, Recovered keeps it visible (partial data loss), Failed keeps it (error
@@ -609,8 +629,9 @@ public partial class MainWindowViewModel
                 return;
             }
 
-            // Report file started on first progress for this file (large files only — small are grouped)
-            if (startedFileSet.TryAdd(p.fileIndex, 0) && !isSmall)
+            // Report file started the first time this file needs an individual row (a large file
+            // on its first byte, or a small file at the instant it is promoted to recovering).
+            if (asIndividualRow && rowStartedSet.TryAdd(p.fileIndex, 0))
             {
                 ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
                 {
@@ -631,8 +652,8 @@ public partial class MainWindowViewModel
             var delta = p.bytesCompleted - previousBytes;
             var totalProcessed = Interlocked.Add(ref totalBytesProcessed, delta);
 
-            // Report byte progress for large files
-            if (!isSmall)
+            // Report byte progress for files rendered as individual rows
+            if (asIndividualRow)
             {
                 ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
                 {
@@ -654,7 +675,7 @@ public partial class MainWindowViewModel
             // mistakenly auto-completed here.
             if (p.status == AzureBackup.Core.Models.FileOperationStatus.Downloading && p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
             {
-                if (isSmall)
+                if (!asIndividualRow)
                 {
                     var sc = Interlocked.Increment(ref smallFilesCompleted);
                     var sb = Interlocked.Add(ref smallFilesBytesProcessed, p.fileSize);

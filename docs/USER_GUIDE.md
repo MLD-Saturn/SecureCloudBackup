@@ -192,7 +192,7 @@ When you select a folder node in the Azure tree, a **Remap path** panel appears.
 4. A SHA-256 hash check verifies end-to-end integrity against the stored metadata.
 5. The file is written to the destination.
 
-While a file is recovering, its row on the progress panel shows the **Recovering...** status and continues to advance to 100%, so a recovering file is never mistaken for a stalled one. When recovery finishes, the row settles into a final state that stays visible after the operation: **Recovered ⚠** if some chunks had to be zero-filled (the restored file is the partial copy in `__corrupted__`), or **Failed ✗** if the file could not be recovered at all. Recovery outcomes are also summarised on the progress panel and written to the Logs view and a per-file `.diag` file.
+While a file is recovering, its row on the progress panel shows the **Recovering...** status and continues to advance to 100%, so a recovering file is never mistaken for a stalled one. Small files are normally grouped into a single aggregate row on the progress panel, but a small file that enters recovery is automatically given its own row for the rest of the operation so you can watch it recover individually. When recovery finishes, the row settles into a final state that stays visible after the operation: **Recovered ⚠** if some chunks had to be zero-filled (the restored file is the partial copy in `__corrupted__`), or **Failed ✗** if the file could not be recovered at all. Recovery outcomes are also summarised on the
 
 You need the same password that was used during backup. There is no password recovery path: if you forget it, the data is unrecoverable by design.
 

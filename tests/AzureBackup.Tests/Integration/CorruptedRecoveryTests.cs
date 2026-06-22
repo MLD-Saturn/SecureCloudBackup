@@ -389,6 +389,42 @@ public class CorruptedRecoveryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenSmallFileRecovers_ReportsRecoveringStatus()
+    {
+        // Arrange — a file that is "small" by the Progress-tab grouping rule (well under the
+        // 16 MB small-file threshold) but still goes through corrupted recovery. The per-file
+        // channel must emit Recovering-status byte reports for it; that signal is exactly what
+        // the Progress tab keys on to promote a recovering small file out of the aggregate
+        // small-file group into its own visible row. Uses the same proven 3 MB multi-chunk
+        // recovery setup as the other recovery tests (3 MB < 16 MB, so it is grouped as small).
+        PartialRecoveryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "small_recover.bin", 3 * 1024 * 1024);
+        Assert.True(backedUp.FileSize < RestoreService.SmallFileThresholdBytes, "Test file must be small.");
+        Assert.True(backedUp.Chunks.Count >= 3, $"Need >=3 chunks, got {backedUp.Chunks.Count}");
+        // Corrupt normal downloads and leave chunk 1 unrecoverable, so recovery keeps the file in
+        // __corrupted__ (a clean, fully-recovered file is promoted to Success instead) and the
+        // recovery path — and its Recovering byte reports — is exercised.
+        blobService.CorruptNormalDownloads = true;
+        blobService.UnrecoverableChunkIndices.Add(1);
+
+        var targetPath = Path.Combine(_restoreDirectory, "small_recover.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+        var capturing = new CapturingFileByteProgress();
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(
+            filesWithPaths, overwriteExisting: true, fileByteProgress: capturing);
+
+        // Assert — recovered, and at least one Recovering report was observed for the small file.
+        Assert.Single(result.CorruptedRecoveryFiles);
+        await WaitForAsync(() => capturing.Snapshot().Any(r => r.status == FileOperationStatus.Recovering));
+        Assert.Contains(capturing.Snapshot(), r => r.status == FileOperationStatus.Recovering);
+    }
+
+    [Fact]
     public async Task RestoreFilesWithRemappingAsync_WhenRecoveredWithLoss_EmitsRecoveredTerminalStatus()
     {
         // Arrange — multi-chunk file where chunk 1 is unrecoverable (zero-filled), so the file is
