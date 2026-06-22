@@ -398,6 +398,32 @@ public partial class MainWindowViewModel
                 var fileName = Path.GetFileName(filesToSync[p.fileIndex].LocalPath);
                 var isSmall = filesToSync[p.fileIndex].FileSize <= SmallFileThreshold;
 
+                // Terminal outcome (see the restore byteProgress callback for rationale): Complete
+                // removes the row, Recovered keeps it visible (partial data loss), Failed keeps it.
+                if (p.status is AzureBackup.Core.Models.FileOperationStatus.Complete
+                    or AzureBackup.Core.Models.FileOperationStatus.Recovered
+                    or AzureBackup.Core.Models.FileOperationStatus.Failed)
+                {
+                    completedFileSet.TryAdd(p.fileIndex, 0);
+                    var terminalType = p.status switch
+                    {
+                        AzureBackup.Core.Models.FileOperationStatus.Complete => AzureBackup.Core.Models.OperationProgressType.FileCompleted,
+                        AzureBackup.Core.Models.FileOperationStatus.Recovered => AzureBackup.Core.Models.OperationProgressType.FileRecovered,
+                        _ => AzureBackup.Core.Models.OperationProgressType.FileFailed
+                    };
+                    ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
+                    {
+                        Type = terminalType,
+                        FileIndex = p.fileIndex, FileName = fileName, FileSize = p.fileSize,
+                        FileBytesProcessed = p.bytesCompleted,
+                        FileStatus = p.status,
+                        ErrorMessage = p.status == AzureBackup.Core.Models.FileOperationStatus.Failed ? "Restore failed" : string.Empty,
+                        TotalBytesProcessed = Volatile.Read(ref totalBytesProcessed), TotalBytes = totalBytes,
+                        TotalFilesCompleted = completedFileSet.Count, TotalFiles = filesToSync.Count
+                    });
+                    return;
+                }
+
                 if (startedFileSet.TryAdd(p.fileIndex, 0) && !isSmall)
                 {
                     ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
@@ -428,7 +454,8 @@ public partial class MainWindowViewModel
                     });
                 }
 
-                if (p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
+                // Detect file completion — normal Downloading path only (Recovering finalizes via terminal status).
+                if (p.status == AzureBackup.Core.Models.FileOperationStatus.Downloading && p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
                 {
                     if (isSmall)
                     {
@@ -550,6 +577,38 @@ public partial class MainWindowViewModel
             var fileName = Path.GetFileName(filesWithPaths[p.fileIndex].file.LocalPath);
             var isSmall = filesWithPaths[p.fileIndex].file.FileSize <= SmallFileThreshold;
 
+            // Terminal outcome (emitted once per file by the restore wrapper): Complete removes
+            // the row, Recovered keeps it visible (partial data loss), Failed keeps it (error
+            // styling). Recovering files reach 100% bytes but are NOT auto-completed below; this
+            // explicit status is what finalizes them.
+            if (p.status is AzureBackup.Core.Models.FileOperationStatus.Complete
+                or AzureBackup.Core.Models.FileOperationStatus.Recovered
+                or AzureBackup.Core.Models.FileOperationStatus.Failed)
+            {
+                completedFileSet.TryAdd(p.fileIndex, 0);
+                var terminalType = p.status switch
+                {
+                    AzureBackup.Core.Models.FileOperationStatus.Complete => AzureBackup.Core.Models.OperationProgressType.FileCompleted,
+                    AzureBackup.Core.Models.FileOperationStatus.Recovered => AzureBackup.Core.Models.OperationProgressType.FileRecovered,
+                    _ => AzureBackup.Core.Models.OperationProgressType.FileFailed
+                };
+                ProgressTab.ReportProgress(new AzureBackup.Core.Models.OperationProgressReport
+                {
+                    Type = terminalType,
+                    FileIndex = p.fileIndex,
+                    FileName = fileName,
+                    FileSize = p.fileSize,
+                    FileBytesProcessed = p.bytesCompleted,
+                    FileStatus = p.status,
+                    ErrorMessage = p.status == AzureBackup.Core.Models.FileOperationStatus.Failed ? "Restore failed" : string.Empty,
+                    TotalBytesProcessed = Volatile.Read(ref totalBytesProcessed),
+                    TotalBytes = totalBytes,
+                    TotalFilesCompleted = completedFileSet.Count,
+                    TotalFiles = filesWithPaths.Count
+                });
+                return;
+            }
+
             // Report file started on first progress for this file (large files only — small are grouped)
             if (startedFileSet.TryAdd(p.fileIndex, 0) && !isSmall)
             {
@@ -590,8 +649,10 @@ public partial class MainWindowViewModel
                 });
             }
 
-            // Detect file completion
-            if (p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
+            // Detect file completion — normal Downloading path only. Recovering files finalize
+            // via the terminal status above, so a recovered-with-loss / failed file is never
+            // mistakenly auto-completed here.
+            if (p.status == AzureBackup.Core.Models.FileOperationStatus.Downloading && p.bytesCompleted >= p.fileSize && completedFileSet.TryAdd(p.fileIndex, 0))
             {
                 if (isSmall)
                 {

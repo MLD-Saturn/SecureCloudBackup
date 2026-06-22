@@ -19,6 +19,13 @@ public enum OperationProgressType
     /// <summary>A file has failed (will remain visible in the progress list).</summary>
     FileFailed,
 
+    /// <summary>
+    /// A file finished via corrupted recovery with at least one zero-filled chunk
+    /// (partial data loss). The row stays visible with a <see cref="FileOperationStatus.Recovered"/>
+    /// status so the user knows the restored file is incomplete.
+    /// </summary>
+    FileRecovered,
+
     /// <summary>Aggregate progress for the small-file group (≤100 MB files).</summary>
     SmallFileGroupProgress,
 
@@ -50,7 +57,14 @@ public enum FileOperationStatus
     /// per-file progress row so the user can see the file is actively recovering
     /// rather than frozen.
     /// </summary>
-    Recovering
+    Recovering,
+
+    /// <summary>
+    /// Terminal state: the file was rebuilt by corrupted recovery but at least one chunk
+    /// could not be recovered and was zero-filled (partial data loss). The row stays visible
+    /// with distinct styling so the user knows the restored file is incomplete.
+    /// </summary>
+    Recovered
 }
 
 /// <summary>

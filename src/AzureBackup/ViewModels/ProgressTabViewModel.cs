@@ -250,10 +250,10 @@ public partial class ProgressTabViewModel : ViewModelBase
             if (failed > 0) parts.Add($"{failed} failed");
             CompletionSummary = $"{OperationType} complete: {string.Join(", ", parts)}";
 
-            // Move any remaining active files to failed
+            // Persist failed AND recovered-with-loss files for review after the operation.
             foreach (var active in ActiveFiles.ToList())
             {
-                if (active.Status is FileOperationStatus.Failed)
+                if (active.Status is FileOperationStatus.Failed or FileOperationStatus.Recovered)
                 {
                     FailedFiles.Add(active);
                 }
@@ -332,13 +332,18 @@ public partial class ProgressTabViewModel : ViewModelBase
                 break;
 
             case OperationProgressType.FileFailed:
-                var failed = FindActiveFile(report.FileIndex);
-                if (failed != null)
-                {
-                    failed.Status = FileOperationStatus.Failed;
-                    failed.ErrorMessage = report.ErrorMessage ?? "Unknown error";
-                    // Keep in ActiveFiles — failed files persist
-                }
+                var failed = FindOrAddActiveFile(report);
+                failed.Status = FileOperationStatus.Failed;
+                failed.ErrorMessage = report.ErrorMessage ?? "Unknown error";
+                // Keep in ActiveFiles — failed files persist
+                break;
+
+            case OperationProgressType.FileRecovered:
+                var recovered = FindOrAddActiveFile(report);
+                recovered.BytesProcessed = report.FileBytesProcessed;
+                recovered.Status = FileOperationStatus.Recovered;
+                recovered.ErrorMessage = report.ErrorMessage ?? string.Empty;
+                // Keep in ActiveFiles — recovered-with-loss files persist for review
                 break;
 
             case OperationProgressType.SmallFileGroupProgress:
@@ -367,6 +372,29 @@ public partial class ProgressTabViewModel : ViewModelBase
                 return ActiveFiles[i];
         }
         return null;
+    }
+
+    /// <summary>
+    /// Returns the active row for the report's file, creating one if it does not yet exist.
+    /// Used by the terminal Failed/Recovered cases so a file that was previously aggregated
+    /// (e.g. a small file) is surfaced as its own row when it needs the user's attention.
+    /// </summary>
+    private ActiveFileProgressViewModel FindOrAddActiveFile(OperationProgressReport report)
+    {
+        var existing = FindActiveFile(report.FileIndex);
+        if (existing != null)
+            return existing;
+
+        var added = new ActiveFileProgressViewModel
+        {
+            FileIndex = report.FileIndex,
+            FileName = report.FileName,
+            TotalBytes = report.FileSize,
+            BytesProcessed = report.FileBytesProcessed
+        };
+        ActiveFiles.Add(added);
+        OnPropertyChanged(nameof(HasActiveFiles));
+        return added;
     }
 
     private void UpdateSpeedAndEta()

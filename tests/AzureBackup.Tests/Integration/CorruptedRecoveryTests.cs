@@ -388,6 +388,65 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         Assert.Equal(2L * backedUp.Chunks.Count, restoreService.TotalMd5DownloadRetries);
     }
 
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenRecoveredWithLoss_EmitsRecoveredTerminalStatus()
+    {
+        // Arrange — multi-chunk file where chunk 1 is unrecoverable (zero-filled), so the file is
+        // recovered WITH data loss. The wrapper must emit a terminal Recovered status (so the
+        // Progress tab keeps the row visible rather than showing a clean Complete).
+        PartialRecoveryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "recovered_status.bin", 3 * 1024 * 1024);
+        Assert.True(backedUp.Chunks.Count >= 3, $"Need >=3 chunks, got {backedUp.Chunks.Count}");
+        blobService.CorruptNormalDownloads = true;
+        blobService.UnrecoverableChunkIndices.Add(1);
+
+        var targetPath = Path.Combine(_restoreDirectory, "recovered_status.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+        var capturing = new CapturingFileByteProgress();
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(
+            filesWithPaths, overwriteExisting: true, fileByteProgress: capturing);
+
+        // Assert
+        Assert.Single(result.CorruptedRecoveryFiles);
+        await WaitForAsync(() => capturing.Snapshot().Any(r => r.status == FileOperationStatus.Recovered));
+        Assert.Contains(capturing.Snapshot(), r => r.status == FileOperationStatus.Recovered);
+        Assert.DoesNotContain(capturing.Snapshot(), r => r.status == FileOperationStatus.Failed);
+    }
+
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenRecoveryFails_EmitsFailedTerminalStatus()
+    {
+        // Arrange — normal download corrupted AND best-effort returns null for every chunk, so
+        // recovery bails out and the file fails. The wrapper must emit a terminal Failed status
+        // (so the Progress tab shows a failed row instead of silently clearing it).
+        AllChunksUnrecoverableBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "failed_status.bin", 3 * 1024 * 1024);
+        Assert.True(backedUp.Chunks.Count >= 3, $"Need >=3 chunks, got {backedUp.Chunks.Count}");
+        blobService.CorruptNormalDownloads = true;
+        blobService.FailBestEffort = true;
+
+        var targetPath = Path.Combine(_restoreDirectory, "failed_status.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+        var capturing = new CapturingFileByteProgress();
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(
+            filesWithPaths, overwriteExisting: true, fileByteProgress: capturing);
+
+        // Assert
+        Assert.Single(result.FailedFiles);
+        await WaitForAsync(() => capturing.Snapshot().Any(r => r.status == FileOperationStatus.Failed));
+        Assert.Contains(capturing.Snapshot(), r => r.status == FileOperationStatus.Failed);
+    }
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)

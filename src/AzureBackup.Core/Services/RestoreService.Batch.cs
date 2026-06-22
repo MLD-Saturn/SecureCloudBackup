@@ -1128,6 +1128,19 @@ public partial class RestoreService
             file, normalizedPath, overwriteExisting, individualFileProgress, recoveryFileProgress, logPrefix, memoryBudget, bandwidthScheduler,
             largeChunkPool, smallChunkPool, cancellationToken);
 
+        // Report the terminal per-file outcome so the Progress tab can finalize the row:
+        // Complete (removed), Recovered (kept visible — partial data loss), or Failed (kept,
+        // error styling). The ViewModel suppresses byte-driven completion while a file is
+        // Recovering, so this explicit terminal status is what ends a recovered/failed file's row.
+        var terminalStatus = outcome switch
+        {
+            FileRestoreOutcome.Success => FileOperationStatus.Complete,
+            FileRestoreOutcome.CorruptedRecovery => FileOperationStatus.Recovered,
+            _ => FileOperationStatus.Failed
+        };
+        var terminalBytes = terminalStatus == FileOperationStatus.Failed ? 0L : file.FileSize;
+        fileByteProgress?.Report((terminalBytes, file.FileSize, fileIndex, terminalStatus));
+
         lock (resultLock)
         {
             ApplyRestoreOutcome(result, outcome, file, normalizedPath, recoveredPath, unrecoverableChunks);

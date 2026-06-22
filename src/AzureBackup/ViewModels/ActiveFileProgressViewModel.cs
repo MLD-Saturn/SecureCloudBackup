@@ -29,6 +29,7 @@ public partial class ActiveFileProgressViewModel : ViewModelBase
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(StatusText))]
     [NotifyPropertyChangedFor(nameof(IsFailed))]
+    [NotifyPropertyChangedFor(nameof(IsRecovered))]
     private FileOperationStatus _status;
 
     [ObservableProperty]
@@ -56,9 +57,16 @@ public partial class ActiveFileProgressViewModel : ViewModelBase
         FileOperationStatus.Failed => "Failed ✗",
         FileOperationStatus.Retrying => "Retrying...",
         FileOperationStatus.Recovering => "Recovering...",
+        FileOperationStatus.Recovered => "Recovered ⚠",
         _ => string.Empty
     };
 
     /// <summary>True when the file has failed (row persists and shows error styling).</summary>
     public bool IsFailed => Status is FileOperationStatus.Failed;
+
+    /// <summary>
+    /// True when the file was rebuilt by corrupted recovery with at least one zero-filled
+    /// chunk (partial data loss). The row persists with a distinct (non-error) styling.
+    /// </summary>
+    public bool IsRecovered => Status is FileOperationStatus.Recovered;
 }
