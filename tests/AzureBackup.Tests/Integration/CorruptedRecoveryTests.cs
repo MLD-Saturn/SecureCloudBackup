@@ -365,6 +365,29 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         Assert.True(File.Exists(targetPath));
     }
 
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_CountsMd5DownloadRetries()
+    {
+        // Arrange — every chunk reports an MD5 mismatch twice then succeeds, so the service
+        // should record exactly two re-downloads per chunk in TotalMd5DownloadRetries.
+        Md5RetryBlobService blobService = new(_encryptionService, throwsPerBlob: 2);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "md5_metric.bin", 100 * 1024);
+        blobService.FailuresEnabled = true;
+
+        var targetPath = Path.Combine(_restoreDirectory, "md5_metric.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
+
+        // Assert — restored via retries; counter == 2 retries per chunk.
+        Assert.Single(result.SuccessfulFiles);
+        Assert.Equal(2L * backedUp.Chunks.Count, restoreService.TotalMd5DownloadRetries);
+    }
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)

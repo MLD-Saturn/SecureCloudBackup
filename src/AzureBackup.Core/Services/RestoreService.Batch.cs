@@ -158,6 +158,7 @@ public partial class RestoreService
         var mirrorStopwatch = Stopwatch.StartNew();
         var crcFailStart = _blobService.TotalCrcFailures;
         var crcRetryStart = _blobService.TotalCrcRetries;
+        var md5RetryStart = TotalMd5DownloadRetries;
         // B63: lifted out of the if-block below so the operation-metrics emit
         // at the bottom of this method can read the scheduler's actual peak
         // concurrency rather than the static MaxParallelFileRestores ceiling.
@@ -381,7 +382,8 @@ public partial class RestoreService
             ThroughputMBps = ThroughputMetrics.ComputeThroughputMBps(mirrorBytes, mirrorElapsed),
             FileConcurrency = mirrorEffectiveConcurrency,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
-            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart),
+            Md5DownloadRetryCount = (int)(TotalMd5DownloadRetries - md5RetryStart)
         });
 
         return result;
@@ -813,6 +815,7 @@ public partial class RestoreService
         var opStopwatch = Stopwatch.StartNew();
         var crcFailStart = _blobService.TotalCrcFailures;
         var crcRetryStart = _blobService.TotalCrcRetries;
+        var md5RetryStart = TotalMd5DownloadRetries;
 
         Log($"RestoreFilesWithRemappingAsync: Restoring {fileList.Count} files with path remapping (parallel)");
         StatusChanged?.Invoke(this, $"Starting restore of {fileList.Count} files");
@@ -866,7 +869,8 @@ public partial class RestoreService
             MemoryBudgetMb = memoryBudget.IsUnlimited ? 0 : (int)(memoryBudget.TotalBytes / (1024 * 1024)),
             BudgetStalls = (int)memoryBudget.StallCount,
             CrcFailCount = (int)(_blobService.TotalCrcFailures - crcFailStart),
-            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart)
+            CrcRetryCount = (int)(_blobService.TotalCrcRetries - crcRetryStart),
+            Md5DownloadRetryCount = (int)(TotalMd5DownloadRetries - md5RetryStart)
         });
 
         // Decision-point: emit ONLY when the memory budget actually

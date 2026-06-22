@@ -511,6 +511,17 @@ public sealed class OperationMetrics : MetricsRecord
     /// up as a clean delta against historical runs.
     /// </summary>
     public int CrcRetryCount { get; set; }
+
+    /// <summary>
+    /// Count of restore chunk-DOWNLOAD re-downloads triggered by a Content-MD5
+    /// mismatch (a <c>DownloadIntegrityException</c>), i.e. transient in-transit
+    /// corruption resolved by re-fetching the chunk. Distinguished from
+    /// <see cref="Retries"/> (transient HTTP/throttling) and
+    /// <see cref="CrcRetryCount"/> (upload-side MD5 re-encrypt) so an operator can
+    /// see how often download-time corruption is occurring -- a signal of a flaky
+    /// link or at-rest storage damage.
+    /// </summary>
+    public int Md5DownloadRetryCount { get; set; }
 }
 
 /// <summary>

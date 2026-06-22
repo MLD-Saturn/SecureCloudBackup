@@ -43,6 +43,18 @@ public partial class RestoreService
     private const int MaxIntegrityRetries = 5;
     private const int IntegrityRetryDelayMs = 200;
 
+    // Count of download-time MD5-mismatch re-downloads (DownloadIntegrityException) across this
+    // service's lifetime. Surfaced per-operation in OperationMetrics.Md5DownloadRetryCount so an
+    // operator can see how often transient in-transit corruption is occurring.
+    private long _totalMd5DownloadRetries;
+
+    /// <summary>
+    /// Total restore chunk re-downloads triggered by a Content-MD5 mismatch since this service
+    /// was created. Batch restore / mirror snapshot this around each operation and write the delta
+    /// into <see cref="OperationMetrics.Md5DownloadRetryCount"/>.
+    /// </summary>
+    public long TotalMd5DownloadRetries => Interlocked.Read(ref _totalMd5DownloadRetries);
+
     // Large FileStream buffer — reduces syscalls for multi-MB chunk writes
     private const int LargeFileStreamBufferSize = 4 * 1024 * 1024; // 4 MB
 
@@ -656,9 +668,12 @@ public partial class RestoreService
             {
                 onRetry?.Invoke();
                 var isIntegrity = IsRetryableIntegrityError(ex);
-                // Only real server pushback steers the AIMD scheduler; an MD5 mismatch is a
-                // data-integrity event, not a bandwidth signal.
-                if (!isIntegrity) bandwidthScheduler?.NotifyTransientError();
+                // An MD5 mismatch is a data-integrity event (counted for metrics), not bandwidth
+                // pushback; only a real transient HTTP error steers the AIMD scheduler.
+                if (isIntegrity)
+                    Interlocked.Increment(ref _totalMd5DownloadRetries);
+                else
+                    bandwidthScheduler?.NotifyTransientError();
                 var budget = DownloadRetryBudget(ex);
                 var delay = isIntegrity ? IntegrityRetryDelayMs : ChunkRetryBaseDelayMs * (1 << attempt);
                 var kind = isIntegrity ? "Md5Retry" : "TransientRetry";
