@@ -379,38 +379,12 @@ public partial class RestoreService
                         ? null
                         : smallChunkPool;
 
-                    // Download with retry for transient Azure failures and MD5 mismatches —
-                    // same pattern as multi-chunk path. Single-chunk files are especially
-                    // vulnerable to transient 503s at high concurrency since they have no other
-                    // chunks to amortize a failure across. An MD5 mismatch (DownloadIntegrityException)
-                    // is re-downloaded up to MaxIntegrityRetries times before the file falls back to recovery.
-                    byte[]? chunkData = null;
-                    var maxDownloadAttempts = Math.Max(MaxChunkRetries, MaxIntegrityRetries);
-                    for (var attempt = 0; attempt <= maxDownloadAttempts; attempt++)
-                    {
-                        try
-                        {
-                            chunkData = await _blobService.DownloadChunkAsync(chunk.BlobName, singleEncryptedPool, cancellationToken);
-                            break;
-                        }
-                        catch (Exception ex) when (attempt < DownloadRetryBudget(ex))
-                        {
-                            var isIntegrity = IsRetryableIntegrityError(ex);
-                            // B63: feed the AIMD scheduler from the single-chunk path too — but ONLY
-                            // for real server pushback. An MD5 mismatch is a data-integrity event,
-                            // not a bandwidth signal, so it must not steer the scheduler.
-                            if (!isIntegrity) bandwidthScheduler?.NotifyTransientError();
-                            var budget = DownloadRetryBudget(ex);
-                            var delay = isIntegrity ? IntegrityRetryDelayMs : ChunkRetryBaseDelayMs * (1 << attempt);
-                            var kind = isIntegrity ? "Md5Retry" : "TransientRetry";
-                            diag.RecordChunk(kind, chunk.Index, chunk.Hash, chunk.Length,
-                                extra: $"attempt={attempt + 1}/{budget + 1}, error={ex.GetType().Name}");
-                            Log($"RestoreFileAsync: {kind} on single chunk {chunk.Index} " +
-                                $"(attempt {attempt + 1}/{budget + 1}): {ex.GetType().Name}: {ex.Message}, " +
-                                $"retrying in {delay}ms");
-                            await Task.Delay(delay, cancellationToken);
-                        }
-                    }
+                    // Download with the unified retry policy (transient HTTP + MD5 re-download).
+                    // Single-chunk files are especially vulnerable to transient 503s at high
+                    // concurrency since they have no other chunks to amortize a failure across.
+                    var chunkData = await DownloadChunkWithRetryAsync(
+                        ct => _blobService.DownloadChunkAsync(chunk.BlobName, singleEncryptedPool, ct),
+                        chunk, "RestoreFileAsync", bandwidthScheduler, diag, onRetry: null, cancellationToken);
 
                     // Verify chunk size and hash match metadata
                     Log($"RestoreFileAsync: Verifying chunk {chunk.Index} integrity");
@@ -648,6 +622,55 @@ public partial class RestoreService
         IsRetryableIntegrityError(ex) ? MaxIntegrityRetries
         : IsTransientError(ex) ? MaxChunkRetries
         : 0;
+
+    /// <summary>
+    /// Downloads a single chunk with the unified retry policy shared by the single-chunk
+    /// (<see cref="RestoreFileAsync"/>) and multi-chunk (<see cref="RestoreWithBoundedParallelDownloadsAsync"/>)
+    /// restore paths. Transient HTTP/network errors retry up to <see cref="MaxChunkRetries"/>
+    /// times with exponential backoff and feed the AIMD scheduler; download-time MD5 mismatches
+    /// (<see cref="DownloadIntegrityException"/>) re-download THIS chunk up to
+    /// <see cref="MaxIntegrityRetries"/> times with a short fixed delay and do NOT signal the
+    /// scheduler. The retry is scoped to this one download call, so sibling chunk downloads are
+    /// never cancelled by a retry; only an exhausted budget (or a non-retryable error) propagates,
+    /// which is what drives the file into recovery. This is the download-side mirror of the
+    /// upload-side integrity retry in <c>AzureBlobService.UploadWithIntegrityRetryAsync</c>.
+    /// </summary>
+    /// <param name="download">Issues one download attempt for <paramref name="chunk"/>.</param>
+    /// <param name="onRetry">Optional per-retry hook (the multi-chunk path bumps its pipeline retry counter).</param>
+    private async Task<T> DownloadChunkWithRetryAsync<T>(
+        Func<CancellationToken, Task<T>> download,
+        ChunkInfo chunk,
+        string logContext,
+        BandwidthScheduler? bandwidthScheduler,
+        FileOperationDiagnostics diag,
+        Action? onRetry,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await download(cancellationToken);
+            }
+            catch (Exception ex) when (attempt < DownloadRetryBudget(ex))
+            {
+                onRetry?.Invoke();
+                var isIntegrity = IsRetryableIntegrityError(ex);
+                // Only real server pushback steers the AIMD scheduler; an MD5 mismatch is a
+                // data-integrity event, not a bandwidth signal.
+                if (!isIntegrity) bandwidthScheduler?.NotifyTransientError();
+                var budget = DownloadRetryBudget(ex);
+                var delay = isIntegrity ? IntegrityRetryDelayMs : ChunkRetryBaseDelayMs * (1 << attempt);
+                var kind = isIntegrity ? "Md5Retry" : "TransientRetry";
+                diag.RecordChunk(kind, chunk.Index, chunk.Hash, chunk.Length,
+                    extra: $"attempt={attempt + 1}/{budget + 1}, error={ex.GetType().Name}");
+                Log($"{logContext}: {kind} on chunk {chunk.Index} " +
+                    $"(attempt {attempt + 1}/{budget + 1}): {ex.GetType().Name}: {ex.Message}, " +
+                    $"retrying in {delay}ms");
+                await Task.Delay(delay, cancellationToken);
+            }
+        }
+    }
 
     /// <summary>
     /// Restores a file using bounded parallel downloads with a producer-consumer pattern.
@@ -888,41 +911,13 @@ public partial class RestoreService
                         {
                             linkedCts.Token.ThrowIfCancellationRequested();
 
-                            // Download with retry for transient Azure failures (503, timeouts)
-                            // and MD5 mismatches. At 192 concurrent downloads, transient errors
-                            // are expected; an MD5 mismatch (DownloadIntegrityException) re-downloads
-                            // this one chunk up to MaxIntegrityRetries times — siblings keep running —
-                            // before the file falls back to recovery.
-                            byte[]? chunkBuffer = null;
-                            int chunkLength = 0;
-                            var maxDownloadAttempts = Math.Max(MaxChunkRetries, MaxIntegrityRetries);
-                            for (var attempt = 0; attempt <= maxDownloadAttempts; attempt++)
-                            {
-                                try
-                                {
-                                    (chunkBuffer, chunkLength) = await _blobService.DownloadChunkStreamingAsync(chunk.BlobName, selectedPool, selectedEncryptedPool, linkedCts.Token);
-                                    break; // success
-                                }
-                                catch (Exception ex) when (attempt < DownloadRetryBudget(ex))
-                                {
-                                    Interlocked.Increment(ref metricRetries);
-                                    var isIntegrity = IsRetryableIntegrityError(ex);
-                                    // B62 (B): a transient HTTP error means the server is pushing
-                                    // back — notify the AIMD scheduler so the next dispatch wave
-                                    // halves file-level concurrency. An MD5 mismatch is a data event,
-                                    // not bandwidth pushback, so it must NOT steer the scheduler.
-                                    if (!isIntegrity) bandwidthScheduler?.NotifyTransientError();
-                                    var budget = DownloadRetryBudget(ex);
-                                    var delay = isIntegrity ? IntegrityRetryDelayMs : ChunkRetryBaseDelayMs * (1 << attempt); // fixed for MD5, exponential backoff for HTTP
-                                    var kind = isIntegrity ? "Md5Retry" : "TransientRetry";
-                                    diag.RecordChunk(kind, chunk.Index, chunk.Hash, chunk.Length,
-                                        extra: $"attempt={attempt + 1}/{budget + 1}, error={ex.GetType().Name}");
-                                    Log($"BoundedParallelDownload.Producer: '{fileName}' {kind} on chunk {chunk.Index} " +
-                                        $"(attempt {attempt + 1}/{budget + 1}): {ex.GetType().Name}: {ex.Message}, " +
-                                        $"retrying in {delay}ms");
-                                    await Task.Delay(delay, linkedCts.Token);
-                                }
-                            }
+                            // Download with the unified retry policy (transient HTTP + MD5 re-download).
+                            // An MD5 mismatch re-downloads THIS chunk up to MaxIntegrityRetries times —
+                            // siblings keep running — before the file falls back to recovery.
+                            var (chunkBuffer, chunkLength) = await DownloadChunkWithRetryAsync(
+                                ct => _blobService.DownloadChunkStreamingAsync(chunk.BlobName, selectedPool, selectedEncryptedPool, ct),
+                                chunk, $"BoundedParallelDownload.Producer: '{fileName}'", bandwidthScheduler, diag,
+                                onRetry: () => Interlocked.Increment(ref metricRetries), linkedCts.Token);
 
                             rentedBuffer = chunkBuffer;
 

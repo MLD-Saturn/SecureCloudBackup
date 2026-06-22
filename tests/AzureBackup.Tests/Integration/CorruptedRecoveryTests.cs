@@ -330,6 +330,41 @@ public class CorruptedRecoveryTests : IAsyncLifetime
         Assert.Contains(recovering, r => r.bytesCompleted == r.fileSize && r.fileSize == backedUp.FileSize);
     }
 
+    [Fact]
+    public async Task RestoreFilesWithRemappingAsync_WhenOneChunkMd5Retries_SiblingsAreNotCancelled()
+    {
+        // Arrange — a multi-chunk file where ONLY chunk index 1 reports an MD5 mismatch twice
+        // and then succeeds. The retry is scoped to that single chunk, so sibling chunks must
+        // each download exactly once and the file must restore normally (no recovery).
+        SingleChunkMd5RetryBlobService blobService = new(_encryptionService);
+        await blobService.ConnectAsync("fake", "container");
+        RestoreService restoreService = new(_databaseService, blobService, _encryptionService);
+
+        var backedUp = await CreateAndBackupFile(blobService, "siblings.bin", 3 * 1024 * 1024);
+        Assert.True(backedUp.Chunks.Count >= 3, $"Need >=3 chunks for a middle target, got {backedUp.Chunks.Count}");
+
+        var target = backedUp.Chunks[1].BlobName;
+        blobService.TargetBlobName = target;
+        blobService.ThrowsForTarget = 2;
+        blobService.FailuresEnabled = true;
+
+        var targetPath = Path.Combine(_restoreDirectory, "siblings.bin");
+        var filesWithPaths = new List<(BackedUpFile file, string targetPath)> { (backedUp, targetPath) };
+
+        // Act
+        var result = await restoreService.RestoreFilesWithRemappingAsync(filesWithPaths);
+
+        // Assert — restored normally (no recovery); the target chunk retried, siblings untouched.
+        Assert.Single(result.SuccessfulFiles);
+        Assert.Empty(result.CorruptedRecoveryFiles);
+        Assert.Equal(0, blobService.BestEffortCalls);
+        Assert.Equal(3, blobService.AttemptsFor(target)); // 2 failed + 1 success
+        Assert.All(
+            backedUp.Chunks.Where(c => c.BlobName != target),
+            c => Assert.Equal(1, blobService.AttemptsFor(c.BlobName)));
+        Assert.True(File.Exists(targetPath));
+    }
+
     #region Helper Methods
 
     private static byte[] CreateRandomContent(int size)
@@ -585,6 +620,48 @@ internal sealed class Md5RetryBlobService : InMemoryBlobService
     {
         var attempt = _attempts.AddOrUpdate(blobName, 1, (_, n) => n + 1);
         if (FailuresEnabled && attempt <= _throwsPerBlob)
+            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {blobName}", blobName);
+        return await base.DownloadChunkAsync(blobName, cancellationToken);
+    }
+
+    public override Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref _bestEffortCalls);
+        return base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+    }
+}
+
+/// <summary>
+/// Blob service that throws a <see cref="DownloadIntegrityException"/> (simulated Content-MD5
+/// mismatch) for the first <see cref="ThrowsForTarget"/> download attempts of ONE specific chunk
+/// blob (<see cref="TargetBlobName"/>) and serves every other chunk normally. Used to verify that
+/// a single chunk's MD5 retries do not cancel sibling downloads.
+/// </summary>
+internal sealed class SingleChunkMd5RetryBlobService : InMemoryBlobService
+{
+    private readonly ConcurrentDictionary<string, int> _attempts = new(StringComparer.Ordinal);
+    private int _bestEffortCalls;
+
+    public SingleChunkMd5RetryBlobService(EncryptionService encryptionService)
+        : base(encryptionService) { }
+
+    /// <summary>When false the double behaves normally; set true after backup to start failing the target.</summary>
+    public bool FailuresEnabled { get; set; }
+
+    /// <summary>The single chunk blob name that should fail; null disables targeting.</summary>
+    public string? TargetBlobName { get; set; }
+
+    /// <summary>How many of the target's first download attempts throw before it succeeds.</summary>
+    public int ThrowsForTarget { get; set; }
+
+    public int BestEffortCalls => Volatile.Read(ref _bestEffortCalls);
+
+    public int AttemptsFor(string blobName) => _attempts.TryGetValue(blobName, out var n) ? n : 0;
+
+    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    {
+        var attempt = _attempts.AddOrUpdate(blobName, 1, (_, n) => n + 1);
+        if (FailuresEnabled && blobName == TargetBlobName && attempt <= ThrowsForTarget)
             throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {blobName}", blobName);
         return await base.DownloadChunkAsync(blobName, cancellationToken);
     }

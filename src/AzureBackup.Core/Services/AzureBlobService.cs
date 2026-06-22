@@ -1078,6 +1078,9 @@ public partial class AzureBlobService : IBlobStorageService
     /// from the original plaintext, producing a fresh nonce/ciphertext/CRC to avoid
     /// re-sending the same bytes that may have been corrupted in memory. Non-MD5
     /// transient retries reuse the same bytes (no re-encryption cost).
+    /// The download-side mirror of this MD5 retry is
+    /// <c>RestoreService.DownloadChunkWithRetryAsync</c>, which re-downloads a chunk on a
+    /// Content-MD5 mismatch; keep the two integrity-retry policies in sync.
     /// </summary>
     /// <param name="dataLength">Actual data length within <paramref name="data"/>.
     /// May be less than data.Length when using a rented buffer from ArrayPool.</param>
