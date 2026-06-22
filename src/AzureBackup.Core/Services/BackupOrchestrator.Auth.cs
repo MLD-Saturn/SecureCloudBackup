@@ -32,12 +32,12 @@ public partial class BackupOrchestrator
                     UnsafeAllowUnencryptedStorage = false
                 },
                 // Redirect to localhost after auth completes
-                RedirectUri = new Uri("http://localhost"),
-                // Set a reasonable timeout for browser interaction
-                BrowserCustomization = new BrowserCustomizationOptions
-                {
-                    UseEmbeddedWebView = false
-                }
+                RedirectUri = new Uri("http://localhost")
+                // The interactive flow uses the system browser by default. The former
+                // BrowserCustomization.UseEmbeddedWebView = false setting is now obsolete
+                // (the embedded web view was removed from Azure.Identity), and the system
+                // browser is the only supported and default behavior, so the option is
+                // omitted -- runtime behavior is unchanged.
             };
             
             _credential = new InteractiveBrowserCredential(options);

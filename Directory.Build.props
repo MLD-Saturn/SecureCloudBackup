@@ -1,0 +1,33 @@
+<Project>
+
+  <!--
+	Repo-wide MSBuild properties/items inherited by every project in the solution
+	(AzureBackup.Core, AzureBackup, AzureBackup.Tests, AzureBackup.Benchmarks).
+	Keep this file minimal; project-specific settings stay in the individual .csproj.
+  -->
+
+  <ItemGroup>
+	<!--
+	  CVE-2025-6965 (advisory GHSA-2m69-gcr7-jv3q): the native SQLite engine
+	  bundled in SQLitePCLRaw.lib.e_sqlite3 (a transitive dependency of
+	  SQLitePCLRaw.bundle_e_sqlcipher, referenced by AzureBackup.Core and flowed
+	  to every project that references Core) is older than SQLite 3.50.2. As of
+	  this writing the advisory lists "Patched versions: None": every released
+	  version up to and including 2.1.11 (the latest) ships the affected engine,
+	  so there is no version to upgrade to. The flaw needs attacker controlled
+	  SQL whose aggregate term count exceeds the column count; AzureBackup only
+	  ever runs its own parameterized statements against a local, app owned,
+	  SQLCipher encrypted database, so the path is not reachable here.
+
+	  This is declared once at the repo root (instead of duplicated per project)
+	  so the NuGet audit warning is suppressed consistently for Core AND the UI
+	  project, which inherits the vulnerable package transitively. It is scoped
+	  to THIS single advisory (not a blanket NoWarn), so any other or future
+	  NuGet audit warning still surfaces. Remove this entry once SQLitePCLRaw
+	  ships a bundle with SQLite 3.50.2 or newer and bump the package instead.
+	  Tracked in AGENT_CONTEXT.md.
+	-->
+	<NuGetAuditSuppress Include="https://github.com/advisories/GHSA-2m69-gcr7-jv3q" />
+  </ItemGroup>
+
+</Project>

@@ -724,19 +724,19 @@ public partial class RestoreService
     /// Only invoked for the CRC-only case (every chunk's AES-GCM tag authenticated),
     /// so the bytes written back are provably identical to the original chunk.
     /// Best-effort: a repair failure never fails the restore — the recovered file
-    /// already exists on disk. Every per-chunk result is written to the file's
-    /// <paramref name="diag"/> log (and the application log) so the .diag file that
-    /// is flushed for the recovery captures the full repair trail.
+    /// already exists on disk. When a <paramref name="diag"/> log is supplied, every
+    /// per-chunk result is written to it (and the application log) so the .diag file
+    /// that is flushed for the recovery captures the full repair trail.
     /// </summary>
     private async Task RepairRecoveredChunksAsync(
         BackedUpFile file,
         List<ChunkInfo> sortedChunks,
-        FileOperationDiagnostics diag,
+        FileOperationDiagnostics? diag,
         CancellationToken cancellationToken)
     {
         var fileName = Path.GetFileName(file.LocalPath);
         Log($"RepairRecoveredChunksAsync: Self-healing {sortedChunks.Count} chunk(s) of '{fileName}' in storage");
-        diag.Record($"[REPAIR] Starting in-place repair of {sortedChunks.Count} fully-recovered chunk(s)");
+        diag?.Record($"[REPAIR] Starting in-place repair of {sortedChunks.Count} fully-recovered chunk(s)");
         StatusChanged?.Invoke(this, $"Repairing storage for: {fileName}");
 
         var repaired = 0;
@@ -755,7 +755,7 @@ public partial class RestoreService
             if (chunkData == null)
             {
                 failed++;
-                diag.RecordChunk("RepairSkip", chunk.Index, chunk.Hash, chunk.Length,
+                diag?.RecordChunk("RepairSkip", chunk.Index, chunk.Hash, chunk.Length,
                     extra: $"blob={chunk.BlobName}, reason=best-effort re-download returned null");
                 Log($"RepairRecoveredChunksAsync: '{fileName}' chunk {chunk.Index} could not be re-fetched for repair");
                 continue;
@@ -766,24 +766,24 @@ public partial class RestoreService
             {
                 case ChunkRepairOutcome.Repaired:
                     repaired++;
-                    diag.RecordChunk("RepairOK", chunk.Index, chunk.Hash, chunkData.Length,
+                    diag?.RecordChunk("RepairOK", chunk.Index, chunk.Hash, chunkData.Length,
                         extra: $"blob={chunk.BlobName}, fresh envelope written");
                     break;
                 case ChunkRepairOutcome.SkippedArchived:
                     skipped++;
-                    diag.RecordChunk("RepairSkip", chunk.Index, chunk.Hash, chunkData.Length,
+                    diag?.RecordChunk("RepairSkip", chunk.Index, chunk.Hash, chunkData.Length,
                         extra: $"blob={chunk.BlobName}, reason=Archive tier (rehydration required)");
                     break;
                 default:
                     failed++;
-                    diag.RecordChunk("RepairFail", chunk.Index, chunk.Hash, chunkData.Length,
+                    diag?.RecordChunk("RepairFail", chunk.Index, chunk.Hash, chunkData.Length,
                         extra: $"blob={chunk.BlobName}, reason=overwrite failed");
                     break;
             }
         }
 
         var summary = $"repaired={repaired}, skipped(archived)={skipped}, failed={failed} of {sortedChunks.Count} chunk(s)";
-        diag.Record($"[REPAIR] Complete: {summary}");
+        diag?.Record($"[REPAIR] Complete: {summary}");
         Log($"RepairRecoveredChunksAsync: '{fileName}' repair complete — {summary}");
         if (repaired > 0)
         {
