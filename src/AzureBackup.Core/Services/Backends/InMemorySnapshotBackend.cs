@@ -369,12 +369,15 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
     }
 
     /// <summary>
-    /// Snapshot-format index repair. Identical to the base whitelist-gated
-    /// REINDEX, except it does NOT consult <c>cipher_integrity_check</c> (which
-    /// does not exist on the modern engine) and re-runs only stock
-    /// <c>integrity_check</c> for the post-repair diagnosis. Because the snapshot
-    /// is re-encrypted in full on every persist, a successful REINDEX is written
-    /// back into the next snapshot like any other change.
+    /// Snapshot-format index repair. Reuses the shared whitelist-gated REINDEX
+    /// (<see cref="SqliteBackend.ReindexCorruptIndexesCore"/>) but, unlike the
+    /// SQLCipher base, does NOT consult <c>cipher_integrity_check</c> (which does
+    /// not exist on the modern engine) -- there is no cipher gate and the
+    /// post-repair diagnosis runs only stock <c>integrity_check</c> (cipher-OK by
+    /// construction: the AES-256-GCM tag authenticated the whole snapshot at
+    /// load). Because the snapshot is re-encrypted in full on every persist, a
+    /// successful REINDEX is written back into the next snapshot like any other
+    /// change.
     /// </summary>
     public override DatabaseRepairResult ReindexCorruptIndexes(DatabaseFileIntegrityResult diagnosis)
     {
@@ -383,83 +386,11 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
             throw new InvalidOperationException("Backend is not initialized.");
 
         EmitDiag("InMemorySnapshotBackend.ReindexCorruptIndexes: enter");
-
-        if (diagnosis.IsHealthy)
-        {
-            EmitDiag("InMemorySnapshotBackend.ReindexCorruptIndexes: aborted - diagnosis reported healthy");
-            return DatabaseRepairResult.NotAttempted(
-                "Repair not needed: the supplied diagnosis reports the database is healthy.");
-        }
-
-        var classification = DatabaseRepairClassifier.TryClassify(diagnosis.SqliteIntegrityMessages);
-        if (!classification.AllRepairable)
-        {
-            EmitDiag(
-                "InMemorySnapshotBackend.ReindexCorruptIndexes: aborted - one or more findings are outside the REINDEX-safe whitelist " +
-                $"(unrepairableCount={classification.UnrepairableMessages.Count})");
-            return DatabaseRepairResult.NotAttempted(
-                "Repair refused: at least one integrity_check finding is outside " +
-                "the set of damage shapes REINDEX can safely fix. The unrepairable " +
-                "findings are:" + Environment.NewLine + Environment.NewLine +
-                string.Join(Environment.NewLine, classification.UnrepairableMessages));
-        }
-
-        if (classification.RepairableIndexNames.Count == 0)
-        {
-            EmitDiag("InMemorySnapshotBackend.ReindexCorruptIndexes: aborted - classifier extracted zero index names");
-            return DatabaseRepairResult.NotAttempted(
-                "Repair refused: integrity_check reported failures but the classifier " +
-                "could not extract any specific index names to repair. This indicates " +
-                "an unfamiliar message format; please file a support request with the " +
-                "verification report.");
-        }
-
-        return InWriteLock(() =>
-        {
-            var knownIndexNames = ReadAllIndexNames();
-            var attempted = new List<string>();
-            var succeeded = new List<string>();
-            var failed = new List<string>();
-
-            foreach (var name in classification.RepairableIndexNames)
-            {
-                if (!knownIndexNames.Contains(name))
-                {
-                    failed.Add($"{name}: not present in sqlite_master (skipped, not reindexed)");
-                    continue;
-                }
-
-                attempted.Add(name);
-                try
-                {
-                    using var cmd = _connection!.CreateCommand();
-                    cmd.CommandText = $"REINDEX \"{name.Replace("\"", "\"\"")}\";";
-                    cmd.ExecuteNonQuery();
-                    succeeded.Add(name);
-                    EmitDiag($"InMemorySnapshotBackend.ReindexCorruptIndexes: REINDEX {name} succeeded");
-                }
-                catch (Microsoft.Data.Sqlite.SqliteException ex)
-                {
-                    failed.Add($"{name}: SQLite Error {ex.SqliteErrorCode}: {ex.Message}");
-                    EmitDiag($"InMemorySnapshotBackend.ReindexCorruptIndexes: REINDEX {name} failed: {ex.Message}");
-                }
-            }
-
-            // Snapshot integrity has no cipher dimension; the post-repair
-            // diagnosis is cipher-OK (empty) plus the fresh integrity_check.
-            var postSqlite = RunPragmaIntegrityCheck("integrity_check");
-            var postDiagnosis = new DatabaseFileIntegrityResult(Array.Empty<string>(), postSqlite);
-
-            EmitDiag(
-                "InMemorySnapshotBackend.ReindexCorruptIndexes: complete " +
-                $"(attempted={attempted.Count}, succeeded={succeeded.Count}, failed={failed.Count}, " +
-                $"postIsHealthy={postDiagnosis.IsHealthy})");
-
-            return DatabaseRepairResult.Attempted(
-                attemptedIndexes: attempted,
-                succeededIndexes: succeeded,
-                failedIndexes: failed,
-                postRepairDiagnosis: postDiagnosis);
-        });
+        return ReindexCorruptIndexesCore(
+            diagnosis,
+            "InMemorySnapshotBackend.ReindexCorruptIndexes",
+            buildPostDiagnosis: () => new DatabaseFileIntegrityResult(
+                Array.Empty<string>(),
+                RunPragmaIntegrityCheck("integrity_check")));
     }
 }

@@ -71,86 +71,20 @@ internal partial class SqliteBackend
     }
 
     /// <summary>
-    /// Benchmark-only: opens a read-only SQLCipher-keyed connection to an
-    /// existing database. Re-uses the writer's exact key-derivation +
-    /// PRAGMA-tuning sequence so a connection opened by this method is
-    /// guaranteed to read pages the writer wrote.
-    ///
-    /// <para>
-    /// Used by C-3 (4/N) <c>SqlitePooledReader</c> to spin up a pool of
-    /// parallel-read connections against an already-initialised database.
-    /// NOT exposed via <see cref="IDatabaseBackend"/>: production code
-    /// would build a managed pool with rent/return semantics; the
-    /// benchmark only needs raw connections.
-    /// </para>
-    ///
-    /// <para>
-    /// Each returned connection has been issued <c>PRAGMA key</c> and a
-    /// page-decrypt probe. Caller owns the connection lifetime.
-    /// </para>
+    /// B51 (DISABLED in W-DB-enc Step 7): historically opened a quarantined
+    /// SQLCipher catalog read-only and returned its in-DB
+    /// <c>config.password_salt</c> for the rebuild-from-quarantine flow. Now
+    /// always throws <see cref="NotSupportedException"/>: <c>AzureBackup.Core</c>
+    /// no longer ships a SQLCipher engine (CVE-2025-6965 fix), and the
+    /// quarantine/rebuild recovery has not yet been ported to the
+    /// application-level snapshot format (the snapshot has no <c>.salt</c>
+    /// sidecar; its salt lives inside the AES-256-GCM envelope). See
+    /// AGENT_CONTEXT fact #71.
     /// </summary>
-    internal static SqliteConnection OpenReadOnlyForBenchmark(
-        string databasePath, ReadOnlySpan<char> password)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
-        if (password.IsEmpty)
-            throw new ArgumentException("Password cannot be empty", nameof(password));
-        if (!File.Exists(databasePath))
-            throw new FileNotFoundException("Database does not exist", databasePath);
-
-        var salt = LoadOrCreateSalt(databasePath);
-        var derivedKey = DeriveKeyFromPasswordCore(passwordChars: password, salt: salt, diag: null);
-        try
-        {
-            return OpenAndUnlockCore(
-                databasePath, derivedKey, SqliteOpenMode.ReadOnly, validateKey: true);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(derivedKey);
-        }
-    }
-
-    /// <summary>
-    /// B51: opens a quarantined catalog read-only using a caller-supplied
-    /// salt sidecar (NOT the on-disk <c>.salt</c> next to the file) and
-    /// returns the single value the rebuild flow needs to talk to Azure:
-    /// the 16-byte <c>password_salt</c> stored inside the encrypted
-    /// <c>config</c> table. Every other field is recoverable from Azure
-    /// or re-enterable by the user.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The rebuild flow lets the user point at a quarantined database
-    /// (<c>backup.db.quarantine-yyyyMMdd-HHmmss</c>) plus the matching
-    /// quarantined salt sidecar
-    /// (<c>backup.db.salt.quarantine-yyyyMMdd-HHmmss</c>). The two files
-    /// were renamed atomically by <c>QuarantineCorruptDatabase</c>, so
-    /// pairing them here is a user choice -- this helper does not infer
-    /// the sidecar from the database path.
-    /// </para>
-    /// <para>
-    /// The connection is opened with <see cref="SqliteOpenMode.ReadOnly"/>
-    /// so a partial decrypt cannot mutate the quarantined bytes. The
-    /// validate-key probe (page-1 HMAC check) inside
-    /// <see cref="OpenAndUnlockCore"/> is the password-correctness
-    /// oracle: a wrong password surfaces as
-    /// <see cref="InvalidPasswordException"/> rather than allowing a
-    /// "partial decrypt" path through.
-    /// </para>
-    /// </remarks>
-    /// <param name="quarantinedDatabasePath">Path to the quarantined catalog file.</param>
-    /// <param name="quarantinedSaltPath">Path to the matching quarantined salt sidecar (16 bytes).</param>
-    /// <param name="password">The password the quarantined catalog was protected with.</param>
-    /// <returns>
-    /// The 16-byte <c>config.password_salt</c> if it could be read, or
-    /// <c>null</c> if the row exists but the column is NULL (no Azure
-    /// content was ever encrypted with this catalog).
-    /// </returns>
-    /// <exception cref="ArgumentException">A path or the password is null/whitespace.</exception>
-    /// <exception cref="FileNotFoundException">Either file is missing.</exception>
-    /// <exception cref="InvalidOperationException">The salt sidecar is the wrong size.</exception>
-    /// <exception cref="InvalidPasswordException">The password does not match the quarantined catalog.</exception>
+    /// <param name="quarantinedDatabasePath">Unused (the method throws before reading it).</param>
+    /// <param name="quarantinedSaltPath">Unused (the method throws before reading it).</param>
+    /// <param name="password">Unused (the method throws before reading it).</param>
+    /// <exception cref="NotSupportedException">Always: Core no longer contains a SQLCipher engine.</exception>
     public static byte[]? ReadPasswordSaltFromQuarantinedCatalog(
         string quarantinedDatabasePath,
         string quarantinedSaltPath,

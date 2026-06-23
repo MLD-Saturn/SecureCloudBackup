@@ -126,9 +126,32 @@ internal partial class SqliteBackend
                 "catalog from a backup, or rebuild the chunk index from Azure metadata.");
         }
 
+        // Post-repair diagnosis re-runs BOTH pragmas so the SQLCipher caller
+        // sees cipher + b-tree health.
+        return ReindexCorruptIndexesCore(
+            diagnosis,
+            "ReindexCorruptIndexes",
+            buildPostDiagnosis: () => new DatabaseFileIntegrityResult(
+                RunPragmaIntegrityCheck("cipher_integrity_check"),
+                RunPragmaIntegrityCheck("integrity_check")));
+    }
+
+    /// <summary>
+    /// Shared whitelist-gated REINDEX repair used by both the SQLCipher base and
+    /// the snapshot override. The caller supplies the post-repair diagnosis
+    /// builder (the only engine-specific part: the SQLCipher path re-runs the
+    /// cipher pragma, the snapshot path does not). The upfront cipher gate is the
+    /// caller's responsibility because the snapshot format has no cipher
+    /// dimension. Runs under the write lock.
+    /// </summary>
+    private protected DatabaseRepairResult ReindexCorruptIndexesCore(
+        DatabaseFileIntegrityResult diagnosis,
+        string logPrefix,
+        Func<DatabaseFileIntegrityResult> buildPostDiagnosis)
+    {
         if (diagnosis.IsHealthy)
         {
-            EmitDiag("ReindexCorruptIndexes: aborted - diagnosis reported healthy");
+            EmitDiag($"{logPrefix}: aborted - diagnosis reported healthy");
             return DatabaseRepairResult.NotAttempted(
                 "Repair not needed: the supplied diagnosis reports the database is healthy.");
         }
@@ -137,7 +160,7 @@ internal partial class SqliteBackend
         if (!classification.AllRepairable)
         {
             EmitDiag(
-                "ReindexCorruptIndexes: aborted - one or more findings are outside the REINDEX-safe whitelist " +
+                $"{logPrefix}: aborted - one or more findings are outside the REINDEX-safe whitelist " +
                 $"(unrepairableCount={classification.UnrepairableMessages.Count})");
             return DatabaseRepairResult.NotAttempted(
                 "Repair refused: at least one integrity_check finding is outside " +
@@ -148,7 +171,7 @@ internal partial class SqliteBackend
 
         if (classification.RepairableIndexNames.Count == 0)
         {
-            EmitDiag("ReindexCorruptIndexes: aborted - classifier extracted zero index names");
+            EmitDiag($"{logPrefix}: aborted - classifier extracted zero index names");
             return DatabaseRepairResult.NotAttempted(
                 "Repair refused: integrity_check reported failures but the classifier " +
                 "could not extract any specific index names to repair. This indicates " +
@@ -188,26 +211,24 @@ internal partial class SqliteBackend
                     cmd.CommandText = $"REINDEX \"{name.Replace("\"", "\"\"")}\";";
                     cmd.ExecuteNonQuery();
                     succeeded.Add(name);
-                    EmitDiag($"ReindexCorruptIndexes: REINDEX {name} succeeded");
+                    EmitDiag($"{logPrefix}: REINDEX {name} succeeded");
                 }
                 catch (SqliteException ex)
                 {
                     failed.Add($"{name}: SQLite Error {ex.SqliteErrorCode}: {ex.Message}");
-                    EmitDiag($"ReindexCorruptIndexes: REINDEX {name} failed: {ex.Message}");
+                    EmitDiag($"{logPrefix}: REINDEX {name} failed: {ex.Message}");
                 }
             }
 
-            // Re-run BOTH pragmas inside the same write lock so the
-            // before/after comparison is taken without any other
-            // writer in between. Calling the public method would
-            // re-enter the (non-recursive) write lock and deadlock,
-            // so run the helpers directly here.
-            var postCipher = RunPragmaIntegrityCheck("cipher_integrity_check");
-            var postSqlite = RunPragmaIntegrityCheck("integrity_check");
-            var postDiagnosis = new DatabaseFileIntegrityResult(postCipher, postSqlite);
+            // Re-run the post-repair diagnosis inside the same write lock so the
+            // before/after comparison is taken without any other writer in
+            // between. Calling the public method would re-enter the
+            // (non-recursive) write lock and deadlock, so the caller-supplied
+            // builder runs the pragmas directly here.
+            var postDiagnosis = buildPostDiagnosis();
 
             EmitDiag(
-                "ReindexCorruptIndexes: complete " +
+                $"{logPrefix}: complete " +
                 $"(attempted={attempted.Count}, succeeded={succeeded.Count}, failed={failed.Count}, " +
                 $"postIsHealthy={postDiagnosis.IsHealthy})");
 
