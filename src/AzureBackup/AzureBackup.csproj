@@ -50,5 +50,6 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AzureBackup.Core\AzureBackup.Core.csproj" />
+    <ProjectReference Include="..\AzureBackup.Crypto\AzureBackup.Crypto.csproj" />
   </ItemGroup>
 </Project>

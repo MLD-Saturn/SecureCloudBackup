@@ -1,35 +1,34 @@
 namespace AzureBackup.Core;
 
 /// <summary>
-/// Canonical Argon2id key-derivation parameters and salt size shared by every
-/// KDF call site. Previously these were redeclared independently in
-/// <c>EncryptionService</c> (the Azure blob-encryption key) and
-/// <c>SqliteBackend</c> (the SQLCipher database-unlock key), with a comment in
-/// each asking the reader to keep them "identical". Centralizing them turns that
-/// hand-maintained promise into a single source of truth: a divergence between
-/// the two paths would be a silent security regression (one path weakening its
-/// work factor with no compile error), which is exactly the failure mode this
-/// type removes.
+/// Core-side re-export of the canonical Argon2id key-derivation parameters,
+/// which now live in <see cref="AzureBackup.Crypto.KdfParameters"/> so the
+/// engine-agnostic crypto library, the migration helper, and Core all share one
+/// source of truth. This type is kept (forwarding to the shared constants) so
+/// existing Core call sites (<c>using static AzureBackup.Core.KdfParameters</c>)
+/// compile unchanged; a divergence between paths would be a silent security
+/// regression (one path weakening its work factor with no compile error), which
+/// is exactly the failure mode the single source of truth removes.
+///
 /// <para>
-/// Note that the two KDF paths still derive <em>different keys</em> from
+/// The different KDF paths still derive <em>different keys</em> from
 /// <em>different salt domains</em> (the plaintext <c>.salt</c> sidecar unlocks
 /// the local database; the in-database <c>config.password_salt</c> derives the
-/// Azure key). This type fixes only the cost parameters and the salt byte
-/// length, not the salts themselves; the salt-domain separation is deliberate
-/// and unaffected.
+/// Azure key; the snapshot embeds its own salt). This type fixes only the cost
+/// parameters and the salt byte length, not the salts themselves.
 /// </para>
 /// </summary>
 internal static class KdfParameters
 {
     /// <summary>Argon2id lane count (degree of parallelism).</summary>
-    public const int Argon2DegreeOfParallelism = 8;
+    public const int Argon2DegreeOfParallelism = Crypto.KdfParameters.Argon2DegreeOfParallelism;
 
     /// <summary>Argon2id working-memory size in kibibytes (65,536 KiB = 64 MB).</summary>
-    public const int Argon2MemorySize = 65536;
+    public const int Argon2MemorySize = Crypto.KdfParameters.Argon2MemorySize;
 
     /// <summary>Argon2id iteration (time) cost.</summary>
-    public const int Argon2Iterations = 3;
+    public const int Argon2Iterations = Crypto.KdfParameters.Argon2Iterations;
 
     /// <summary>Salt length in bytes for both the local-unlock and Azure-key derivations.</summary>
-    public const int SaltSize = 16;
+    public const int SaltSize = Crypto.KdfParameters.SaltSize;
 }
