@@ -296,11 +296,14 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
             image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out salt);
         }
         catch (DbSnapshotException ex)
+            when (ex.InnerException is System.Security.Cryptography.AuthenticationTagMismatchException)
         {
-            // A snapshot authentication failure means the password is wrong (or
-            // the file was tampered with). Surface the same contract the unlock
-            // flow expects so the UI shows the standard retry prompt rather than a
-            // raw crypto error.
+            // Only the GCM authentication-tag failure means the password is wrong
+            // (or the file was tampered with). Surface the same contract the
+            // unlock flow expects so the UI shows the standard retry prompt.
+            // Structural snapshot errors (truncated, bad magic/version, CRC) keep
+            // their DbSnapshotException so corruption is not mislabelled as a bad
+            // password.
             throw new InvalidPasswordException("Invalid password. Please try again.", ex);
         }
         try
@@ -311,6 +314,93 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         {
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(image);
         }
+    }
+
+    /// <summary>
+    /// Reads the Azure-side <c>config.password_salt</c> out of a quarantined
+    /// application-level snapshot, for the rebuild-from-quarantine recovery flow.
+    /// Decrypts the AZDB snapshot at <paramref name="quarantinedSnapshotPath"/>
+    /// into a throwaway in-memory SQLite database (the quarantined file is never
+    /// modified) and returns the 16-byte salt that derives the Azure blob
+    /// encryption key, so a fresh catalog can be re-seeded to decrypt blobs that
+    /// were encrypted with the old key.
+    ///
+    /// <para>
+    /// Unlike the retired SQLCipher reader this needs NO <c>.salt</c> sidecar:
+    /// the snapshot's own envelope salt (a different salt domain) is embedded in
+    /// the AZDB blob and used only to derive the snapshot decryption key. The
+    /// password-correctness oracle is the AES-256-GCM authentication tag -- a
+    /// wrong password fails the tag and surfaces as
+    /// <see cref="InvalidPasswordException"/>, matching the unlock contract.
+    /// </para>
+    /// </summary>
+    /// <param name="quarantinedSnapshotPath">Path to the quarantined AZDB snapshot file.</param>
+    /// <param name="password">The password the quarantined catalog was protected with.</param>
+    /// <returns>
+    /// The 16-byte <c>config.password_salt</c>, or <c>null</c> if the row exists
+    /// but the column is NULL (no Azure content was ever encrypted with it).
+    /// </returns>
+    /// <exception cref="ArgumentException"><paramref name="quarantinedSnapshotPath"/> or the password is null/whitespace.</exception>
+    /// <exception cref="FileNotFoundException">The snapshot file does not exist.</exception>
+    /// <exception cref="DbSnapshotException">The file is not a valid AZDB snapshot or is corrupted.</exception>
+    /// <exception cref="InvalidPasswordException">The password does not match the quarantined snapshot.</exception>
+    internal static byte[]? ReadPasswordSaltFromQuarantinedSnapshot(
+        string quarantinedSnapshotPath, ReadOnlySpan<char> password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedSnapshotPath);
+        if (password.IsEmpty)
+            throw new ArgumentException("Password cannot be empty", nameof(password));
+        if (!File.Exists(quarantinedSnapshotPath))
+            throw new FileNotFoundException(
+                "Quarantined snapshot file does not exist.", quarantinedSnapshotPath);
+
+        var encrypted = File.ReadAllBytes(quarantinedSnapshotPath);
+        byte[] image;
+        byte[] key;
+        try
+        {
+            // The recovered key is not needed (we only read the salt); decrypt
+            // purely to validate the password and reach the config row.
+            image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out _);
+        }
+        catch (DbSnapshotException ex)
+            when (ex.InnerException is System.Security.Cryptography.AuthenticationTagMismatchException)
+        {
+            // Only the GCM authentication-tag failure means "wrong password"
+            // (or tampering). Structural errors (not an AZDB file, bad version,
+            // CRC failure, truncated) are NOT a password problem and must keep
+            // their DbSnapshotException so the UI shows "corrupted snapshot"
+            // rather than "wrong password".
+            throw new InvalidPasswordException(
+                "The password does not match the quarantined catalog.", ex);
+        }
+        System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
+
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = "azbk-quarantine-read-" + Guid.NewGuid().ToString("N"),
+            Mode = SqliteOpenMode.Memory,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+        }.ToString();
+
+        using var connection = new SqliteConnection(connectionString);
+        connection.Open();
+        try
+        {
+            SqliteSerialization.DeserializeInto(connection, image);
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(image);
+        }
+
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT password_salt FROM config WHERE id = 1;";
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read() || reader.IsDBNull(0))
+            return null;
+        return (byte[])reader.GetValue(0);
     }
 
     private void CloseInMemoryConnection()

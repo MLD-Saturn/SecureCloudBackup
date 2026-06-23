@@ -71,7 +71,7 @@ public class RebuildFromQuarantinedCatalogTests : IAsyncLifetime
         try { Directory.Delete(_testDir, recursive: true); } catch { /* best effort */ }
     }
 
-    [Fact(Skip = "Quarantine/rebuild recovery is coupled to the SQLCipher .salt sidecar and the SQLCipher catalog reader; it has not yet been ported to the application-level snapshot format (no sidecar; salt is embedded in the AZDB envelope). Tracked as a dedicated follow-up step after W4 Phase 6.")]
+    [Fact]
     public async Task RebuildFromQuarantinedCatalog_RestoresFilesFromAzure_AndPreservesPasswordSalt()
     {
         // Arrange: seed Azure with two complete files using the live
@@ -88,20 +88,18 @@ public class RebuildFromQuarantinedCatalogTests : IAsyncLifetime
         Assert.NotNull(originalSalt);
 
         // Act 1: quarantine the active catalog. This closes the live
-        // connection and renames the DB + salt sidecar to the
-        // .quarantine-yyyyMMdd-HHmmss suffix.
+        // connection and moves the AZDB snapshot to the
+        // .quarantine-yyyyMMdd-HHmmss suffix. The snapshot format has NO
+        // .salt sidecar (the salt is embedded in the envelope).
         var quarantine = await _orchestrator.QuarantineCorruptCatalogAsync(_dbPath);
         var quarantinedDbPath = quarantine.QuarantinedDatabasePath;
-        var quarantinedSaltPath = _dbPath + ".salt" + quarantinedDbPath[_dbPath.Length..];
         Assert.True(File.Exists(quarantinedDbPath));
-        Assert.True(File.Exists(quarantinedSaltPath));
         Assert.False(File.Exists(_dbPath), "active catalog path must be free after quarantine");
 
         // Act 2: rebuild a fresh catalog at the active path using the
-        // user-supplied connection details and the quarantined salt+DB.
+        // user-supplied connection details and the quarantined snapshot.
         await _orchestrator.RebuildFromQuarantinedCatalogAsync(
             quarantinedDbPath,
-            quarantinedSaltPath,
             TestPassword.AsMemory(),
             ConnectionString,
             ContainerName,
@@ -132,7 +130,7 @@ public class RebuildFromQuarantinedCatalogTests : IAsyncLifetime
         Assert.Single(restoredB!.Chunks);
     }
 
-    [Fact(Skip = "Quarantine/rebuild recovery is coupled to the SQLCipher .salt sidecar and the SQLCipher catalog reader; it has not yet been ported to the application-level snapshot format (no sidecar; salt is embedded in the AZDB envelope). Tracked as a dedicated follow-up step after W4 Phase 6.")]
+    [Fact]
     public async Task RebuildFromQuarantinedCatalog_WrongPassword_ThrowsInvalidPassword_LeavesActivePathFree()
     {
         // The rebuild must NOT initialise a fresh catalog at the active
@@ -142,13 +140,10 @@ public class RebuildFromQuarantinedCatalogTests : IAsyncLifetime
         await SeedFileAsync(@"C:\Backup\should-not-rebuild.txt", chunkCount: 1);
 
         var quarantine = await _orchestrator.QuarantineCorruptCatalogAsync(_dbPath);
-        var quarantinedSaltPath = _dbPath + ".salt"
-            + quarantine.QuarantinedDatabasePath[_dbPath.Length..];
 
         await Assert.ThrowsAsync<InvalidPasswordException>(() =>
             _orchestrator.RebuildFromQuarantinedCatalogAsync(
                 quarantine.QuarantinedDatabasePath,
-                quarantinedSaltPath,
                 "Definitely-Not-The-Password!".AsMemory(),
                 ConnectionString,
                 ContainerName,

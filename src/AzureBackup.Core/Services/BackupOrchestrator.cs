@@ -824,19 +824,19 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// The quarantined input files are NOT modified.
     /// </para>
     /// <para>
-    /// Distinguishing wrong passwords from partial decrypts is delegated
-    /// to the SQLCipher validate-key probe inside
-    /// <c>SqliteBackend.OpenAndUnlockCore</c>. A wrong password surfaces
-    /// as <see cref="Models.InvalidPasswordException"/> from this method;
+    /// Distinguishing wrong passwords from corrupted snapshots is delegated
+    /// to the AES-256-GCM authentication tag inside the AZDB envelope
+    /// (<c>InMemorySnapshotBackend.ReadPasswordSaltFromQuarantinedSnapshot</c>).
+    /// A wrong password fails the tag and surfaces as
+    /// <see cref="Models.InvalidPasswordException"/> from this method;
     /// a wrong Azure connection string surfaces as a connectivity error
     /// from <c>ChunkIndexService.RebuildIndexFromAzureAsync</c>.
     /// </para>
     /// </remarks>
     /// <param name="quarantinedDatabasePath">Path to the quarantined catalog (the
     /// <c>.quarantine-yyyyMMdd-HHmmss</c> file that <c>QuarantineCorruptCatalogAsync</c>
-    /// created). Opened read-only.</param>
-    /// <param name="quarantinedSaltPath">Path to the matching quarantined salt sidecar
-    /// (the <c>.salt.quarantine-yyyyMMdd-HHmmss</c> file).</param>
+    /// created). It is an application-level AES-256-GCM snapshot; opened read-only
+    /// (decrypted into a throwaway in-memory DB) and never modified.</param>
     /// <param name="password">The password the quarantined catalog was protected
     /// with. The same password becomes the new fresh-catalog password.</param>
     /// <param name="connectionString">Azure storage account connection string.
@@ -851,7 +851,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// Azure rebuild phase; the read-only extraction phase is fast and
     /// not cancellable.</param>
     /// <exception cref="ArgumentException">A path or password is null/whitespace.</exception>
-    /// <exception cref="FileNotFoundException">The quarantined DB or salt is missing.</exception>
+    /// <exception cref="FileNotFoundException">The quarantined snapshot is missing.</exception>
+    /// <exception cref="Crypto.DbSnapshotException">The quarantined file is not a valid AZDB snapshot or is corrupted.</exception>
     /// <exception cref="Models.InvalidPasswordException">The password does not match the quarantined catalog.</exception>
     /// <exception cref="InvalidOperationException">The quarantined catalog has no
     /// <c>password_salt</c> recorded -- nothing was ever encrypted with it, so
@@ -859,7 +860,6 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// instead.</exception>
     public async Task RebuildFromQuarantinedCatalogAsync(
         string quarantinedDatabasePath,
-        string quarantinedSaltPath,
         ReadOnlyMemory<char> password,
         string connectionString,
         string containerName,
@@ -868,7 +868,6 @@ public partial class BackupOrchestrator : IAsyncDisposable
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedDatabasePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedSaltPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         ArgumentException.ThrowIfNullOrWhiteSpace(freshDatabasePath);
@@ -883,29 +882,16 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 "service to repopulate the catalog from Azure metadata.");
         }
 
-        // W-DB-enc Step 7: this flow recovers the Azure-side salt by re-opening a
-        // legacy SQLCipher quarantined catalog, but AzureBackup.Core no longer
-        // ships a SQLCipher engine (CVE-2025-6965 fix). The quarantine/rebuild
-        // recovery has not yet been ported to the application-level snapshot
-        // format (the new snapshot has no `.salt` sidecar; its salt lives inside
-        // the AES-256-GCM envelope). Fail fast with a clear message instead of
-        // letting the SQLCipher reader throw deeper in. The recovery orchestration
-        // below is preserved for the future snapshot-format port; the only phase
-        // that needs reworking is the salt extraction. See AGENT_CONTEXT fact #71.
-        throw new NotSupportedException(
-            "Rebuild from a quarantined SQLCipher catalog is temporarily unavailable: " +
-            "AzureBackup.Core no longer contains a SQLCipher engine, and this recovery " +
-            "flow has not yet been ported to the application-level snapshot format.");
-
-#pragma warning disable CS0162 // Unreachable code: preserved for the snapshot-format port
         Log("RebuildFromQuarantinedCatalogAsync: starting");
         StatusChanged?.Invoke(this, "Reading password salt from quarantined catalog...");
 
         // Phase 1: extract the in-DB password_salt from the quarantined
-        // catalog. The validate-key probe inside the read-only open is the
-        // single oracle for password correctness.
-        var recoveredSalt = Backends.SqliteBackend.ReadPasswordSaltFromQuarantinedCatalog(
-            quarantinedDatabasePath, quarantinedSaltPath, password.Span);
+        // application-level snapshot. The AES-256-GCM authentication tag inside
+        // the AZDB envelope is the single oracle for password correctness -- a
+        // wrong password surfaces as InvalidPasswordException before any fresh
+        // catalog is created, so a typo cannot mask the recovery failure.
+        var recoveredSalt = Backends.InMemorySnapshotBackend.ReadPasswordSaltFromQuarantinedSnapshot(
+            quarantinedDatabasePath, password.Span);
         if (recoveredSalt == null)
         {
             throw new InvalidOperationException(
@@ -995,7 +981,6 @@ public partial class BackupOrchestrator : IAsyncDisposable
             "Catalog rebuild from quarantined source complete. The fresh catalog can be " +
             "unlocked with the same password you used for the quarantined one.");
         Log("RebuildFromQuarantinedCatalogAsync: complete");
-#pragma warning restore CS0162
     }
 
     /// <summary>

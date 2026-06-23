@@ -28,7 +28,6 @@ public partial class SettingsView : UserControl
         if (DataContext is MainWindowViewModel vm)
         {
             vm.RebuildQuarantinedDbPickerRequested += OnRebuildQuarantinedDbPickerRequested;
-            vm.RebuildQuarantinedSaltPickerRequested += OnRebuildQuarantinedSaltPickerRequested;
             _wiredVm = vm;
         }
     }
@@ -37,26 +36,23 @@ public partial class SettingsView : UserControl
     {
         if (_wiredVm is null) return;
         _wiredVm.RebuildQuarantinedDbPickerRequested -= OnRebuildQuarantinedDbPickerRequested;
-        _wiredVm.RebuildQuarantinedSaltPickerRequested -= OnRebuildQuarantinedSaltPickerRequested;
         _wiredVm = null;
     }
 
     private async void OnRebuildQuarantinedDbPickerRequested(object? sender, EventArgs e)
-        => await PickRebuildPathAsync(forSalt: false);
-
-    private async void OnRebuildQuarantinedSaltPickerRequested(object? sender, EventArgs e)
-        => await PickRebuildPathAsync(forSalt: true);
+        => await PickRebuildDbPathAsync();
 
     /// <summary>
-    /// B61: shared OS-file-picker handler for the rebuild form. Defaults
-    /// to <see cref="MainWindowViewModel.GetRebuildPickerStartDirectory"/>
+    /// B61: OS-file-picker handler for the rebuild form's quarantined-catalog
+    /// field. Defaults to
+    /// <see cref="MainWindowViewModel.GetRebuildPickerStartDirectory"/>
     /// (which prefers the directory of whatever the user already typed,
     /// falling back to the data directory). Filters the picker so the
     /// quarantine-suffixed files float to the top, but still allows
     /// "All files" so users who copied a quarantined file under a
     /// different name can still select it.
     /// </summary>
-    private async System.Threading.Tasks.Task PickRebuildPathAsync(bool forSalt)
+    private async System.Threading.Tasks.Task PickRebuildDbPathAsync()
     {
         // async void event handlers must never let an exception escape;
         // the wrapper logs and swallows so the UI process survives.
@@ -70,7 +66,7 @@ public partial class SettingsView : UserControl
             IStorageFolder? startFolder = null;
             try
             {
-                var startPath = vm.GetRebuildPickerStartDirectory(forSalt);
+                var startPath = vm.GetRebuildPickerStartDirectory();
                 if (!string.IsNullOrEmpty(startPath))
                 {
                     startFolder = await storage.TryGetFolderFromPathAsync(new Uri(startPath));
@@ -82,24 +78,18 @@ public partial class SettingsView : UserControl
                 // edge cases; falling back to no start location is fine.
             }
 
-            var quarantinePattern = forSalt
-                ? "backup.db.salt.quarantine-*"
-                : "backup.db.quarantine-*";
-
             var fileTypes = new List<FilePickerFileType>
             {
                 new("Quarantined catalog files")
                 {
-                    Patterns = new[] { quarantinePattern }
+                    Patterns = new[] { "backup.db.quarantine-*" }
                 },
                 FilePickerFileTypes.All,
             };
 
             var pick = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
             {
-                Title = forSalt
-                    ? "Select the quarantined salt sidecar"
-                    : "Select the quarantined database file",
+                Title = "Select the quarantined database file",
                 AllowMultiple = false,
                 SuggestedStartLocation = startFolder,
                 FileTypeFilter = fileTypes,
@@ -111,14 +101,7 @@ public partial class SettingsView : UserControl
             var path = uri.IsAbsoluteUri ? uri.LocalPath : uri.ToString();
             if (string.IsNullOrWhiteSpace(path)) return;
 
-            if (forSalt)
-            {
-                vm.SetRebuildQuarantinedSaltPath(path);
-            }
-            else
-            {
-                vm.SetRebuildQuarantinedDbPath(path);
-            }
+            vm.SetRebuildQuarantinedDbPath(path);
         }
         catch (Exception ex)
         {

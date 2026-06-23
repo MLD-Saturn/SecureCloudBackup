@@ -70,40 +70,6 @@ internal partial class SqliteBackend
         EmitDiag("OpenAndUnlock: connection unlocked successfully");
     }
 
-    /// <summary>
-    /// B51 (DISABLED in W-DB-enc Step 7): historically opened a quarantined
-    /// SQLCipher catalog read-only and returned its in-DB
-    /// <c>config.password_salt</c> for the rebuild-from-quarantine flow. Now
-    /// always throws <see cref="NotSupportedException"/>: <c>AzureBackup.Core</c>
-    /// no longer ships a SQLCipher engine (CVE-2025-6965 fix), and the
-    /// quarantine/rebuild recovery has not yet been ported to the
-    /// application-level snapshot format (the snapshot has no <c>.salt</c>
-    /// sidecar; its salt lives inside the AES-256-GCM envelope). See
-    /// AGENT_CONTEXT fact #71.
-    /// </summary>
-    /// <param name="quarantinedDatabasePath">Unused (the method throws before reading it).</param>
-    /// <param name="quarantinedSaltPath">Unused (the method throws before reading it).</param>
-    /// <param name="password">Unused (the method throws before reading it).</param>
-    /// <exception cref="NotSupportedException">Always: Core no longer contains a SQLCipher engine.</exception>
-    public static byte[]? ReadPasswordSaltFromQuarantinedCatalog(
-        string quarantinedDatabasePath,
-        string quarantinedSaltPath,
-        ReadOnlySpan<char> password)
-    {
-        // W-DB-enc Step 7: this reads a legacy SQLCipher quarantined catalog, but
-        // AzureBackup.Core no longer ships a SQLCipher engine (CVE-2025-6965 fix).
-        // The B51 quarantine/rebuild recovery flow has not yet been ported to the
-        // application-level snapshot format (the new snapshot has no `.salt`
-        // sidecar and stores its salt inside the AES-256-GCM envelope). Fail
-        // clearly here rather than running a cipher pragma on the modern engine
-        // (which aborts the process). See AGENT_CONTEXT fact #71.
-        throw new NotSupportedException(
-            "Reading the password salt from a quarantined SQLCipher catalog is not " +
-            "supported: AzureBackup.Core no longer contains a SQLCipher engine. The " +
-            "quarantine/rebuild recovery flow is pending a port to the application-level " +
-            "snapshot format.");
-    }
-
     private static SqliteConnection OpenAndUnlockCore(
         string databasePath, byte[] derivedKey,
         SqliteOpenMode mode, bool validateKey)

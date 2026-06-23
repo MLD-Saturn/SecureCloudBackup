@@ -465,29 +465,26 @@ public partial class MainWindowViewModel
     {
         IsRebuildFromQuarantinePending = true;
 
-        // B61: pre-populate paths from the data directory if a complete
-        // quarantine pair (matched by identical timestamp suffix) exists.
-        // We only overwrite empty fields so a user re-opening the form
-        // after a typo doesn't lose their in-progress edits.
-        var (defaultDb, defaultSalt) = QuarantineFileLocator.FindMostRecentQuarantinePair(AppMode.DataDirectory);
+        // B61: pre-populate the path from the data directory if a recent
+        // quarantined catalog exists. We only overwrite an empty field so a
+        // user re-opening the form after a typo doesn't lose their edits.
+        // (The snapshot format has no .salt sidecar, so only the DB path is
+        // pre-filled; the SaltPath element of the pair is ignored.)
+        var (defaultDb, _) = QuarantineFileLocator.FindMostRecentQuarantinePair(AppMode.DataDirectory);
         if (string.IsNullOrWhiteSpace(RebuildQuarantinedDbPath) && defaultDb is not null)
         {
             RebuildQuarantinedDbPath = defaultDb;
         }
-        if (string.IsNullOrWhiteSpace(RebuildQuarantinedSaltPath) && defaultSalt is not null)
-        {
-            RebuildQuarantinedSaltPath = defaultSalt;
-        }
 
-        if (defaultDb is not null && defaultSalt is not null)
+        if (defaultDb is not null)
         {
-            AddLog($"Rebuild from quarantined catalog requested. Pre-filled the most recent quarantine pair from {AppMode.DataDirectory}; " +
-                   "verify the paths, enter the original password, and supply the Azure connection string + container.");
+            AddLog($"Rebuild from quarantined catalog requested. Pre-filled the most recent quarantined catalog from {AppMode.DataDirectory}; " +
+                   "verify the path, enter the original password, and supply the Azure connection string + container.");
         }
         else
         {
             AddLog("Rebuild from quarantined catalog requested. Provide the quarantined database file, " +
-                   "the matching .salt sidecar, the original password used with the quarantined catalog, " +
+                   "the original password used with the quarantined catalog, " +
                    "and the Azure connection string + container that contain the backed-up data.");
         }
     }
@@ -505,16 +502,6 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
-    /// B61: command bound to the Browse button next to the quarantined
-    /// salt sidecar field.
-    /// </summary>
-    [RelayCommand]
-    private void BrowseRebuildQuarantinedSalt()
-    {
-        RebuildQuarantinedSaltPickerRequested?.Invoke(this, EventArgs.Empty);
-    }
-
-    /// <summary>
     /// B61: View callback that writes the file-picker result into the
     /// quarantined-database path field.
     /// </summary>
@@ -525,24 +512,14 @@ public partial class MainWindowViewModel
     }
 
     /// <summary>
-    /// B61: View callback that writes the file-picker result into the
-    /// quarantined-salt path field.
-    /// </summary>
-    public void SetRebuildQuarantinedSaltPath(string path)
-    {
-        if (string.IsNullOrWhiteSpace(path)) return;
-        RebuildQuarantinedSaltPath = path;
-    }
-
-    /// <summary>
     /// B61: directory the file picker should default to. Returns the
-    /// directory of whatever the user has already typed in the matching
-    /// path field (so re-Browse stays in the same folder), falling back
-    /// to <see cref="AppMode.DataDirectory"/> otherwise.
+    /// directory of whatever the user has already typed in the
+    /// quarantined-DB path field (so re-Browse stays in the same folder),
+    /// falling back to <see cref="AppMode.DataDirectory"/> otherwise.
     /// </summary>
-    public string GetRebuildPickerStartDirectory(bool forSalt)
+    public string GetRebuildPickerStartDirectory()
     {
-        var existing = forSalt ? RebuildQuarantinedSaltPath : RebuildQuarantinedDbPath;
+        var existing = RebuildQuarantinedDbPath;
         if (!string.IsNullOrWhiteSpace(existing))
         {
             try
@@ -579,7 +556,7 @@ public partial class MainWindowViewModel
     /// <see cref="BackupOrchestrator.RebuildFromQuarantinedCatalogAsync"/>
     /// against the active catalog path
     /// (<see cref="AppMode.DatabasePath"/>). Recovered failures
-    /// (wrong password, missing sidecar, mismatched salt size) are
+    /// (wrong password, missing snapshot, corrupted snapshot) are
     /// surfaced as user-readable log lines; the active catalog file
     /// is NOT created on a failed attempt.
     /// </summary>
@@ -593,12 +570,11 @@ public partial class MainWindowViewModel
         }
 
         if (string.IsNullOrWhiteSpace(RebuildQuarantinedDbPath) ||
-            string.IsNullOrWhiteSpace(RebuildQuarantinedSaltPath) ||
             string.IsNullOrWhiteSpace(RebuildQuarantinedPassword) ||
             string.IsNullOrWhiteSpace(RebuildConnectionString) ||
             string.IsNullOrWhiteSpace(RebuildContainerName))
         {
-            AddLog("All five fields are required: quarantined DB path, salt sidecar path, " +
+            AddLog("All four fields are required: quarantined catalog path, " +
                    "password, Azure connection string, and container name.");
             return;
         }
@@ -609,11 +585,9 @@ public partial class MainWindowViewModel
             var dbPath = AppMode.DatabasePath;
             AddLog($"Rebuilding fresh catalog at {dbPath} from quarantined source...");
             AddLog($"  Quarantined DB:   {RebuildQuarantinedDbPath}");
-            AddLog($"  Quarantined salt: {RebuildQuarantinedSaltPath}");
 
             await _orchestrator.RebuildFromQuarantinedCatalogAsync(
                 RebuildQuarantinedDbPath,
-                RebuildQuarantinedSaltPath,
                 RebuildQuarantinedPassword.AsMemory(),
                 RebuildConnectionString,
                 RebuildContainerName,

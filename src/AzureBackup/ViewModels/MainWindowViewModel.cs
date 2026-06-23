@@ -237,10 +237,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     [ObservableProperty]
     private string _rebuildQuarantinedDbPath = string.Empty;
 
-    /// <summary>B51: full path to the matching quarantined .salt sidecar.</summary>
-    [ObservableProperty]
-    private string _rebuildQuarantinedSaltPath = string.Empty;
-
     /// <summary>B51: original password the quarantined catalog was protected with.</summary>
     [ObservableProperty]
     private string _rebuildQuarantinedPassword = string.Empty;
@@ -1243,12 +1239,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <see cref="SetRebuildQuarantinedDbPath"/>.
     /// </summary>
     public event EventHandler? RebuildQuarantinedDbPickerRequested;
-
-    /// <summary>
-    /// B61: event raised when the rebuild form needs an OS file picker
-    /// to choose the quarantined salt sidecar.
-    /// </summary>
-    public event EventHandler? RebuildQuarantinedSaltPickerRequested;
 
     /// <summary>
     /// Event raised when a preview dialog is needed.
