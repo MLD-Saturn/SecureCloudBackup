@@ -437,6 +437,25 @@ public partial class AzureBlobService : IBlobStorageService
             : pool.Rent(minimumLength).Buffer;
 
     /// <summary>
+    /// B93: returns true when a streaming (parallel-range) download assembled
+    /// exactly the blob's declared content length, false on a short OR over
+    /// read. Extracted as a pure static so the byte-count invariant that
+    /// distinguishes a client-side assembly fault from genuine at-rest
+    /// corruption can be unit-tested without a live Azure connection.
+    /// <para>
+    /// A mismatch means the bytes in the buffer are NOT the full blob, so the
+    /// MD5 / CRC / AES-GCM checks downstream would fail deterministically and
+    /// look exactly like "data corrupted at rest" even though re-downloading
+    /// the chunk would succeed. Callers must treat a false result as a
+    /// retryable <see cref="DownloadIntegrityException"/>.
+    /// </para>
+    /// </summary>
+    /// <param name="assembledLength">Bytes the parallel assembly actually wrote (MemoryStream.Position).</param>
+    /// <param name="declaredContentLength">The blob's ContentLength from its properties.</param>
+    internal static bool IsAssembledLengthComplete(long assembledLength, long declaredContentLength)
+        => assembledLength == declaredContentLength;
+
+    /// <summary>
     /// B73 (W5 Phase 4 Commit 2): return an encrypted scratch buffer to the
     /// source it was rented from. Buffers rented from
     /// <see cref="ArrayPool{T}.Shared"/> are zeroed on return so the encrypted
@@ -1101,6 +1120,26 @@ public partial class AzureBlobService : IBlobStorageService
         {
             try
             {
+                // B93 upload-integrity audit: this method is the ONLY place a chunk's
+                // bytes leave the client, and it is corruption-safe by construction:
+                //   (1) ContentHash is computed over the EXACT span [0, dataLength) of
+                //       `data` that is then wrapped in the MemoryStream and uploaded --
+                //       same buffer, same length, no copy in between.
+                //   (2) Setting ContentHash makes Azure perform SERVER-SIDE MD5
+                //       verification: it recomputes MD5 over the bytes it actually
+                //       received and rejects the PUT with HTTP 400 (Md5Mismatch) if
+                //       they differ, so an in-transit corruption during upload is
+                //       caught by Azure and retried by this loop rather than silently
+                //       persisting bad bytes. Even a (theoretical) torn buffer between
+                //       the hash and the stream read is caught, because the header MD5
+                //       and the received bytes would then diverge.
+                // The guard below protects against a future caller passing a dataLength
+                // that exceeds the buffer -- which would otherwise hash/upload garbage
+                // past the valid region. It can only fire on a programming error.
+                if (dataLength < 0 || dataLength > data.Length)
+                    throw new ArgumentOutOfRangeException(nameof(dataLength),
+                        $"dataLength {dataLength} is outside buffer bounds [0, {data.Length}] for {logContext}");
+
                 // Compute MD5 for Azure server-side verification
                 options.HttpHeaders ??= new BlobHttpHeaders();
                 options.HttpHeaders.ContentHash = MD5.HashData(data.AsSpan(0, dataLength));

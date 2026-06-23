@@ -59,6 +59,16 @@ public partial class AzureBlobService
             var rentedEncrypted = RentEncryptedBuffer(contentMemory.Length, encryptedBufferPool);
             try
             {
+                // B93: unlike DownloadChunkStreamingAsync, this path is immune to the
+                // short-read / stale-pool-tail class of bug because it does NOT use
+                // parallel range assembly. `DownloadContentAsync` returns the whole
+                // blob body atomically; `contentMemory.Length` is the SDK-confirmed
+                // body length, `CopyTo` copies exactly that many bytes into index 0,
+                // and the MD5 span below is bounded to the SAME length -- so the
+                // possibly-oversized pooled buffer's tail can never enter the hash.
+                // No byte-count assertion is needed here; the lengths are equal by
+                // construction. Keep it that way: do not "harden" this to mirror the
+                // streaming path, that would add a guard that can never fire.
                 contentMemory.Span.CopyTo(rentedEncrypted);
                 var bytesRead = contentMemory.Length;
 
@@ -282,6 +292,30 @@ public partial class AzureBlobService
                 };
                 await blobClient.DownloadToAsync(memoryStream, downloadOptions, cancellationToken);
                 var bytesRead = (int)memoryStream.Position;
+
+                // B93: the streaming path assembles the blob from up to 8 parallel
+                // range requests into one caller-supplied MemoryStream over a POOLED
+                // (and therefore possibly-stale, non-zeroed) buffer. If the parallel
+                // assembly ends with the stream position NOT exactly equal to the
+                // blob's content length -- a short read the SDK did not surface as an
+                // error, a range that silently under-delivered, or an off-by-a-block
+                // accounting slip -- then the MD5 below would run over the WRONG number
+                // of bytes (or over leftover bytes from the pool's previous tenant) and
+                // fail deterministically, masquerading as "data corrupted at rest" when
+                // the blob in Azure is actually fine. Catch that here and surface it as
+                // a retryable DownloadIntegrityException so the restore pipeline
+                // re-downloads the chunk (a fresh assembly almost always succeeds)
+                // instead of failing the file and zero-filling a perfectly good chunk.
+                if (!IsAssembledLengthComplete(bytesRead, contentLength))
+                {
+                    FileOperationDiagnostics.RecordChunkAmbient("ShortRead", chunkHash,
+                        0, bytesRead,
+                        extra: $"expectedLen={contentLength}, gotLen={bytesRead} (parallel-range assembly incomplete)");
+                    Log($"DownloadChunkStreamingAsync: SHORT/OVER READ for {blobName} -- " +
+                        $"expected {contentLength:N0} bytes, assembled {bytesRead:N0}; retrying as transient");
+                    throw new DownloadIntegrityException(
+                        $"Download incomplete for {blobName} - assembled {bytesRead:N0} of {contentLength:N0} bytes", blobName);
+                }
 
                 VerifyDownloadIntegrity(rentedEncrypted.AsSpan(0, bytesRead),
                     storedContentHash, blobName, chunkHash, "DownloadChunkStreamingAsync");
