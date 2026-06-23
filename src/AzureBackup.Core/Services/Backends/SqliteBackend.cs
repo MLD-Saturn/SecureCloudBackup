@@ -24,12 +24,12 @@ namespace AzureBackup.Core.Services.Backends;
 /// already done the stronger Argon2id KDF on the way in.
 /// </para>
 /// </summary>
-internal sealed partial class SqliteBackend : IDatabaseBackend
+internal partial class SqliteBackend : IDatabaseBackend
 {
     private const int DerivedKeySize = 32;
 
-    private SqliteConnection? _connection;
-    private string? _databasePath;
+    private protected SqliteConnection? _connection;
+    private protected string? _databasePath;
 
     /// <summary>
     /// Single-writer reader-writer lock used by every method that begins
@@ -66,7 +66,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// with each other but mutually excludes readers from writers.
     /// </para>
     /// </summary>
-    private readonly System.Threading.ReaderWriterLockSlim _writeLock
+    private protected readonly System.Threading.ReaderWriterLockSlim _writeLock
         = new(System.Threading.LockRecursionPolicy.NoRecursion);
 
     /// <summary>
@@ -84,7 +84,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// (<c>BackupOrchestrator.RunBackupLoopAsync</c>) could deref a null
     /// connection if the user closed the database mid-backup.
     /// </remarks>
-    private void InWriteLock(Action action)
+    private protected void InWriteLock(Action action)
     {
         _writeLock.EnterWriteLock();
         try
@@ -100,7 +100,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// Generic variant of <see cref="InWriteLock(Action)"/> for writers
     /// that need to return a value (e.g. row counts from DELETE).
     /// </summary>
-    private T InWriteLock<T>(Func<T> action)
+    private protected T InWriteLock<T>(Func<T> action)
     {
         _writeLock.EnterWriteLock();
         try
@@ -146,7 +146,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// is preserved so call sites still document intent.
     /// </para>
     /// </summary>
-    private T InReadLock<T>(Func<T> action)
+    private protected T InReadLock<T>(Func<T> action)
     {
         _writeLock.EnterWriteLock();
         try
@@ -192,7 +192,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// that DIAGNOSTICLOG-disabled builds emit no logging of any kind.
     /// </summary>
     [System.Diagnostics.Conditional("DIAGNOSTICLOG")]
-    private void EmitDiag(string message)
+    private protected void EmitDiag(string message)
     {
         var timestamp = DateTime.Now.ToString("HH:mm:ss.fff");
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [SqliteBackend] {message}");
@@ -229,7 +229,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// <paramref name="password"/> using Argon2id and the stored salt; if the
     /// salt file does not exist a fresh one is generated.
     /// </summary>
-    public void Initialize(string databasePath, ReadOnlySpan<char> password)
+    public virtual void Initialize(string databasePath, ReadOnlySpan<char> password)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(databasePath);
         if (password.IsEmpty)
@@ -314,7 +314,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// shutdown-time checkpoint that <c>CloseConnectionInternal</c>
     /// performs from inside the write lock.
     /// </remarks>
-    public void Checkpoint()
+    public virtual void Checkpoint()
     {
         if (_connection == null)
             throw new InvalidOperationException("Backend is not initialized.");
@@ -343,7 +343,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     // secure reset / ambient diag wiring); each partial owns one
     // responsibility and stays under ~550 lines.
 
-    public void Close()
+    public virtual void Close()
     {
         // B22: diag breadcrumb so the session log records every close
         // attempt -- including the rare "lock already disposed" branch
@@ -427,7 +427,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
         }
     }
 
-    public void Dispose()
+    public virtual void Dispose()
     {
         Close();
         // Dispose the lock once; harmless if Dispose was called more than
@@ -450,7 +450,7 @@ internal sealed partial class SqliteBackend : IDatabaseBackend
     /// encrypted at rest so raw-data remanence is not a concern; the goal
     /// is just "file gone" from the user's perspective.
     /// </remarks>
-    public void SecureReset()
+    public virtual void SecureReset()
     {
         var path = _databasePath;
         EmitDiag($"SecureReset: enter (path={path ?? "(null)"})");

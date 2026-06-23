@@ -8,7 +8,7 @@ namespace AzureBackup.Core.Services.Backends;
 /// itself (NOT the user-visible Data Integrity feature, which checks
 /// backed-up files against Azure storage).
 /// </summary>
-internal sealed partial class SqliteBackend
+internal partial class SqliteBackend
 {
     /// <summary>
     /// Runs <c>PRAGMA cipher_integrity_check</c> followed by

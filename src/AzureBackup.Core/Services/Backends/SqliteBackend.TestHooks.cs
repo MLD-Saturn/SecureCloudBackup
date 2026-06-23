@@ -5,7 +5,7 @@ namespace AzureBackup.Core.Services.Backends;
 /// version, and the schema table count. Lives in its own partial because
 /// production code never calls these.
 /// </summary>
-internal sealed partial class SqliteBackend
+internal partial class SqliteBackend
 {
 
     /// <summary>

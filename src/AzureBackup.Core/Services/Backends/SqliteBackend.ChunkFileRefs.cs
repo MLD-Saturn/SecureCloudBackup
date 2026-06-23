@@ -3,7 +3,7 @@ using Microsoft.Data.Sqlite;
 
 namespace AzureBackup.Core.Services.Backends;
 
-internal sealed partial class SqliteBackend
+internal partial class SqliteBackend
 {
 
     // ---- chunk_file_refs internal helpers ----------------------------------

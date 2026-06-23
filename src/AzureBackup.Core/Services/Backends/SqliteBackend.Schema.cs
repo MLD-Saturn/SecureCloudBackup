@@ -12,7 +12,7 @@ namespace AzureBackup.Core.Services.Backends;
 /// file focused (the root file owns lifecycle, this one owns the
 /// open/setup pipeline).
 /// </summary>
-internal sealed partial class SqliteBackend
+internal partial class SqliteBackend
 {
     private static byte[] LoadOrCreateSalt(string databasePath)
     {
@@ -450,7 +450,7 @@ internal sealed partial class SqliteBackend
         }
     }
 
-    private void ApplyPragmas()
+    private protected void ApplyPragmas()
     {
         if (_connection == null) return;
 
@@ -480,7 +480,7 @@ internal sealed partial class SqliteBackend
         cmd.ExecuteNonQuery();
     }
 
-    private void CreateSchema()
+    private protected void CreateSchema()
     {
         if (_connection == null) return;
 
