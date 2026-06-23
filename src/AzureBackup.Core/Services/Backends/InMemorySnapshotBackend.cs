@@ -46,16 +46,24 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
 
     private string? _snapshotPath;
 
-    // The password is retained (as a char[]) for the lifetime of the open
-    // backend because every persist (Checkpoint/Close) must re-derive the
-    // snapshot key. Zeroed on Close/Dispose/SecureReset.
-    private char[]? _password;
+    // The snapshot encryption key (32 bytes) and its salt are derived ONCE at
+    // Initialize and cached for the open lifetime so each Checkpoint/Close does
+    // NOT pay the ~64 MB Argon2id cost again. The password is never retained.
+    // A fresh random nonce is still generated per write (see DbSnapshotEnvelope).
+    // Both are zeroed on Close/Dispose/SecureReset.
+    private byte[]? _snapshotKey;
+    private byte[]? _snapshotSalt;
+
+    // Set once Close/SecureReset has run so a subsequent Dispose does not persist
+    // a second time (idempotent, avoids a redundant serialize + write).
+    private bool _closed;
 
     /// <summary>
     /// Opens an in-memory SQLite database and either loads the existing
     /// encrypted snapshot at <paramref name="databasePath"/> into it (decrypting
     /// with <paramref name="password"/>) or creates the schema fresh when no
-    /// snapshot exists.
+    /// snapshot exists. The Argon2id snapshot key is derived once here and cached
+    /// for the session.
     /// </summary>
     public override void Initialize(string databasePath, ReadOnlySpan<char> password)
     {
@@ -71,7 +79,7 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         // code change here.
         _databasePath = databasePath;
         _snapshotPath = databasePath;
-        _password = password.ToArray();
+        _closed = false;
         EmitDiag($"InMemorySnapshotBackend.Initialize: starting (path={databasePath})");
 
         var directory = Path.GetDirectoryName(databasePath);
@@ -97,7 +105,15 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
             if (snapshotExists)
             {
                 EmitDiag("InMemorySnapshotBackend.Initialize: loading existing snapshot");
-                LoadSnapshotInto(connection, _snapshotPath, password);
+                LoadSnapshotInto(connection, _snapshotPath, password, out _snapshotKey, out _snapshotSalt);
+            }
+            else
+            {
+                // Fresh catalog: derive a key from a new random salt once; reused
+                // for every persist this session.
+                _snapshotSalt = System.Security.Cryptography.RandomNumberGenerator.GetBytes(KdfParameters.SaltSize);
+                _snapshotKey = Argon2idDeriver.DeriveKey(password, _snapshotSalt, "database snapshot key",
+                    diag: msg => EmitDiag(msg));
             }
 
             ApplyPragmas();
@@ -109,7 +125,7 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
             // On any failure leave no half-open connection or retained secret.
             _connection = null;
             try { connection.Dispose(); } catch { /* best effort */ }
-            ZeroPassword();
+            ZeroKeyMaterial();
             throw;
         }
     }
@@ -129,7 +145,7 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         InWriteLock(() => PersistSnapshotUnlocked());
     }
 
-    /// <summary>Persists and then closes the in-memory database.</summary>
+    /// <summary>Persists and then closes the in-memory database. Idempotent.</summary>
     public override void Close()
     {
         EmitDiag("InMemorySnapshotBackend.Close: enter");
@@ -141,31 +157,36 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         {
             // Lock already disposed; nothing safe to persist.
             CloseInMemoryConnection();
-            ZeroPassword();
+            ZeroKeyMaterial();
+            _closed = true;
             return;
         }
 
         try
         {
-            if (_connection != null)
+            // Persist only the FIRST time Close runs (a later Dispose-after-Close
+            // must not serialize + write a second time).
+            if (_connection != null && !_closed)
             {
                 try { PersistSnapshotUnlocked(); }
                 catch (Exception ex) { EmitDiag($"InMemorySnapshotBackend.Close: final persist failed (best-effort) -- {ex.GetType().Name}: {ex.Message}"); }
             }
             CloseInMemoryConnection();
+            _closed = true;
         }
         finally
         {
             try { _writeLock.ExitWriteLock(); } catch { /* lock already gone */ }
-            ZeroPassword();
+            ZeroKeyMaterial();
         }
         EmitDiag("InMemorySnapshotBackend.Close: exit");
     }
 
     /// <summary>
-    /// Closes the in-memory database (persisting first) and securely deletes the
-    /// on-disk snapshot. Because the database is in memory, there are no WAL/SHM
-    /// or salt sidecar files to remove -- only the single snapshot file.
+    /// Closes the in-memory database and securely deletes the on-disk snapshot.
+    /// Does NOT persist (the database is being destroyed). Because the database
+    /// is in memory, there are no WAL/SHM or salt sidecar files to remove --
+    /// only the single snapshot file.
     /// </summary>
     public override void SecureReset()
     {
@@ -198,9 +219,9 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         }
 
         // Close WITHOUT persisting -- we are destroying the database.
-        try { _writeLock.EnterWriteLock(); } catch { CloseInMemoryConnection(); ZeroPassword(); }
-        try { CloseInMemoryConnection(); }
-        finally { try { _writeLock.ExitWriteLock(); } catch { } ZeroPassword(); }
+        try { _writeLock.EnterWriteLock(); } catch { CloseInMemoryConnection(); ZeroKeyMaterial(); _closed = true; }
+        try { CloseInMemoryConnection(); _closed = true; }
+        finally { try { _writeLock.ExitWriteLock(); } catch { } ZeroKeyMaterial(); }
 
         if (!string.IsNullOrEmpty(path))
         {
@@ -223,18 +244,21 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
     // ---- helpers ------------------------------------------------------------
 
     /// <summary>
-    /// Serializes the in-memory database, encrypts it, and writes it atomically.
-    /// Caller must hold the write lock.
+    /// Serializes the in-memory database, encrypts it with the cached session
+    /// key (no per-write KDF), and writes it atomically. Caller must hold the
+    /// write lock.
     /// </summary>
     private void PersistSnapshotUnlocked()
     {
-        if (_connection == null || _snapshotPath == null || _password == null)
+        if (_connection == null || _snapshotPath == null || _snapshotKey == null || _snapshotSalt == null)
             return;
 
         var image = SerializeDatabase(_connection);
         try
         {
-            var encrypted = DbSnapshotEnvelope.Encrypt(image, _password);
+            // Uses the cached key + salt; a fresh nonce is generated per write
+            // inside the envelope, so the (key, nonce) pair is never reused.
+            var encrypted = DbSnapshotEnvelope.Encrypt(image, _snapshotKey, _snapshotSalt);
             AtomicWrite(_snapshotPath, encrypted);
             EmitDiag($"InMemorySnapshotBackend: persisted snapshot ({encrypted.Length} bytes)");
         }
@@ -247,12 +271,16 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
 
     /// <summary>
     /// Decrypts the snapshot at <paramref name="path"/> and deserializes it into
-    /// the open in-memory <paramref name="connection"/>.
+    /// the open in-memory <paramref name="connection"/>, returning the derived
+    /// key and salt so the backend can re-encrypt subsequent snapshots without
+    /// re-running the KDF.
     /// </summary>
-    private static void LoadSnapshotInto(SqliteConnection connection, string path, ReadOnlySpan<char> password)
+    private static void LoadSnapshotInto(
+        SqliteConnection connection, string path, ReadOnlySpan<char> password,
+        out byte[] key, out byte[] salt)
     {
         var encrypted = File.ReadAllBytes(path);
-        var image = DbSnapshotEnvelope.Decrypt(encrypted, password);
+        var image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out salt);
         try
         {
             DeserializeInto(connection, image);
@@ -332,11 +360,21 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
     }
 
     /// <summary>
-    /// Writes <paramref name="bytes"/> to <paramref name="path"/> atomically:
-    /// a temp file in the same directory is written and flushed to disk, then
-    /// renamed over the destination so a crash mid-write leaves the previous
-    /// good snapshot intact.
+    /// Writes <paramref name="bytes"/> to <paramref name="path"/> via a
+    /// write-temp-then-atomic-rename sequence. The bytes are written to a temp
+    /// file in the same directory and flushed to disk, and only then is the temp
+    /// atomically renamed over the destination.
     /// </summary>
+    /// <remarks>
+    /// Crash-safety guarantee: because the destination is replaced by a single
+    /// atomic rename (<c>MoveFileEx</c> / <c>rename</c>) performed only AFTER the
+    /// new content is fully written and flushed, a crash or failure at any point
+    /// BEFORE the rename leaves the previous complete snapshot intact, and the
+    /// rename transitions the destination from the old complete file to the new
+    /// complete file with no observable partial state. (A failure injected at the
+    /// rename step itself is not part of this guarantee -- the OS rename is the
+    /// atomic commit point.)
+    /// </remarks>
     private static void AtomicWrite(string path, byte[] bytes)
     {
         var dir = Path.GetDirectoryName(path) ?? ".";
@@ -349,7 +387,8 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
                 fs.Flush(flushToDisk: true);
             }
 
-            // File.Move with overwrite is atomic on the same volume on modern .NET.
+            // Atomic replace: maps to MoveFileEx(MOVEFILE_REPLACE_EXISTING) on
+            // Windows and rename(2) on Unix, both atomic on the same volume.
             File.Move(temp, path, overwrite: true);
         }
         finally
@@ -371,12 +410,15 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         }
     }
 
-    private void ZeroPassword()
+    private void ZeroKeyMaterial()
     {
-        if (_password != null)
+        if (_snapshotKey != null)
         {
-            Array.Clear(_password);
-            _password = null;
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(_snapshotKey);
+            _snapshotKey = null;
         }
+        // The salt is not secret, but clear the reference so a reused instance
+        // cannot accidentally encrypt with a stale salt after close.
+        _snapshotSalt = null;
     }
 }

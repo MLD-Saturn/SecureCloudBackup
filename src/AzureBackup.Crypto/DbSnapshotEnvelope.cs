@@ -1,8 +1,6 @@
 using System.Buffers.Binary;
 using System.IO.Hashing;
 using System.Security.Cryptography;
-using Konscious.Security.Cryptography;
-using System.Text;
 
 namespace AzureBackup.Crypto;
 
@@ -68,8 +66,16 @@ public static class DbSnapshotEnvelope
     /// <summary>
     /// Encrypts <paramref name="serializedImage"/> (a serialized SQLite image)
     /// into a self-describing snapshot blob keyed by <paramref name="password"/>.
-    /// A fresh random salt and nonce are generated each call.
+    /// A fresh random salt and nonce are generated each call, and the Argon2id key
+    /// is derived (and zeroed) internally.
     /// </summary>
+    /// <remarks>
+    /// This convenience overload runs the full Argon2id KDF every call. Callers
+    /// that persist repeatedly within a session (e.g. the in-memory snapshot
+    /// backend's checkpoint loop) should instead derive the key once via
+    /// <see cref="Argon2idDeriver"/> and use <see cref="Encrypt(ReadOnlySpan{byte}, byte[], byte[])"/>
+    /// so they do not pay the 64 MB KDF cost on every write.
+    /// </remarks>
     /// <param name="serializedImage">The plain SQLite image bytes to protect.</param>
     /// <param name="password">The user's password; the key is derived via Argon2id.</param>
     /// <returns>The encrypted snapshot blob, safe to write to disk.</returns>
@@ -79,37 +85,62 @@ public static class DbSnapshotEnvelope
             throw new ArgumentException("Password cannot be empty.", nameof(password));
 
         var salt = RandomNumberGenerator.GetBytes(SaltSize);
-        var nonce = RandomNumberGenerator.GetBytes(NonceSize);
-        var key = DeriveKey(password, salt);
+        var key = Argon2idDeriver.DeriveKey(password, salt, "database snapshot key");
         try
         {
-            var ciphertext = new byte[serializedImage.Length];
-            var tag = new byte[TagSize];
-            using (var gcm = new AesGcm(key, TagSize))
-            {
-                gcm.Encrypt(nonce, serializedImage, ciphertext, tag);
-            }
-
-            var output = new byte[FixedOverhead + serializedImage.Length];
-            var pos = 0;
-            Magic.CopyTo(output.AsSpan(pos)); pos += MagicSize;
-            output[pos] = CurrentVersion; pos += VersionSize;
-            salt.CopyTo(output.AsSpan(pos)); pos += SaltSize;
-            nonce.CopyTo(output.AsSpan(pos)); pos += NonceSize;
-            ciphertext.CopyTo(output.AsSpan(pos)); pos += ciphertext.Length;
-            tag.CopyTo(output.AsSpan(pos)); pos += TagSize;
-
-            // CRC32 over everything written so far (magic..tag), excluding the
-            // 4-byte CRC slot itself.
-            var crc = Crc32.HashToUInt32(output.AsSpan(0, pos));
-            BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(pos), crc);
-
-            return output;
+            return Encrypt(serializedImage, key, salt);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(key);
         }
+    }
+
+    /// <summary>
+    /// Encrypts <paramref name="serializedImage"/> using a pre-derived 32-byte
+    /// <paramref name="key"/> and its <paramref name="salt"/> (which is embedded in
+    /// the output so the matching <see cref="Decrypt(ReadOnlySpan{byte}, ReadOnlySpan{char})"/>
+    /// can re-derive the same key). A fresh random nonce is generated each call --
+    /// the key may be reused across writes but the nonce MUST NOT, so this method
+    /// always allocates a new one.
+    /// </summary>
+    /// <param name="serializedImage">The plain SQLite image bytes to protect.</param>
+    /// <param name="key">The 32-byte AES-256 key (e.g. from <see cref="Argon2idDeriver.DeriveKey"/>).</param>
+    /// <param name="salt">The <see cref="KdfParameters.SaltSize"/>-byte salt that produced <paramref name="key"/>.</param>
+    public static byte[] Encrypt(ReadOnlySpan<byte> serializedImage, byte[] key, byte[] salt)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ArgumentNullException.ThrowIfNull(salt);
+        if (key.Length != KdfParameters.DerivedKeySize)
+            throw new ArgumentException($"Key must be {KdfParameters.DerivedKeySize} bytes.", nameof(key));
+        if (salt.Length != SaltSize)
+            throw new ArgumentException($"Salt must be {SaltSize} bytes.", nameof(salt));
+
+        // Fresh nonce per write -- never reuse a (key, nonce) pair under GCM.
+        var nonce = RandomNumberGenerator.GetBytes(NonceSize);
+
+        var ciphertext = new byte[serializedImage.Length];
+        var tag = new byte[TagSize];
+        using (var gcm = new AesGcm(key, TagSize))
+        {
+            gcm.Encrypt(nonce, serializedImage, ciphertext, tag);
+        }
+
+        var output = new byte[FixedOverhead + serializedImage.Length];
+        var pos = 0;
+        Magic.CopyTo(output.AsSpan(pos)); pos += MagicSize;
+        output[pos] = CurrentVersion; pos += VersionSize;
+        salt.CopyTo(output.AsSpan(pos)); pos += SaltSize;
+        nonce.CopyTo(output.AsSpan(pos)); pos += NonceSize;
+        ciphertext.CopyTo(output.AsSpan(pos)); pos += ciphertext.Length;
+        tag.CopyTo(output.AsSpan(pos)); pos += TagSize;
+
+        // CRC32 over everything written so far (magic..tag), excluding the
+        // 4-byte CRC slot itself.
+        var crc = Crc32.HashToUInt32(output.AsSpan(0, pos));
+        BinaryPrimitives.WriteUInt32LittleEndian(output.AsSpan(pos), crc);
+
+        return output;
     }
 
     /// <summary>
@@ -121,6 +152,21 @@ public static class DbSnapshotEnvelope
     /// password is wrong / the data was tampered with (GCM authentication fail).
     /// </exception>
     public static byte[] Decrypt(ReadOnlySpan<byte> snapshot, ReadOnlySpan<char> password)
+        => DecryptAndExtractKey(snapshot, password, out _, out _);
+
+    /// <summary>
+    /// Decrypts a snapshot and ALSO returns the derived <paramref name="key"/> and
+    /// its <paramref name="salt"/> so the caller can keep them to re-encrypt
+    /// subsequent snapshots within the same session WITHOUT paying the Argon2id
+    /// cost again (passing them to <see cref="Encrypt(ReadOnlySpan{byte}, byte[], byte[])"/>).
+    /// The caller OWNS <paramref name="key"/> and must zero it when done.
+    /// </summary>
+    /// <exception cref="DbSnapshotException">
+    /// The blob is malformed, the CRC fails, the version is unsupported, or the
+    /// password is wrong / the data was tampered with (GCM authentication fail).
+    /// </exception>
+    public static byte[] DecryptAndExtractKey(
+        ReadOnlySpan<byte> snapshot, ReadOnlySpan<char> password, out byte[] key, out byte[] salt)
     {
         if (password.IsEmpty)
             throw new ArgumentException("Password cannot be empty.", nameof(password));
@@ -142,7 +188,7 @@ public static class DbSnapshotEnvelope
         if (expectedCrc != actualCrc)
             throw new DbSnapshotException("Snapshot CRC mismatch (file is corrupted).");
 
-        var salt = snapshot.Slice(pos, SaltSize).ToArray(); pos += SaltSize;
+        var saltLocal = snapshot.Slice(pos, SaltSize).ToArray(); pos += SaltSize;
         var nonce = snapshot.Slice(pos, NonceSize); pos += NonceSize;
         var cipherLength = crcOffset - TagSize - pos;
         if (cipherLength < 0)
@@ -150,14 +196,18 @@ public static class DbSnapshotEnvelope
         var ciphertext = snapshot.Slice(pos, cipherLength);
         var tag = snapshot.Slice(pos + cipherLength, TagSize);
 
-        var key = DeriveKey(password, salt);
+        var keyLocal = Argon2idDeriver.DeriveKey(password, saltLocal, "database snapshot key");
         try
         {
             var plaintext = new byte[cipherLength];
-            using (var gcm = new AesGcm(key, TagSize))
+            using (var gcm = new AesGcm(keyLocal, TagSize))
             {
                 gcm.Decrypt(nonce, ciphertext, tag, plaintext);
             }
+            // Success: hand the key + salt to the caller (who now owns the key).
+            key = keyLocal;
+            salt = saltLocal;
+            keyLocal = null!; // prevent the finally from zeroing the caller's key
             return plaintext;
         }
         catch (AuthenticationTagMismatchException ex)
@@ -167,7 +217,8 @@ public static class DbSnapshotEnvelope
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(key);
+            if (keyLocal != null)
+                CryptographicOperations.ZeroMemory(keyLocal);
         }
     }
 
@@ -178,24 +229,4 @@ public static class DbSnapshotEnvelope
     /// </summary>
     public static bool HasMagic(ReadOnlySpan<byte> data)
         => data.Length >= MagicSize && data[..MagicSize].SequenceEqual(Magic);
-
-    private static byte[] DeriveKey(ReadOnlySpan<char> password, byte[] salt)
-    {
-        var passwordBytes = Encoding.UTF8.GetBytes(password.ToArray());
-        try
-        {
-            using var argon2 = new Argon2id(passwordBytes)
-            {
-                Salt = salt,
-                DegreeOfParallelism = KdfParameters.Argon2DegreeOfParallelism,
-                MemorySize = KdfParameters.Argon2MemorySize,
-                Iterations = KdfParameters.Argon2Iterations,
-            };
-            return argon2.GetBytes(KdfParameters.DerivedKeySize);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(passwordBytes);
-        }
-    }
 }

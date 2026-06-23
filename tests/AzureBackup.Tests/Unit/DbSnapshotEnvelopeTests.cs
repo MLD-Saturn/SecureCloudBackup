@@ -137,4 +137,57 @@ public class DbSnapshotEnvelopeTests
 
         Assert.Empty(recovered);
     }
+
+    [Fact]
+    public void DecryptAndExtractKey_ReturnsKeyAndSalt_UsableForReEncrypt()
+    {
+        var image = SampleImage(256);
+        var snapshot = DbSnapshotEnvelope.Encrypt(image, "pw");
+
+        var recovered = DbSnapshotEnvelope.DecryptAndExtractKey(snapshot, "pw", out var key, out var salt);
+
+        Assert.Equal(image, recovered);
+        Assert.Equal(32, key.Length);
+        Assert.Equal(KdfParameters.SaltSize, salt.Length);
+
+        // The extracted key+salt must round-trip a NEW image with the cheap overload.
+        var image2 = SampleImage(512);
+        var snapshot2 = DbSnapshotEnvelope.Encrypt(image2, key, salt);
+        var recovered2 = DbSnapshotEnvelope.Decrypt(snapshot2, "pw");
+        Assert.Equal(image2, recovered2);
+    }
+
+    [Fact]
+    public void Encrypt_WithKeyAndSalt_TwoCalls_UseDifferentNonces()
+    {
+        var image = SampleImage(256);
+        var key = new byte[32];
+        var salt = new byte[KdfParameters.SaltSize];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(key);
+        System.Security.Cryptography.RandomNumberGenerator.Fill(salt);
+
+        var a = DbSnapshotEnvelope.Encrypt(image, key, salt);
+        var b = DbSnapshotEnvelope.Encrypt(image, key, salt);
+
+        // Same key + salt but a fresh nonce per write => different ciphertext.
+        Assert.NotEqual(a, b);
+    }
+
+    [Fact]
+    public void Encrypt_WithWrongKeyLength_ThrowsArgumentException()
+    {
+        var salt = new byte[KdfParameters.SaltSize];
+
+        Assert.Throws<ArgumentException>(
+            () => DbSnapshotEnvelope.Encrypt(SampleImage(16), new byte[16], salt));
+    }
+
+    [Fact]
+    public void Encrypt_WithWrongSaltLength_ThrowsArgumentException()
+    {
+        var key = new byte[32];
+
+        Assert.Throws<ArgumentException>(
+            () => DbSnapshotEnvelope.Encrypt(SampleImage(16), key, new byte[8]));
+    }
 }
