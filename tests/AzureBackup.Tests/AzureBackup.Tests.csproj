@@ -24,6 +24,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\AzureBackup.Core\AzureBackup.Core.csproj" />
+    <ProjectReference Include="..\..\src\AzureBackup.Crypto\AzureBackup.Crypto.csproj" />
     <!--
       B75: reference the benchmarks project so the
       BenchmarkSummaryWriter format helpers (gated by InternalsVisibleTo
