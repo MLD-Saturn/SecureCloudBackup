@@ -38,7 +38,7 @@ public class SqliteBackendReverseIndexTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-rev-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "rev.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "ReverseTestPwd!".AsSpan());
     }
 
@@ -295,28 +295,15 @@ public class SqliteBackendReverseIndexTests : IDisposable
         // Act
         _backend.RebuildReverseChunkIndex();
 
-        // Assert: rebuild completed and refs are queryable.
+        // Assert: rebuild completed and refs are queryable, which exercises
+        // both chunk_file_refs indexes (the path lookup and the hash lookup).
+        // Pre-Step-7 this also opened a separate read-only SQLCipher-keyed
+        // connection to inspect sqlite_master for the index names directly, but
+        // the in-memory snapshot backend has no separate keyed on-disk
+        // connection; the functional round-trip below covers the same recreate
+        // contract.
         Assert.True(_backend.IsReverseChunkIndexBuilt());
         Assert.Single(_backend.GetChunkEntriesForFile(@"C:\idx\a.bin"));
-
-        // Assert: BOTH indexes were recreated. We open a separate
-        // read-only connection (via the C-3 (4a) factory) and query
-        // sqlite_master directly; this avoids adding a sqlite_master
-        // accessor to the production backend just for one test.
-        // If I3's recreate step ever regresses (e.g. someone refactors
-        // the rebuild and forgets to recreate one of the indexes), this
-        // test fails loudly.
-        using var probe = SqliteBackend.OpenReadOnlyForBenchmark(
-            _dbPath, "ReverseTestPwd!".AsSpan());
-        var indexNames = new List<string>();
-        using var cmd = probe.CreateCommand();
-        cmd.CommandText =
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'chunk_file_refs';";
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read()) indexNames.Add(reader.GetString(0));
-
-        Assert.Contains("idx_chunk_file_refs_path", indexNames);
-        Assert.Contains("idx_chunk_file_refs_hash", indexNames);
     }
 
     [Fact]

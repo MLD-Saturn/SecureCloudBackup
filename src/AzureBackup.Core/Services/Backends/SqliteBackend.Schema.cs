@@ -156,199 +156,40 @@ internal partial class SqliteBackend
         string quarantinedSaltPath,
         ReadOnlySpan<char> password)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedDatabasePath);
-        ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedSaltPath);
-        if (password.IsEmpty)
-            throw new ArgumentException("Password cannot be empty", nameof(password));
-        if (!File.Exists(quarantinedDatabasePath))
-            throw new FileNotFoundException(
-                "Quarantined database file does not exist.", quarantinedDatabasePath);
-        if (!File.Exists(quarantinedSaltPath))
-            throw new FileNotFoundException(
-                "Quarantined salt sidecar does not exist.", quarantinedSaltPath);
-
-        var salt = File.ReadAllBytes(quarantinedSaltPath);
-        if (salt.Length != SaltSize)
-        {
-            throw new InvalidOperationException(
-                $"Quarantined salt sidecar is the wrong size " +
-                $"(expected {SaltSize} bytes, got {salt.Length}). " +
-                "The sidecar may belong to a different quarantine event.");
-        }
-
-        var derivedKey = DeriveKeyFromPasswordCore(passwordChars: password, salt: salt, diag: null);
-        try
-        {
-            // ReadOnly mode + caller-supplied salt: we never write to the
-            // quarantined files. The validate-key probe is what gives the
-            // user a hard "wrong password" signal instead of letting a
-            // garbage-decrypted page reach the SELECT below.
-            using var connection = OpenAndUnlockCore(
-                quarantinedDatabasePath, derivedKey,
-                SqliteOpenMode.ReadOnly, validateKey: true);
-
-            using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT password_salt FROM config WHERE id = 1;";
-            using var reader = cmd.ExecuteReader();
-            if (!reader.Read() || reader.IsDBNull(0))
-            {
-                return null;
-            }
-
-            return (byte[])reader.GetValue(0);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(derivedKey);
-        }
+        // W-DB-enc Step 7: this reads a legacy SQLCipher quarantined catalog, but
+        // AzureBackup.Core no longer ships a SQLCipher engine (CVE-2025-6965 fix).
+        // The B51 quarantine/rebuild recovery flow has not yet been ported to the
+        // application-level snapshot format (the new snapshot has no `.salt`
+        // sidecar and stores its salt inside the AES-256-GCM envelope). Fail
+        // clearly here rather than running a cipher pragma on the modern engine
+        // (which aborts the process). See AGENT_CONTEXT fact #71.
+        throw new NotSupportedException(
+            "Reading the password salt from a quarantined SQLCipher catalog is not " +
+            "supported: AzureBackup.Core no longer contains a SQLCipher engine. The " +
+            "quarantine/rebuild recovery flow is pending a port to the application-level " +
+            "snapshot format.");
     }
 
     private static SqliteConnection OpenAndUnlockCore(
         string databasePath, byte[] derivedKey,
         SqliteOpenMode mode, bool validateKey)
     {
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = mode,
-            Cache = SqliteCacheMode.Private,
-            // Disable connection pooling. We manage exactly one connection
-            // per backend instance; pooling would silently hand a previously
-            // unlocked connection back to a new SqliteBackend instance,
-            // bypassing the PRAGMA key check and breaking wrong-password
-            // detection. Verified by an early version of the wrong-password
-            // smoke test that "passed" only because the same pooled
-            // connection was reused across instances.
-            Pooling = false,
-        }.ToString();
-
-        var connection = new SqliteConnection(connectionString);
-        try
-        {
-            connection.Open();
-
-            // SQLCipher: tune the KDF BEFORE the key pragma. SQLCipher applies
-            // these settings to the key-derivation step, so reordering breaks
-            // it (default 256000 PBKDF2 rounds would be applied instead).
-            //
-            // We use PBKDF2 mode (rather than raw-key `x'...'`) because raw-key
-            // mode does NOT validate the key on open - SQLCipher silently
-            // decrypts pages into garbage with the wrong key. PBKDF2 mode
-            // writes a verification HMAC into page 1 so wrong keys fail
-            // cleanly with SQLITE_NOTADB. We set kdf_iter=1 to skip the heavy
-            // PBKDF2 work because our Argon2id pass already did the strong KDF.
-            using (var keyCmd = connection.CreateCommand())
-            {
-                keyCmd.CommandText =
-                    "PRAGMA cipher_kdf_algorithm = PBKDF2_HMAC_SHA256;" +
-                    "PRAGMA kdf_iter = 1;";
-                keyCmd.ExecuteNonQuery();
-
-                // Pass the derived key as a quoted base64 string. Use
-                // SqliteParameter so any quote characters in the base64 output
-                // (none, but defensive) cannot break the SQL.
-                keyCmd.CommandText = "SELECT quote($key);";
-                keyCmd.Parameters.AddWithValue("$key", Convert.ToBase64String(derivedKey));
-                var quoted = (string?)keyCmd.ExecuteScalar();
-                keyCmd.Parameters.Clear();
-                keyCmd.CommandText = $"PRAGMA key = {quoted};";
-                keyCmd.ExecuteNonQuery();
-            }
-
-            // Verify the key actually unlocked the database. With PBKDF2 mode
-            // SQLCipher validates page 1's HMAC on the first physical page
-            // read. ExecuteScalar on a SELECT returning zero rows does NOT
-            // count - it can hit a parsed-schema cache without forcing a
-            // page-1 decrypt. We use ExecuteReader and actually iterate so
-            // the engine reads encrypted pages off disk; a wrong key surfaces
-            // as SQLITE_NOTADB (26) at that point.
-            var dbExistedBeforeOpen = new FileInfo(databasePath).Length > 0;
-            if (validateKey && dbExistedBeforeOpen)
-            {
-                try
-                {
-                    using var probe = connection.CreateCommand();
-                    // sqlite_master always has at least one entry on a
-                    // previously-initialised DB (the seeded config table).
-                    probe.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table';";
-                    using var reader = probe.ExecuteReader();
-                    var sawAtLeastOneRow = false;
-                    while (reader.Read())
-                    {
-                        sawAtLeastOneRow = true;
-                    }
-                    if (!sawAtLeastOneRow)
-                    {
-                        // The DB file existed but no tables were visible.
-                        // Either the file is genuinely empty (impossible -
-                        // CreateSchema runs on every Initialize) or the key
-                        // was wrong and SQLCipher decrypted garbage that
-                        // happened to parse as an empty schema.
-                        connection.Dispose();
-                        throw new InvalidPasswordException("Invalid password. Please try again.");
-                    }
-                }
-                catch (SqliteException ex)
-                {
-                    connection.Dispose();
-                    // Wrong-key classification on the FIRST page-1 read after
-                    // PRAGMA key. SQLCipher rejects bad keys cleanly as
-                    // SQLITE_NOTADB (26) only when the decrypt produces bytes
-                    // that obviously don't look like a SQLite header. When the
-                    // garbage decrypt happens to parse as a partially-valid
-                    // header but with internally inconsistent b-tree pointers
-                    // SQLite raises SQLITE_CORRUPT (11) "database disk image
-                    // is malformed" instead. Both shapes mean "wrong password"
-                    // here -- a real on-disk corruption would not have shifted
-                    // its surface based on whether the user typed the right or
-                    // wrong password. Real bug observed by tester after the
-                    // B47 LiteDB-probe removal stopped masking this exception.
-                    //
-                    // Anything code 11 surfaces from LATER reads (the schema-
-                    // creation pass below, ApplyPragmas, or steady-state
-                    // queries) is genuine plaintext-image corruption and
-                    // propagates unchanged; only the validate-key probe
-                    // remaps it to InvalidPasswordException.
-                    if (ex.SqliteErrorCode == 26 ||
-                        ex.SqliteErrorCode == 11 ||
-                        (ex.Message?.Contains("not a database", StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        (ex.Message?.Contains("file is encrypted", StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        (ex.Message?.Contains("database disk image is malformed", StringComparison.OrdinalIgnoreCase) ?? false))
-                    {
-                        throw new InvalidPasswordException("Invalid password. Please try again.", ex);
-                    }
-                    throw;
-                }
-                catch (OverflowException ex)
-                {
-                    // Wrong password where SQLCipher decrypted garbage that
-                    // happened to look like a valid schema header but whose
-                    // page-size or column-length fields parse as huge values.
-                    // SQLite-managed-driver translates these into "Array
-                    // dimensions exceeded supported range" rather than its
-                    // own SqliteException. Without this catch the user sees
-                    // the opaque OverflowException message and assumes the
-                    // app is broken rather than that they typed the wrong
-                    // password (real bug observed by tester).
-                    connection.Dispose();
-                    throw new InvalidPasswordException("Invalid password. Please try again.", ex);
-                }
-                catch (Exception ex) when (ex is ArgumentOutOfRangeException || ex is IndexOutOfRangeException)
-                {
-                    // Same family as OverflowException above: garbage-decrypt
-                    // values fed into array-allocation paths.
-                    connection.Dispose();
-                    throw new InvalidPasswordException("Invalid password. Please try again.", ex);
-                }
-            }
-
-            return connection;
-        }
-        catch
-        {
-            connection.Dispose();
-            throw;
-        }
+        // W-DB-enc Step 7: AzureBackup.Core no longer ships the SQLCipher native
+        // engine -- it references bundle_e_sqlite3 (the CVE-2025-6965-fixed modern
+        // engine) ONLY. The SQLCipher `PRAGMA cipher_kdf_algorithm` / `PRAGMA key`
+        // sequence below does not exist on the modern engine and issuing it
+        // ABORTS the native process (not a catchable exception). The production
+        // catalog now opens through InMemorySnapshotBackend (an AES-256-GCM
+        // application-level encrypted snapshot loaded into an in-memory DB), which
+        // overrides Initialize and never reaches this path. Reading a legacy
+        // SQLCipher database is the job of the separate single-engine
+        // azurebackup-migrate helper process (which references bundle_e_sqlcipher).
+        // Throw a clear managed exception so any remaining caller fails loudly
+        // instead of crashing the host.
+        throw new NotSupportedException(
+            "AzureBackup.Core no longer contains a SQLCipher engine (it uses the " +
+            "CVE-fixed bundle_e_sqlite3). Open the catalog via InMemorySnapshotBackend, " +
+            "or read a legacy SQLCipher database with the azurebackup-migrate helper process.");
     }
 
     private protected void ApplyPragmas()

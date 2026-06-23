@@ -17,7 +17,7 @@ internal partial class SqliteBackend
     /// <see cref="DatabaseFileIntegrityResult"/> for the meaning of
     /// each pragma's output.
     /// </summary>
-    public DatabaseFileIntegrityResult CheckDatabaseFileIntegrity()
+    public virtual DatabaseFileIntegrityResult CheckDatabaseFileIntegrity()
     {
         if (_connection == null)
             throw new InvalidOperationException("Backend is not initialized.");
@@ -43,7 +43,7 @@ internal partial class SqliteBackend
         });
     }
 
-    private List<string> RunPragmaIntegrityCheck(string pragmaName)
+    private protected List<string> RunPragmaIntegrityCheck(string pragmaName)
     {
         var messages = new List<string>();
         using var cmd = _connection!.CreateCommand();
@@ -105,7 +105,7 @@ internal partial class SqliteBackend
     /// The result of a prior <see cref="CheckDatabaseFileIntegrity"/>
     /// call. The repair refuses to run on a stale or healthy diagnosis.
     /// </param>
-    public DatabaseRepairResult ReindexCorruptIndexes(DatabaseFileIntegrityResult diagnosis)
+    public virtual DatabaseRepairResult ReindexCorruptIndexes(DatabaseFileIntegrityResult diagnosis)
     {
         ArgumentNullException.ThrowIfNull(diagnosis);
         if (_connection == null)
@@ -219,7 +219,7 @@ internal partial class SqliteBackend
         });
     }
 
-    private HashSet<string> ReadAllIndexNames()
+    private protected HashSet<string> ReadAllIndexNames()
     {
         var names = new HashSet<string>(StringComparer.Ordinal);
         using var cmd = _connection!.CreateCommand();

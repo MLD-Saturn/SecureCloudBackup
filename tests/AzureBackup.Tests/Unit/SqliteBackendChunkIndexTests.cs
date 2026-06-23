@@ -27,7 +27,7 @@ public class SqliteBackendChunkIndexTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-cidx-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "cidx.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "ChunkIdxTestPwd!".AsSpan());
     }
 
@@ -206,7 +206,7 @@ public class SqliteBackendChunkIndexTests : IDisposable
         _backend.SaveChunkIndexEntry(MakeEntry("PERSIST", refCount: 42));
         _backend.Dispose();
 
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "ChunkIdxTestPwd!".AsSpan());
 
         var loaded = reopened.GetChunkIndexEntry("PERSIST");

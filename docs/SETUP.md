@@ -70,7 +70,7 @@ dotnet restore azurebackup.sln
 dotnet build azurebackup.sln -c Debug
 ```
 
-NuGet restore handles the native SQLCipher binaries automatically through the `SQLitePCLRaw.bundle_e_sqlcipher` package.
+NuGet restore handles the native SQLite binaries automatically through the `SQLitePCLRaw.bundle_e_sqlite3` package (the CVE-2025-6965-fixed engine). The one-time legacy-migration helper (`azurebackup-migrate`) is the only component that still ships `SQLitePCLRaw.bundle_e_sqlcipher`, used solely to read a pre-existing SQLCipher catalog during migration.
 
 To run the desktop app from source:
 
@@ -123,7 +123,7 @@ Without the marker file the app runs in installed mode. See "File locations" bel
 6. Enter and confirm a **Password**. This password derives the AES-256 key used to encrypt every byte sent to Azure.
 
    **If you forget this password your data cannot be recovered.** There is no reset, no recovery question, no backdoor.
-7. Click **Initialize & Connect**. The app creates `backup.db` (encrypted with SQLCipher), stores your encrypted connection string inside it, and connects to Azure.
+7. Click **Initialize & Connect**. The app creates `backup.db` (an application-level AES-256-GCM encrypted snapshot of the catalog), stores your encrypted connection string inside it, and connects to Azure.
 8. Open the **Sync** view, click the **+** in the Local Files panel header to add folders to watch, then click **Start Monitoring**.
 
 ---
@@ -192,7 +192,7 @@ Use the **Tier Migration** view (in the app) to move existing chunks between tie
 
 ### Local database
 
-The local metadata database is `backup.db`. Production builds use **SQLCipher-encrypted SQLite**; the database is unlocked at startup using your password (via the Argon2id-derived key). The application is SQLite-only -- the historical LiteDB-to-SQLite unlock-time migration was retired in B47 / B57 / B58 and a legacy LiteDB `backup.db` is no longer auto-migrated; if you have one, copy it aside, let the app create a fresh SQLite catalog, and rely on **Storage Health -> Rebuild from Azure** (or **Rebuild from quarantined catalog**) to repopulate state from Azure.
+The local metadata database is `backup.db`. Production builds keep the catalog as an **in-memory SQLite database persisted as a single AES-256-GCM encrypted snapshot** (the `AZDB` envelope), running on the CVE-2025-6965-fixed `bundle_e_sqlite3` engine; the snapshot is decrypted into memory at startup using your password (via the Argon2id-derived key) and re-encrypted on each checkpoint, so plaintext never touches the disk. A pre-existing **SQLCipher** `backup.db` from an older build is automatically and transparently migrated to the snapshot format the first time you unlock it (the original is quarantined, never deleted). The application is SQLite-only -- the historical LiteDB-to-SQLite unlock-time migration was retired in B47 / B57 / B58 and a legacy LiteDB `backup.db` is no longer auto-migrated; if you have one, copy it aside, let the app create a fresh catalog, and rely on **Storage Health -> Rebuild from Azure** to repopulate state from Azure.
 
 ---
 

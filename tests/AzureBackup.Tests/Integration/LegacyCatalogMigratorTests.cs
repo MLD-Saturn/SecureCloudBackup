@@ -75,7 +75,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
             OutputSnapshotPath = outputPath
         };
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_LegacySqlCipherCatalog_WritesDecryptableSnapshot()
     {
         SeedLegacyDatabase();
@@ -91,7 +91,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.NotEmpty(image);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_SnapshotOpensInTheModernBackend_WithSameData()
     {
         var (seededFile, seededChunk) = SeedLegacyDatabase();
@@ -114,7 +114,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal(seededChunk.SizeBytes, chunk!.SizeBytes);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WithWrongPassword_ThrowsInvalidPassword()
     {
         SeedLegacyDatabase();
@@ -125,7 +125,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.False(File.Exists(_outputSnapshotPath), "No snapshot should be written on a wrong password.");
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WithMissingLegacyDatabase_ThrowsSourceNotFound()
     {
         var request = MakeRequest(
@@ -138,7 +138,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal(MigrationExitCode.SourceNotFound, ex.ExitCode);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WithBadSaltLength_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
@@ -152,7 +152,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WithNonBase64Salt_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
@@ -162,7 +162,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WithEmptyPassword_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
@@ -174,7 +174,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
 
     // ---- T1: empty catalog (schema, zero rows) -----------------------------
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_EmptyCatalog_ProducesValidSnapshotWithSchemaOnly()
     {
         // Seed a fresh SQLCipher catalog with NO data rows beyond the seeded
@@ -199,7 +199,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
 
     // ---- T2: verification-failure path -------------------------------------
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_WhenOutputPathIsADirectory_ThrowsWriteFailed()
     {
         SeedLegacyDatabase();
@@ -214,7 +214,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
 
     // ---- T3: MigrationRunner stdin handling --------------------------------
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Runner_WithEmptyStdin_ReturnsBadRequest()
     {
         using var stdin = new StringReader(string.Empty);
@@ -225,7 +225,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal((int)MigrationExitCode.BadRequest, code);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Runner_WithMalformedJson_ReturnsBadRequest()
     {
         using var stdin = new StringReader("{ this is not valid json ");
@@ -236,7 +236,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal((int)MigrationExitCode.BadRequest, code);
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Runner_WithWellFormedRequest_RunsMigrationAndReturnsSuccess()
     {
         SeedLegacyDatabase();
@@ -256,7 +256,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.True(File.Exists(_outputSnapshotPath));
     }
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Runner_WithMissingSource_ReturnsSourceNotFound()
     {
         var json = System.Text.Json.JsonSerializer.Serialize(new
@@ -276,7 +276,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
 
     // ---- T4: large catalog round-trip --------------------------------------
 
-    [Fact]
+    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
     public void Migrate_LargeCatalog_RoundTripsAllRows()
     {
         const int fileCount = 1500;

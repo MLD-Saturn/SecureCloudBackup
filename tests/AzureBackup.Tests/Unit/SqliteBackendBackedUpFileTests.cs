@@ -29,7 +29,7 @@ public class SqliteBackendBackedUpFileTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-file-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "file.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "FileTestPwd!".AsSpan());
     }
 
@@ -204,7 +204,7 @@ public class SqliteBackendBackedUpFileTests : IDisposable
         _backend.Dispose();
 
         // Act
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "FileTestPwd!".AsSpan());
         var loaded = reopened.GetBackedUpFile(saved.LocalPath);
 

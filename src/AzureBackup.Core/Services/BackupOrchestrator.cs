@@ -883,6 +883,21 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 "service to repopulate the catalog from Azure metadata.");
         }
 
+        // W-DB-enc Step 7: this flow recovers the Azure-side salt by re-opening a
+        // legacy SQLCipher quarantined catalog, but AzureBackup.Core no longer
+        // ships a SQLCipher engine (CVE-2025-6965 fix). The quarantine/rebuild
+        // recovery has not yet been ported to the application-level snapshot
+        // format (the new snapshot has no `.salt` sidecar; its salt lives inside
+        // the AES-256-GCM envelope). Fail fast with a clear message instead of
+        // letting the SQLCipher reader throw deeper in. The recovery orchestration
+        // below is preserved for the future snapshot-format port; the only phase
+        // that needs reworking is the salt extraction. See AGENT_CONTEXT fact #71.
+        throw new NotSupportedException(
+            "Rebuild from a quarantined SQLCipher catalog is temporarily unavailable: " +
+            "AzureBackup.Core no longer contains a SQLCipher engine, and this recovery " +
+            "flow has not yet been ported to the application-level snapshot format.");
+
+#pragma warning disable CS0162 // Unreachable code: preserved for the snapshot-format port
         Log("RebuildFromQuarantinedCatalogAsync: starting");
         StatusChanged?.Invoke(this, "Reading password salt from quarantined catalog...");
 
@@ -980,6 +995,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             "Catalog rebuild from quarantined source complete. The fresh catalog can be " +
             "unlocked with the same password you used for the quarantined one.");
         Log("RebuildFromQuarantinedCatalogAsync: complete");
+#pragma warning restore CS0162
     }
 
     /// <summary>

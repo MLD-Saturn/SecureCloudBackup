@@ -21,7 +21,7 @@ public class SqliteBackendBulkInsertHelperTests : IDisposable
     {
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-bench-helper-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(Path.Combine(_testDir, "h.db"), "BenchHelperPwd!".AsSpan());
     }
 

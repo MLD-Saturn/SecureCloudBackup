@@ -26,7 +26,7 @@ public class SqliteBackendIndexMetadataTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-meta-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "meta.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "MetaTestPwd!".AsSpan());
     }
 
@@ -104,7 +104,7 @@ public class SqliteBackendIndexMetadataTests : IDisposable
         _backend.Dispose();
 
         // Act: reopen and read.
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "MetaTestPwd!".AsSpan());
 
         // Assert

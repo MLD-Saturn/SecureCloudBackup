@@ -27,7 +27,7 @@ public class SqliteBackendConfigurationTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-cfg-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "cfg.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "CfgTestPwd!".AsSpan());
     }
 
@@ -224,7 +224,7 @@ public class SqliteBackendConfigurationTests : IDisposable
         _backend.Dispose();
 
         // Act: reopen.
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "CfgTestPwd!".AsSpan());
         var loaded = reopened.GetConfiguration();
 

@@ -17,7 +17,7 @@
   -->
   <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.6" />
-    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.11" />
+    <PackageReference Include="SQLitePCLRaw.core" Version="3.0.3" />
   </ItemGroup>
 
   <ItemGroup>

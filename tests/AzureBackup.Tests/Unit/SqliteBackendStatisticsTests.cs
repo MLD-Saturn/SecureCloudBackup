@@ -26,7 +26,7 @@ public class SqliteBackendStatisticsTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-stats-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "stats.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "StatsTestPwd!".AsSpan());
     }
 
@@ -184,7 +184,7 @@ public class SqliteBackendStatisticsTests : IDisposable
         _backend.SaveConfiguration(new BackupConfiguration { TotalBytesUploaded = 42 });
         _backend.Dispose();
 
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "StatsTestPwd!".AsSpan());
 
         var stats = reopened.GetStatistics();

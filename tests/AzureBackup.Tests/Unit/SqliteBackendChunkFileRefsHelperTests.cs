@@ -41,7 +41,7 @@ public class SqliteBackendChunkFileRefsHelperTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-cfr-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "cfr.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, Password.AsSpan());
     }
 

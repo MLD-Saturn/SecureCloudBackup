@@ -35,7 +35,7 @@ public class SqliteBackendPendingChangesTests : IDisposable
         _testDir = Path.Combine(Path.GetTempPath(), "azbk-pending-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(_testDir);
         _dbPath = Path.Combine(_testDir, "pending.db");
-        _backend = new SqliteBackend();
+        _backend = new InMemorySnapshotBackend();
         _backend.Initialize(_dbPath, "PendingTestPwd!".AsSpan());
     }
 
@@ -236,7 +236,7 @@ public class SqliteBackendPendingChangesTests : IDisposable
         _backend.QueueFileChange(MakeChange(@"C:\persist.txt", FileChangeType.Deleted));
         _backend.Dispose();
 
-        using var reopened = new SqliteBackend();
+        using var reopened = new InMemorySnapshotBackend();
         reopened.Initialize(_dbPath, "PendingTestPwd!".AsSpan());
 
         var pending = reopened.GetPendingChanges();

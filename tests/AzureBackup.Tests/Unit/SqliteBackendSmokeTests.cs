@@ -47,11 +47,11 @@ public class SqliteBackendSmokeTests : IDisposable
         try { Directory.Delete(_testDir, recursive: true); } catch { /* best effort */ }
     }
 
-    [Fact]
+    [Fact(Skip = "SQLCipher-specific: AzureBackup.Core now uses the modern e_sqlite3 engine via InMemorySnapshotBackend, which has NO .salt sidecar (the salt is embedded in the AZDB envelope). Schema-creation coverage for the snapshot backend lives in InMemorySnapshotBackendTests and the rebased SqliteBackend* CRUD tests. W-DB-enc Step 7.")]
     public void Initialize_NewDatabase_CreatesSchemaAndSaltFile()
     {
         // Arrange
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         const string password = "SmokeTestPassword123!";
 
         // Act
@@ -80,7 +80,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // Arrange
         const string password = "SmokeTestPassword123!";
 
-        using (var first = new SqliteBackend())
+        using (var first = new InMemorySnapshotBackend())
         {
             first.Initialize(_dbPath, password.AsSpan());
             Assert.Equal(12, first.CountSchemaTables());
@@ -88,7 +88,7 @@ public class SqliteBackendSmokeTests : IDisposable
         }
 
         // Act: reopen with the same password.
-        using var second = new SqliteBackend();
+        using var second = new InMemorySnapshotBackend();
         second.Initialize(_dbPath, password.AsSpan());
 
         // Assert: schema persisted, no exception, connection works.
@@ -96,7 +96,7 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Equal(12, second.CountSchemaTables());
     }
 
-    [Fact]
+    [Fact(Skip = "SQLCipher-specific and now inverted: AzureBackup.Core references bundle_e_sqlite3 (CVE-2025-6965 fix), so PRAGMA cipher_version is intentionally empty. SQLCipher is exercised only inside the azurebackup-migrate helper's own single-engine process. W-DB-enc Step 7.")]
     public void Initialize_NewDatabase_LoadedNativeIsSqlcipher()
     {
         // Critical guard: if the wrong native bundle ships, encryption is
@@ -104,7 +104,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // for the wrong reason. PRAGMA cipher_version returns null on a
         // plain SQLite build and the SQLCipher version string on a
         // SQLCipher build.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "ProveSqlcipherIsLoaded".AsSpan());
 
         var version = backend.ReadSqlcipherVersion();
@@ -113,7 +113,7 @@ public class SqliteBackendSmokeTests : IDisposable
             "Encryption would silently be a no-op. Check that SQLitePCLRaw.bundle_e_sqlcipher is referenced.");
     }
 
-    [Fact]
+    [Fact(Skip = "SQLCipher-specific diagnostic (different passwords produce different SQLCipher on-disk bytes). Not meaningful for the AES-256-GCM snapshot format; the snapshot backend's wrong-password behavior is covered by InMemorySnapshotBackendTests.Reopen_WithWrongPassword_Throws. W-DB-enc Step 7.")]
     public void Initialize_WrongPassword_ProducesDifferentEncryption()
     {
         // Diagnostic: prove SQLCipher is at least using the key by showing
@@ -125,8 +125,8 @@ public class SqliteBackendSmokeTests : IDisposable
         var db1 = Path.Combine(_testDir, "p1.db");
         var db2 = Path.Combine(_testDir, "p2.db");
 
-        using (var b1 = new SqliteBackend()) b1.Initialize(db1, password1.AsSpan());
-        using (var b2 = new SqliteBackend()) b2.Initialize(db2, password2.AsSpan());
+        using (var b1 = new InMemorySnapshotBackend()) b1.Initialize(db1, password1.AsSpan());
+        using (var b2 = new InMemorySnapshotBackend()) b2.Initialize(db2, password2.AsSpan());
 
         var bytes1 = File.ReadAllBytes(db1);
         var bytes2 = File.ReadAllBytes(db2);
@@ -147,18 +147,14 @@ public class SqliteBackendSmokeTests : IDisposable
         const string correctPassword = "CorrectPassword123!";
         const string wrongPassword = "WrongPassword456!";
 
-        using (var first = new SqliteBackend())
+        using (var first = new InMemorySnapshotBackend())
         {
             first.Initialize(_dbPath, correctPassword.AsSpan());
-            // Sanity check: confirm SQLCipher is actually doing the encryption.
-            // Without this the wrong-password test could pass for the wrong
-            // reason (plain SQLite would happily open any byte stream as a DB).
-            Assert.False(string.IsNullOrEmpty(first.ReadSqlcipherVersion()));
         }
 
-        // Act + Assert: SQLCipher must reject the wrong key on first read
-        // rather than silently returning an empty DB.
-        using var second = new SqliteBackend();
+        // Act + Assert: the snapshot backend must reject the wrong key (the
+        // AES-256-GCM tag fails to authenticate) rather than silently opening.
+        using var second = new InMemorySnapshotBackend();
         var ex = Record.Exception(() =>
             second.Initialize(_dbPath, wrongPassword.AsSpan()));
 
@@ -192,7 +188,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // SqliteException(11) leak in well under 50 iterations on typical
         // hardware.
         const string correctPassword = "CorrectClassifierProbe123!";
-        using (var first = new SqliteBackend())
+        using (var first = new InMemorySnapshotBackend())
         {
             first.Initialize(_dbPath, correctPassword.AsSpan());
         }
@@ -201,7 +197,7 @@ public class SqliteBackendSmokeTests : IDisposable
         for (var i = 0; i < 50; i++)
         {
             var wrong = $"wrong-classifier-probe-{i}-{Guid.NewGuid():N}";
-            using var backend = new SqliteBackend();
+            using var backend = new InMemorySnapshotBackend();
             var ex = Record.Exception(() => backend.Initialize(_dbPath, wrong.AsSpan()));
             if (ex is null)
             {
@@ -231,7 +227,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // even on a machine with 34 GB free physical RAM (the failure
         // is per-allocation contiguous block availability, not absolute
         // memory). See B15 stack trace.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "PendingPassword123!".AsSpan());
 
         // Empty pending_changes table is the steady-state for an
@@ -258,7 +254,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // under heavy contention. With 8 workers x 50 files each = 400
         // SaveBackedUpFile calls in flight, any architectural mistake in
         // the lock handling surfaces here.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "ParallelSavePassword123!".AsSpan());
 
         const int workerCount = 8;
@@ -317,7 +313,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // Either outcome is acceptable. The forbidden outcomes are
         // NullReferenceException and ObjectDisposedException leaking
         // out of either side.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "CloseRacePassword123!".AsSpan());
 
         var writerExceptions = new System.Collections.Concurrent.ConcurrentQueue<Exception>();
@@ -397,7 +393,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // ON CONFLICT); readers do GetChunkIndexEntry and
         // GetReferencingFilesForChunk -- ExecuteReader paths that
         // pre-B23 were unprotected. Any leaked exception fails the test.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "MixedReadWritePassword123!".AsSpan());
 
         // Seed a known set of chunks so readers always have rows to read.
@@ -476,7 +472,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // integrity_check which always returns a single "ok" row on
         // success. The result contract that the Storage Health tab
         // depends on must reflect both shapes correctly.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "DiagnosticPassword123!".AsSpan());
 
         var result = backend.CheckDatabaseFileIntegrity();
@@ -498,7 +494,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // an explanatory message rather than silently reindexing
         // every healthy index. This is the contract the Storage
         // Health view's CanAttemptRepair gate relies on.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "RepairPassword123!".AsSpan());
 
         var diagnosis = backend.CheckDatabaseFileIntegrity();
@@ -514,14 +510,14 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Contains("healthy", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
     }
 
-    [Fact]
+    [Fact(Skip = "SQLCipher-specific: the snapshot backend's ReindexCorruptIndexes has no cipher_integrity_check dimension (the AES-256-GCM tag authenticates the whole snapshot at load). W-DB-enc Step 7.")]
     public void ReindexCorruptIndexes_OnCipherDamage_RefusesBeforeTouchingAnyIndex()
     {
         // B45: a synthetic diagnosis with cipher failures must short-
         // circuit BEFORE any REINDEX runs. We do not need to actually
         // corrupt the file; the repair API takes the diagnosis as
         // input so we can construct the failure shape directly.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "RepairPassword123!".AsSpan());
 
         var fakeCipherFailure = new DatabaseFileIntegrityResult(
@@ -561,7 +557,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // shapes above within a few hundred iterations; post-B49 the
         // checkpoint runs through InWriteLock so writers and the
         // checkpoint pass are strictly serialised.
-        using var backend = new SqliteBackend();
+        using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_dbPath, "CheckpointRacePassword123!".AsSpan());
 
         const int writerCount = 8;
@@ -641,7 +637,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // PRESERVED -- this is the recovery path where the user did
         // NOT ask to delete data; SecureReset is a separate workflow
         // for that.
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, "QuarantinePassword123!".AsSpan());
             backend.SaveBackedUpFile(new BackedUpFile
@@ -657,30 +653,21 @@ public class SqliteBackendSmokeTests : IDisposable
             backend.Checkpoint();
         }
 
-        // Capture pre-quarantine sizes so we can prove the quarantined
-        // bytes are byte-identical to the originals.
+        // Capture pre-quarantine size so we can prove the quarantined
+        // bytes are byte-identical to the original. The snapshot format has
+        // no .salt sidecar (the salt is embedded in the AZDB envelope), so
+        // quarantine only needs to move the single catalog file.
         var dbSize = new FileInfo(_dbPath).Length;
         Assert.True(dbSize > 0, "expected non-empty DB before quarantine");
-        var saltPath = _dbPath + ".salt";
-        Assert.True(File.Exists(saltPath), "expected salt sidecar before quarantine");
-        var saltBytes = File.ReadAllBytes(saltPath);
 
         var result = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
 
-        // Originals must be gone (so the next Initialize creates a
-        // fresh DB) but the renamed copies must survive.
+        // Original must be gone (so the next Initialize creates a
+        // fresh DB) but the renamed copy must survive.
         Assert.False(File.Exists(_dbPath), "original DB must be moved aside");
-        Assert.False(File.Exists(saltPath), "original salt must be moved aside");
         Assert.True(File.Exists(result.QuarantinedDatabasePath), "quarantined DB must exist on disk");
         Assert.Contains(".quarantine-", result.QuarantinedDatabasePath, StringComparison.Ordinal);
         Assert.Equal(dbSize, new FileInfo(result.QuarantinedDatabasePath).Length);
-
-        // Salt must be moved aside too -- the quarantined catalog is
-        // useless without its salt because the Argon2id key derivation
-        // depends on it.
-        var quarantinedSalt = saltPath + result.QuarantinedDatabasePath[_dbPath.Length..];
-        Assert.True(File.Exists(quarantinedSalt), "quarantined salt must exist on disk");
-        Assert.Equal(saltBytes, File.ReadAllBytes(quarantinedSalt));
 
         Assert.Contains(result.QuarantinedDatabasePath, result.MovedFiles);
         Assert.Empty(result.SkippedFiles);
@@ -693,7 +680,7 @@ public class SqliteBackendSmokeTests : IDisposable
         // user can initialize a fresh catalog with a brand new
         // password. The quarantined bytes must remain undisturbed by
         // the fresh initialize.
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, "OriginalPassword123!".AsSpan());
         }
@@ -701,7 +688,7 @@ public class SqliteBackendSmokeTests : IDisposable
         var quarantine = LocalDatabaseService.QuarantineCorruptDatabase(_dbPath);
         var quarantinedDbBytes = File.ReadAllBytes(quarantine.QuarantinedDatabasePath);
 
-        using (var fresh = new SqliteBackend())
+        using (var fresh = new InMemorySnapshotBackend())
         {
             fresh.Initialize(_dbPath, "DifferentFreshPassword456!".AsSpan());
             // Sanity: a fresh catalog has zero backed-up files.
@@ -726,7 +713,7 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Equal(missing, ex.FileName);
     }
 
-    [Fact]
+    [Fact(Skip = "ReadPasswordSaltFromQuarantinedCatalog now throws NotSupportedException: it read a legacy SQLCipher catalog, but Core no longer ships SQLCipher. The quarantine/rebuild recovery is pending a port to the snapshot format (AGENT_CONTEXT fact #71). W-DB-enc Step 7.")]
     public void ReadPasswordSaltFromQuarantinedCatalog_WithCorrectPassword_ReturnsStoredSalt()
     {
         // B51: the rebuild-from-quarantined-catalog flow needs exactly
@@ -741,7 +728,7 @@ public class SqliteBackendSmokeTests : IDisposable
         var seededSalt = new byte[16];
         for (int i = 0; i < seededSalt.Length; i++) seededSalt[i] = (byte)(i + 1);
 
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, password.AsSpan());
             backend.SaveConfiguration(new BackupConfiguration
@@ -767,7 +754,7 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Equal(seededSalt, recoveredSalt);
     }
 
-    [Fact]
+    [Fact(Skip = "ReadPasswordSaltFromQuarantinedCatalog now throws NotSupportedException: it read a legacy SQLCipher catalog, but Core no longer ships SQLCipher. The quarantine/rebuild recovery is pending a port to the snapshot format (AGENT_CONTEXT fact #71). W-DB-enc Step 7.")]
     public void ReadPasswordSaltFromQuarantinedCatalog_WithWrongPassword_ThrowsInvalidPasswordException()
     {
         // B51: the helper must NOT silently return garbage when the
@@ -779,7 +766,7 @@ public class SqliteBackendSmokeTests : IDisposable
         const string realPassword = "Correct-B51-Password!";
         const string wrongPassword = "Wrong-B51-Password!";
 
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, realPassword.AsSpan());
             backend.SaveConfiguration(new BackupConfiguration
@@ -800,13 +787,13 @@ public class SqliteBackendSmokeTests : IDisposable
                 wrongPassword.AsSpan()));
     }
 
-    [Fact]
+    [Fact(Skip = "ReadPasswordSaltFromQuarantinedCatalog now throws NotSupportedException: it read a legacy SQLCipher catalog, but Core no longer ships SQLCipher. The quarantine/rebuild recovery is pending a port to the snapshot format (AGENT_CONTEXT fact #71). W-DB-enc Step 7.")]
     public void ReadPasswordSaltFromQuarantinedCatalog_WithMissingSaltSidecar_ThrowsFileNotFoundException()
     {
         // B51: callers should see the offending path, not a vague
         // "salt is wrong size" message, when the user picks the DB
         // file but forgets to also restore its salt sidecar.
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, "AnyPassword123!".AsSpan());
         }
@@ -821,14 +808,14 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Equal(missingSalt, ex.FileName);
     }
 
-    [Fact]
+    [Fact(Skip = "ReadPasswordSaltFromQuarantinedCatalog now throws NotSupportedException: it read a legacy SQLCipher catalog, but Core no longer ships SQLCipher. The quarantine/rebuild recovery is pending a port to the snapshot format (AGENT_CONTEXT fact #71). W-DB-enc Step 7.")]
     public void ReadPasswordSaltFromQuarantinedCatalog_WithMismatchedSaltSize_ThrowsInvalidOperationException()
     {
         // B51: a sidecar from a different quarantine event (or a
         // truncated/garbage file) must fail loudly rather than be
         // padded into a derivation that produces a deterministic
         // wrong key.
-        using (var backend = new SqliteBackend())
+        using (var backend = new InMemorySnapshotBackend())
         {
             backend.Initialize(_dbPath, "AnyPassword123!".AsSpan());
         }
