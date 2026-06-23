@@ -63,7 +63,7 @@ internal static class CatalogFormat
 
         // Not the new snapshot. A legacy SQLCipher catalog is encrypted (so its
         // header is opaque) and always has a salt sidecar next to it.
-        var saltPath = databasePath + ".salt";
+        var saltPath = CatalogPaths.GetSaltFilePath(databasePath);
         return File.Exists(saltPath) ? Kind.LegacySqlCipher : Kind.Missing;
     }
 }

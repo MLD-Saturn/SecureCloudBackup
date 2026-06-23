@@ -162,7 +162,7 @@ internal partial class SqliteBackend : IDatabaseBackend
     /// Salt file lives next to the database, identical convention to the
     /// LiteDB backend so an upgrading user's existing salt continues to work.
     /// </summary>
-    private static string GetSaltFilePath(string databasePath) => databasePath + ".salt";
+    private static string GetSaltFilePath(string databasePath) => CatalogPaths.GetSaltFilePath(databasePath);
 
     public bool IsInitialized => _connection != null;
     public string? DatabasePath => _databasePath;

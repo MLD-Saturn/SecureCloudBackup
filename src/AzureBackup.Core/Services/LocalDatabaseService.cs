@@ -49,7 +49,7 @@ public partial class LocalDatabaseService : IDisposable
     /// <summary>
     /// Gets the path to the database salt file.
     /// </summary>
-    private static string GetSaltFilePath(string databasePath) => databasePath + ".salt";
+    private static string GetSaltFilePath(string databasePath) => CatalogPaths.GetSaltFilePath(databasePath);
 
     /// <summary>
     /// Returns the live <see cref="SqliteBackend"/> or throws if Initialize

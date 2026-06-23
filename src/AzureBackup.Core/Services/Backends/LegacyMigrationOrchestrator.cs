@@ -46,7 +46,7 @@ internal static class LegacyMigrationOrchestrator
         if (password.IsEmpty)
             throw new ArgumentException("Password cannot be empty.", nameof(password));
 
-        var saltPath = databasePath + ".salt";
+        var saltPath = CatalogPaths.GetSaltFilePath(databasePath);
         if (!File.Exists(databasePath) || !File.Exists(saltPath))
             throw new LegacyMigrationException(
                 $"Legacy catalog or salt sidecar missing (db={File.Exists(databasePath)}, salt={File.Exists(saltPath)}).");
@@ -100,7 +100,7 @@ internal static class LegacyMigrationOrchestrator
 
         // Atomic swap + quarantine: move the original SQLCipher artefacts aside,
         // then move the verified snapshot into the live path.
-        SwapInSnapshot(databasePath, saltPath, pendingSnapshotPath, diag);
+        SwapInSnapshot(databasePath, pendingSnapshotPath, diag);
         diag?.Invoke("LegacyMigration: migration completed and original catalog quarantined");
     }
 
@@ -177,7 +177,9 @@ internal static class LegacyMigrationOrchestrator
         {
             FileName = helperPath,
             RedirectStandardInput = true,
-            RedirectStandardOutput = true,
+            // stdout is intentionally NOT redirected: the helper writes only to
+            // stderr + its exit code. Redirecting a stream we never drain risks a
+            // classic pipe-buffer-full deadlock if the child ever writes to it.
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
@@ -221,21 +223,24 @@ internal static class LegacyMigrationOrchestrator
     }
 
     /// <summary>
-    /// Moves the original SQLCipher database, its salt, and any WAL/SHM/journal
-    /// companions aside under a timestamped <c>.quarantine-...</c> suffix, then
-    /// moves the verified snapshot into the live path.
+    /// Moves the original SQLCipher database and its companions aside under a
+    /// timestamped <c>.quarantine-...</c> suffix (reusing the shared
+    /// <see cref="LocalDatabaseService.QuarantineCorruptDatabase"/> so the
+    /// quarantine convention lives in one place), then moves the verified
+    /// snapshot into the live path. If the final move fails the original is
+    /// restored so the user is never left without a catalog.
     /// </summary>
     private static void SwapInSnapshot(
-        string databasePath, string saltPath, string pendingSnapshotPath, Action<string>? diag)
+        string databasePath, string pendingSnapshotPath, Action<string>? diag)
     {
-        var stamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss");
-        var suffix = $".quarantine-{stamp}";
-
-        // Quarantine the legacy artefacts. The DB move is the critical one; if it
-        // fails the original is left intact and the snapshot is discarded.
+        // Quarantine the legacy artefacts (main DB + salt + -wal/-shm/-journal)
+        // under one timestamped suffix. If the critical main-DB move fails this
+        // throws and the original is left intact; discard the snapshot.
+        string quarantinedDatabasePath;
         try
         {
-            File.Move(databasePath, databasePath + suffix);
+            var result = LocalDatabaseService.QuarantineCorruptDatabase(databasePath);
+            quarantinedDatabasePath = result.QuarantinedDatabasePath;
         }
         catch (Exception ex)
         {
@@ -243,12 +248,6 @@ internal static class LegacyMigrationOrchestrator
             throw new LegacyMigrationException(
                 $"Could not quarantine the legacy database (it may be locked): {ex.Message}", ex);
         }
-
-        // Best-effort quarantine of the companions (the snapshot does not use them).
-        TryMove(saltPath, saltPath + suffix);
-        TryMove(databasePath + "-wal", databasePath + "-wal" + suffix);
-        TryMove(databasePath + "-shm", databasePath + "-shm" + suffix);
-        TryMove(databasePath + "-journal", databasePath + "-journal" + suffix);
 
         // Move the verified snapshot into the live path. If THIS fails, restore
         // the original so the user is not left without a catalog.
@@ -258,18 +257,13 @@ internal static class LegacyMigrationOrchestrator
         }
         catch (Exception ex)
         {
-            try { File.Move(databasePath + suffix, databasePath); } catch { /* best effort restore */ }
+            try { File.Move(quarantinedDatabasePath, databasePath); } catch { /* best effort restore */ }
             TryDelete(pendingSnapshotPath);
             throw new LegacyMigrationException(
                 $"Could not move the migrated snapshot into place: {ex.Message}", ex);
         }
 
-        diag?.Invoke($"LegacyMigration: quarantined legacy artefacts under '{suffix}'");
-    }
-
-    private static void TryMove(string from, string to)
-    {
-        try { if (File.Exists(from)) File.Move(from, to); } catch { /* best effort */ }
+        diag?.Invoke($"LegacyMigration: quarantined legacy artefacts at '{quarantinedDatabasePath}'");
     }
 
     private static void TryDelete(string path)
