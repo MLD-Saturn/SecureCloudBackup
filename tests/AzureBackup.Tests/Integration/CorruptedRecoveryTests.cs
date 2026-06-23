@@ -323,8 +323,15 @@ public class CorruptedRecoveryTests : IAsyncLifetime
 
         // Assert — the file went through recovery and reported byte progress under the
         // Recovering status all the way to 100% (so the Progress tab row advances and clears).
+        // The fileByteProgress channel is an IProgress<T> that delivers reports asynchronously,
+        // so the terminal 100% report can arrive shortly AFTER RestoreFilesWithRemappingAsync
+        // returns. Wait for the exact condition the assertion checks (rather than merely "any
+        // Recovering report") so this test is deterministic instead of racing the last report.
         Assert.Single(result.CorruptedRecoveryFiles);
-        await WaitForAsync(() => capturing.Snapshot().Any(r => r.status == FileOperationStatus.Recovering));
+        await WaitForAsync(() => capturing.Snapshot().Any(
+            r => r.status == FileOperationStatus.Recovering &&
+                 r.bytesCompleted == r.fileSize &&
+                 r.fileSize == backedUp.FileSize));
         var recovering = capturing.Snapshot().Where(r => r.status == FileOperationStatus.Recovering).ToList();
         Assert.NotEmpty(recovering);
         Assert.Contains(recovering, r => r.bytesCompleted == r.fileSize && r.fileSize == backedUp.FileSize);

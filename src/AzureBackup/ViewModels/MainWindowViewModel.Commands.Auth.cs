@@ -531,7 +531,7 @@ public partial class MainWindowViewModel
         {
             return (false, ex.Message);
         }
-        catch (AzureBackup.Core.InsufficientMemoryForKdfException ex)
+        catch (AzureBackup.Crypto.InsufficientMemoryForKdfException ex)
         {
             // B11: NOT a wrong-password situation; do not consume an
             // attempt counter on the user's behalf. Surface the message

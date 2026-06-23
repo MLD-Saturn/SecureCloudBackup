@@ -1,9 +1,10 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using AzureBackup.Crypto;
 using Konscious.Security.Cryptography;
 using static AzureBackup.Core.KdfParameters;
-using static AzureBackup.Core.Services.KdfMemoryDiagnostics;
+using static AzureBackup.Crypto.Argon2idDeriver;
 
 namespace AzureBackup.Core.Services;
 

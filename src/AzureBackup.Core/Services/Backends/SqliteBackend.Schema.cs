@@ -1,8 +1,9 @@
 using System.Security.Cryptography;
+using AzureBackup.Crypto;
 using Konscious.Security.Cryptography;
 using Microsoft.Data.Sqlite;
 using static AzureBackup.Core.KdfParameters;
-using static AzureBackup.Core.Services.KdfMemoryDiagnostics;
+using static AzureBackup.Crypto.Argon2idDeriver;
 
 namespace AzureBackup.Core.Services.Backends;
 
@@ -44,113 +45,13 @@ internal partial class SqliteBackend
 
     private static byte[] DeriveKeyFromPasswordCore(
         ReadOnlySpan<char> passwordChars, byte[] salt, Action<string>? diag)
-    {
-        var passwordBytes = PasswordBytes.FromChars(passwordChars);
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var gcMode = System.Runtime.GCSettings.IsServerGC ? "Server" : "Workstation";
-        var workingSetMb = ToMegabytes(System.Diagnostics.Process.GetCurrentProcess().WorkingSet64);
-        var managedMb = ToMegabytes(GC.GetTotalMemory(false));
-        diag?.Invoke($"DeriveKey: starting Argon2id (memory={Argon2MemorySize / 1024} MB, lanes={Argon2DegreeOfParallelism}, " +
-                     $"iterations={Argon2Iterations}, gcMode={gcMode}, workingSet={workingSetMb} MB, managedHeap={managedMb} MB)");
-        try
-        {
-            // B11/B12: see comment block in EncryptionService.DeriveKeyAsync
-            // for the LOH-compaction-on-OOM rationale. We never silently
-            // weaken parameters because that would change the derived key
-            // and lock the user out of their existing database.
-            Exception? lastOom = null;
-            try
-            {
-                using var argon2 = new Argon2id(passwordBytes)
-                {
-                    Salt = salt,
-                    DegreeOfParallelism = Argon2DegreeOfParallelism,
-                    MemorySize = Argon2MemorySize,
-                    Iterations = Argon2Iterations,
-                };
-                var key = argon2.GetBytes(DerivedKeySize);
-                diag?.Invoke($"DeriveKey: completed in {sw.ElapsedMilliseconds} ms");
-                return key;
-            }
-            catch (OutOfMemoryException ex)
-            {
-                lastOom = ex;
-                diag?.Invoke($"DeriveKey: OutOfMemoryException at {sw.ElapsedMilliseconds} ms -- {ex.Message}");
-                diag?.Invoke($"  Pre-compaction: workingSet={ToMegabytes(System.Diagnostics.Process.GetCurrentProcess().WorkingSet64)} MB, " +
-                             $"GC managed={ToMegabytes(GC.GetTotalMemory(false))} MB, " +
-                             $"GC available={ToMegabytes(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes)} MB, " +
-                             $"loh fragmented={ToMegabytes(GC.GetGCMemoryInfo().FragmentedBytes)} MB");
-                ForceLargeObjectHeapCompaction();
-                diag?.Invoke($"  Post-compaction: workingSet={ToMegabytes(System.Diagnostics.Process.GetCurrentProcess().WorkingSet64)} MB, " +
-                             $"GC managed={ToMegabytes(GC.GetTotalMemory(false))} MB, " +
-                             $"GC available={ToMegabytes(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes)} MB, " +
-                             $"loh fragmented={ToMegabytes(GC.GetGCMemoryInfo().FragmentedBytes)} MB");
-            }
-
-            try
-            {
-                using var argon2 = new Argon2id(passwordBytes)
-                {
-                    Salt = salt,
-                    DegreeOfParallelism = Argon2DegreeOfParallelism,
-                    MemorySize = Argon2MemorySize,
-                    Iterations = Argon2Iterations,
-                };
-                var key = argon2.GetBytes(DerivedKeySize);
-                diag?.Invoke($"DeriveKey: completed (after LOH compaction) in {sw.ElapsedMilliseconds} ms");
-                return key;
-            }
-            catch (OutOfMemoryException ex)
-            {
-                lastOom = ex;
-                diag?.Invoke($"DeriveKey: OutOfMemoryException AFTER LOH compaction at {sw.ElapsedMilliseconds} ms -- giving up");
-            }
-
-            throw new InsufficientMemoryForKdfException(
-                BuildOomDiagnostic("database key", Argon2MemorySize),
-                lastOom);
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(passwordBytes);
-        }
-    }
-
-    /// <summary>
-    /// B12: produce a diagnostic message that contradicts the bare
-    /// "Insufficient memory" runtime text by reporting actual process
-    /// memory state. If the OS reports plenty of free memory but the
-    /// process still cannot allocate, the failure is LOH fragmentation
-    /// (or the debugger's Diagnostic Tools window pinning memory),
-    /// which the user can address.
-    /// </summary>
-    private static string BuildOomDiagnostic(string what, int kdfMemoryKb)
-    {
-        try
-        {
-            var proc = System.Diagnostics.Process.GetCurrentProcess();
-            var workingSetMb = ToMegabytes(proc.WorkingSet64);
-            var privateMb = ToMegabytes(proc.PrivateMemorySize64);
-            var gcMb = ToMegabytes(GC.GetTotalMemory(forceFullCollection: false));
-            var memInfo = GC.GetGCMemoryInfo();
-            var totalAvailableMb = ToMegabytes(memInfo.TotalAvailableMemoryBytes);
-
-            return $"Unable to derive the {what}: Argon2id key derivation could not allocate " +
-                   $"its {kdfMemoryKb / 1024} MB working memory after a forced LOH compaction. " +
-                   $"Process state: workingSet={workingSetMb} MB, privateBytes={privateMb} MB, " +
-                   $"GC managed={gcMb} MB, GC reports {totalAvailableMb} MB available. " +
-                   $"If 'available' is high, the cause is Large Object Heap fragmentation -- " +
-                   $"common when running under the Visual Studio debugger with Diagnostic Tools open. " +
-                   $"Close Diagnostic Tools (Debug > Windows > Show Diagnostic Tools), or run " +
-                   $"the app outside the debugger.";
-        }
-        catch
-        {
-            return $"Unable to derive the {what}: Argon2id key derivation could not allocate " +
-                   $"its {kdfMemoryKb / 1024} MB working memory. Close other applications, " +
-                   $"close VS Diagnostic Tools, or restart the machine.";
-        }
-    }
+        // Delegates to the single shared Argon2id entry point, which owns the
+        // password-to-bytes conversion (zeroed), the canonical KdfParameters
+        // cost, and the OOM -> LOH-compaction -> retry-once -> throw
+        // InsufficientMemoryForKdfException behaviour. Previously this method
+        // inlined that logic, duplicating EncryptionService and the snapshot
+        // envelope; it now shares one implementation.
+        => Argon2idDeriver.DeriveKey(passwordChars, salt, "database key", diag);
 
     private void OpenAndUnlock(string databasePath, byte[] derivedKey, bool dbExistedBeforeOpen)
     {
