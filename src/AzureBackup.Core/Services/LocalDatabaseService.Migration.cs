@@ -1,5 +1,7 @@
 namespace AzureBackup.Core.Services;
 
+using AzureBackup.Core.Services.Backends;
+
 /// <summary>
 /// Static helpers for catalog-database existence probing and B50
 /// non-destructive quarantine of an unreadable catalog. The legacy
@@ -15,45 +17,18 @@ public partial class LocalDatabaseService
     /// path. Used to decide between first-run setup and unlock prompt.
     /// </summary>
     /// <remarks>
-    /// B10 hardening: the pre-fix implementation was just <c>File.Exists</c>,
-    /// which meant a 0-byte stub file (e.g. left behind by a partial
-    /// pre-fix unlock attempt that crashed after <c>connection.Open()</c>
-    /// but before any pages were written) would mis-route the user into
-    /// the unlock prompt forever. We now require:
-    /// <list type="number">
-    ///   <item>The .db file exists.</item>
-    ///   <item>The .salt sidecar exists (no salt = no key derivation).</item>
-    ///   <item>The .db is at least 4096 bytes (one SQLite page; an
-    ///         empty/stub file fails this).</item>
-    /// </list>
-    /// Returning false routes the user into first-run setup, where
-    /// CleanupStaleArtifacts (called from the same path) will TrySecureDelete
-    /// any stub files so the next launch starts truly fresh.
+    /// W4 Phase 6: a catalog "exists" when it is recognised by
+    /// <see cref="CatalogFormat"/> as either the new application-level
+    /// AES-256-GCM snapshot (AZDB magic header) or a legacy SQLCipher
+    /// database (a non-AZDB file with a <c>.salt</c> sidecar). The legacy
+    /// case is migrated to the snapshot format automatically on the next
+    /// unlock, so both formats route the user to the unlock prompt rather
+    /// than first-run setup. A 0-byte stub or an unrecognised file returns
+    /// false, routing the user into first-run setup (which cleans up any
+    /// stale artefacts).
     /// </remarks>
     public static bool DatabaseExists(string databasePath)
-    {
-        if (string.IsNullOrWhiteSpace(databasePath)) return false;
-        if (!File.Exists(databasePath)) return false;
-
-        // SQLite header is 100 bytes; a freshly-keyed file with one
-        // table is ~32 KB. 4096 (one page) is a defensive lower bound
-        // that catches genuine stub files without false-negative-ing
-        // a real DB.
-        try
-        {
-            var len = new FileInfo(databasePath).Length;
-            if (len < 4096) return false;
-        }
-        catch
-        {
-            return false;
-        }
-
-        // No salt = no possible decryption. Treat as not-a-database.
-        if (!File.Exists(GetSaltFilePath(databasePath))) return false;
-
-        return true;
-    }
+        => CatalogFormat.Detect(databasePath) != CatalogFormat.Kind.Missing;
 
     /// <summary>
     /// B50: moves a corrupt catalog database file (and its companion

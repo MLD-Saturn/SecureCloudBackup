@@ -117,6 +117,17 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
 
             ApplyPragmas();
             CreateSchema();
+
+            if (!snapshotExists)
+            {
+                // Persist the freshly-created (empty-schema) catalog immediately so
+                // a snapshot file exists on disk right after Initialize, matching
+                // the prior backend's contract that DatabaseExists is true once the
+                // catalog has been initialized. The file is the encrypted AZDB
+                // snapshot -- no plaintext touches disk.
+                PersistSnapshotUnlocked();
+            }
+
             EmitDiag("InMemorySnapshotBackend.Initialize: completed successfully");
         }
         catch
@@ -279,7 +290,19 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         out byte[] key, out byte[] salt)
     {
         var encrypted = File.ReadAllBytes(path);
-        var image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out salt);
+        byte[] image;
+        try
+        {
+            image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out salt);
+        }
+        catch (DbSnapshotException ex)
+        {
+            // A snapshot authentication failure means the password is wrong (or
+            // the file was tampered with). Surface the same contract the unlock
+            // flow expects so the UI shows the standard retry prompt rather than a
+            // raw crypto error.
+            throw new InvalidPasswordException("Invalid password. Please try again.", ex);
+        }
         try
         {
             SqliteSerialization.DeserializeInto(connection, image);

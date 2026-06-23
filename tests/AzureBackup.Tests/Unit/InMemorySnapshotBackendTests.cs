@@ -43,14 +43,19 @@ public sealed class InMemorySnapshotBackendTests : IDisposable
     }
 
     [Fact]
-    public void Initialize_FreshPath_DoesNotWriteSnapshotUntilCheckpoint()
+    public void Initialize_FreshPath_WritesInitialEncryptedSnapshot()
     {
         using var backend = new InMemorySnapshotBackend();
 
         backend.Initialize(_dbPath, Password);
 
-        // Nothing persisted yet -- the in-memory DB exists but no snapshot file.
-        Assert.False(File.Exists(_dbPath));
+        // Initialize persists an initial (empty-schema) snapshot so the catalog
+        // is detectable on disk right away (first-run vs. unlock routing relies
+        // on this). The on-disk file is the encrypted AZDB envelope, never
+        // plaintext.
+        Assert.True(File.Exists(_dbPath));
+        var bytes = File.ReadAllBytes(_dbPath);
+        Assert.True(DbSnapshotEnvelope.HasMagic(bytes), "Initial snapshot must be an AZDB envelope.");
     }
 
     [Fact]
