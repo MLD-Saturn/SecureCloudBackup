@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Engine-AGNOSTIC managed SQLite interop shared by AzureBackup.Core (modern
+    e_sqlite3 engine) and AzureBackup.Migration (legacy e_sqlcipher engine).
+    References Microsoft.Data.Sqlite + SQLitePCLRaw.core but DELIBERATELY no
+    native bundle, so each consuming project keeps its own single engine while
+    sharing the fragile sqlite3-handle reflection, the serialize/deserialize
+    marshaling, and the schema+row copy logic (which were previously duplicated
+    verbatim in both projects).
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.6" />
+    <PackageReference Include="SQLitePCLRaw.core" Version="2.1.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AzureBackup.Tests" />
+  </ItemGroup>
+
+</Project>

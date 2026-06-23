@@ -1,7 +1,6 @@
-using System.Runtime.InteropServices;
 using AzureBackup.Crypto;
+using AzureBackup.SqliteInterop;
 using Microsoft.Data.Sqlite;
-using SQLitePCL;
 
 namespace AzureBackup.Core.Services.Backends;
 
@@ -253,13 +252,13 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         if (_connection == null || _snapshotPath == null || _snapshotKey == null || _snapshotSalt == null)
             return;
 
-        var image = SerializeDatabase(_connection);
+        var image = SqliteSerialization.Serialize(_connection);
         try
         {
             // Uses the cached key + salt; a fresh nonce is generated per write
             // inside the envelope, so the (key, nonce) pair is never reused.
             var encrypted = DbSnapshotEnvelope.Encrypt(image, _snapshotKey, _snapshotSalt);
-            AtomicWrite(_snapshotPath, encrypted);
+            AtomicFile.WriteAllBytesAtomic(_snapshotPath, encrypted);
             EmitDiag($"InMemorySnapshotBackend: persisted snapshot ({encrypted.Length} bytes)");
         }
         finally
@@ -283,120 +282,11 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         var image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out salt);
         try
         {
-            DeserializeInto(connection, image);
+            SqliteSerialization.DeserializeInto(connection, image);
         }
         finally
         {
             System.Security.Cryptography.CryptographicOperations.ZeroMemory(image);
-        }
-    }
-
-    /// <summary>
-    /// Serializes the "main" database of <paramref name="connection"/> to a
-    /// managed byte image via <c>sqlite3_serialize</c>, copying out of the
-    /// SQLite-owned buffer and freeing it.
-    /// </summary>
-    private static byte[] SerializeDatabase(SqliteConnection connection)
-    {
-        var handle = GetSqliteHandle(connection);
-        nint ptr = raw.sqlite3_serialize(handle, "main", out long length, 0);
-        if (ptr == 0 || length <= 0)
-            throw new InvalidOperationException($"sqlite3_serialize failed (ptr={ptr}, len={length}).");
-        try
-        {
-            var image = new byte[length];
-            Marshal.Copy(ptr, image, 0, checked((int)length));
-            return image;
-        }
-        finally
-        {
-            raw.sqlite3_free(ptr);
-        }
-    }
-
-    /// <summary>
-    /// Deserializes <paramref name="image"/> into the "main" database of
-    /// <paramref name="connection"/>. The image is copied into a
-    /// SQLite-allocated buffer that SQLite owns and frees on connection close
-    /// (<c>FREEONCLOSE</c>).
-    /// </summary>
-    private static void DeserializeInto(SqliteConnection connection, byte[] image)
-    {
-        var handle = GetSqliteHandle(connection);
-        nint buf = raw.sqlite3_malloc(image.Length);
-        if (buf == 0)
-            throw new InvalidOperationException("sqlite3_malloc failed for snapshot deserialize.");
-        // From here SQLite owns 'buf' (FREEONCLOSE), even on error after deserialize.
-        Marshal.Copy(image, 0, buf, image.Length);
-        int rc = raw.sqlite3_deserialize(
-            handle, "main", buf,
-            image.Length, image.Length,
-            raw.SQLITE_DESERIALIZE_RESIZEABLE | raw.SQLITE_DESERIALIZE_FREEONCLOSE);
-        if (rc != raw.SQLITE_OK)
-            throw new InvalidOperationException($"sqlite3_deserialize failed (rc={rc}).");
-    }
-
-    /// <summary>
-    /// Reaches the underlying <see cref="sqlite3"/> handle from a
-    /// <see cref="SqliteConnection"/>. Microsoft.Data.Sqlite exposes it via an
-    /// internal member whose exact name varies by version, so it is located by
-    /// TYPE rather than name (the literal "Handle" name is null in some 10.x
-    /// builds).
-    /// </summary>
-    private static sqlite3 GetSqliteHandle(SqliteConnection connection)
-    {
-        var t = typeof(SqliteConnection);
-        const System.Reflection.BindingFlags Flags =
-            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public |
-            System.Reflection.BindingFlags.Instance;
-        foreach (var p in t.GetProperties(Flags))
-            if (typeof(sqlite3).IsAssignableFrom(p.PropertyType) && p.GetValue(connection) is sqlite3 s)
-                return s;
-        foreach (var f in t.GetFields(Flags))
-            if (typeof(sqlite3).IsAssignableFrom(f.FieldType) && f.GetValue(connection) is sqlite3 s)
-                return s;
-        throw new InvalidOperationException(
-            "Could not locate the sqlite3 handle on SqliteConnection (Microsoft.Data.Sqlite internals changed).");
-    }
-
-    /// <summary>
-    /// Writes <paramref name="bytes"/> to <paramref name="path"/> via a
-    /// write-temp-then-atomic-rename sequence. The bytes are written to a temp
-    /// file in the same directory and flushed to disk, and only then is the temp
-    /// atomically renamed over the destination.
-    /// </summary>
-    /// <remarks>
-    /// Crash-safety guarantee: because the destination is replaced by a single
-    /// atomic rename (<c>MoveFileEx</c> / <c>rename</c>) performed only AFTER the
-    /// new content is fully written and flushed, a crash or failure at any point
-    /// BEFORE the rename leaves the previous complete snapshot intact, and the
-    /// rename transitions the destination from the old complete file to the new
-    /// complete file with no observable partial state. (A failure injected at the
-    /// rename step itself is not part of this guarantee -- the OS rename is the
-    /// atomic commit point.)
-    /// </remarks>
-    private static void AtomicWrite(string path, byte[] bytes)
-    {
-        var dir = Path.GetDirectoryName(path) ?? ".";
-        var temp = Path.Combine(dir, Path.GetFileName(path) + ".tmp-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            using (var fs = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-            {
-                fs.Write(bytes, 0, bytes.Length);
-                fs.Flush(flushToDisk: true);
-            }
-
-            // Atomic replace: maps to MoveFileEx(MOVEFILE_REPLACE_EXISTING) on
-            // Windows and rename(2) on Unix, both atomic on the same volume.
-            File.Move(temp, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(temp))
-            {
-                try { File.Delete(temp); } catch { /* best effort */ }
-            }
         }
     }
 

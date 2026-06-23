@@ -66,11 +66,20 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     private string ReadSaltBase64()
         => Convert.ToBase64String(File.ReadAllBytes(_legacyDbPath + ".salt"));
 
+    private static MigrationRequest MakeRequest(string dbPath, string saltBase64, string password, string outputPath)
+        => new()
+        {
+            LegacyDatabasePath = dbPath,
+            LegacySaltBase64 = saltBase64,
+            Password = password.ToCharArray(),
+            OutputSnapshotPath = outputPath
+        };
+
     [Fact]
     public void Migrate_LegacySqlCipherCatalog_WritesDecryptableSnapshot()
     {
         SeedLegacyDatabase();
-        var request = new MigrationRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
 
         LegacyCatalogMigrator.Migrate(request);
 
@@ -86,7 +95,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     public void Migrate_SnapshotOpensInTheModernBackend_WithSameData()
     {
         var (seededFile, seededChunk) = SeedLegacyDatabase();
-        var request = new MigrationRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
 
         LegacyCatalogMigrator.Migrate(request);
 
@@ -109,7 +118,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     public void Migrate_WithWrongPassword_ThrowsInvalidPassword()
     {
         SeedLegacyDatabase();
-        var request = new MigrationRequest(_legacyDbPath, ReadSaltBase64(), "wrong-password", _outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), "wrong-password", _outputSnapshotPath);
 
         var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
         Assert.Equal(MigrationExitCode.InvalidPassword, ex.ExitCode);
@@ -119,7 +128,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     [Fact]
     public void Migrate_WithMissingLegacyDatabase_ThrowsSourceNotFound()
     {
-        var request = new MigrationRequest(
+        var request = MakeRequest(
             Path.Combine(_dir, "does-not-exist.db"),
             Convert.ToBase64String(new byte[KdfParameters.SaltSize]),
             Password,
@@ -133,7 +142,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     public void Migrate_WithBadSaltLength_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
-        var request = new MigrationRequest(
+        var request = MakeRequest(
             _legacyDbPath,
             Convert.ToBase64String(new byte[8]), // wrong length
             Password,
@@ -147,7 +156,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     public void Migrate_WithNonBase64Salt_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
-        var request = new MigrationRequest(_legacyDbPath, "not!base64!", Password, _outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, "not!base64!", Password, _outputSnapshotPath);
 
         var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
         Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
@@ -157,9 +166,145 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
     public void Migrate_WithEmptyPassword_ThrowsBadRequest()
     {
         SeedLegacyDatabase();
-        var request = new MigrationRequest(_legacyDbPath, ReadSaltBase64(), string.Empty, _outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), string.Empty, _outputSnapshotPath);
 
         var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
         Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
+    }
+
+    // ---- T1: empty catalog (schema, zero rows) -----------------------------
+
+    [Fact]
+    public void Migrate_EmptyCatalog_ProducesValidSnapshotWithSchemaOnly()
+    {
+        // Seed a fresh SQLCipher catalog with NO data rows beyond the seeded
+        // config row (a never-used database). Migration must still succeed and
+        // produce a valid, openable snapshot.
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_legacyDbPath, Password.AsSpan());
+            // Intentionally save nothing.
+        }
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+
+        LegacyCatalogMigrator.Migrate(request);
+
+        Assert.True(File.Exists(_outputSnapshotPath));
+        using var migrated = new InMemorySnapshotBackend();
+        migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
+        // No backed-up files, but the catalog is valid and queryable.
+        Assert.Empty(migrated.GetAllBackedUpFiles());
+        Assert.NotNull(migrated.GetConfiguration());
+    }
+
+    // ---- T2: verification-failure path -------------------------------------
+
+    [Fact]
+    public void Migrate_WhenOutputPathIsADirectory_ThrowsWriteFailed()
+    {
+        SeedLegacyDatabase();
+        // Make the output path a directory so the atomic write cannot create the
+        // file, exercising the WriteFailed branch.
+        Directory.CreateDirectory(_outputSnapshotPath);
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+
+        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
+        Assert.Equal(MigrationExitCode.WriteFailed, ex.ExitCode);
+    }
+
+    // ---- T3: MigrationRunner stdin handling --------------------------------
+
+    [Fact]
+    public void Runner_WithEmptyStdin_ReturnsBadRequest()
+    {
+        using var stdin = new StringReader(string.Empty);
+        using var stderr = new StringWriter();
+
+        var code = MigrationRunner.Run(stdin, stderr);
+
+        Assert.Equal((int)MigrationExitCode.BadRequest, code);
+    }
+
+    [Fact]
+    public void Runner_WithMalformedJson_ReturnsBadRequest()
+    {
+        using var stdin = new StringReader("{ this is not valid json ");
+        using var stderr = new StringWriter();
+
+        var code = MigrationRunner.Run(stdin, stderr);
+
+        Assert.Equal((int)MigrationExitCode.BadRequest, code);
+    }
+
+    [Fact]
+    public void Runner_WithWellFormedRequest_RunsMigrationAndReturnsSuccess()
+    {
+        SeedLegacyDatabase();
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            LegacyDatabasePath = _legacyDbPath,
+            LegacySaltBase64 = ReadSaltBase64(),
+            Password,
+            OutputSnapshotPath = _outputSnapshotPath
+        });
+        using var stdin = new StringReader(json);
+        using var stderr = new StringWriter();
+
+        var code = MigrationRunner.Run(stdin, stderr);
+
+        Assert.Equal((int)MigrationExitCode.Success, code);
+        Assert.True(File.Exists(_outputSnapshotPath));
+    }
+
+    [Fact]
+    public void Runner_WithMissingSource_ReturnsSourceNotFound()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            LegacyDatabasePath = Path.Combine(_dir, "nope.db"),
+            LegacySaltBase64 = Convert.ToBase64String(new byte[KdfParameters.SaltSize]),
+            Password,
+            OutputSnapshotPath = _outputSnapshotPath
+        });
+        using var stdin = new StringReader(json);
+        using var stderr = new StringWriter();
+
+        var code = MigrationRunner.Run(stdin, stderr);
+
+        Assert.Equal((int)MigrationExitCode.SourceNotFound, code);
+    }
+
+    // ---- T4: large catalog round-trip --------------------------------------
+
+    [Fact]
+    public void Migrate_LargeCatalog_RoundTripsAllRows()
+    {
+        const int fileCount = 1500;
+        using (var backend = new SqliteBackend())
+        {
+            backend.Initialize(_legacyDbPath, Password.AsSpan());
+            for (var i = 0; i < fileCount; i++)
+            {
+                backend.SaveBackedUpFile(new BackedUpFile
+                {
+                    LocalPath = $"C:/data/file-{i}.dat",
+                    FileSize = i,
+                    FileHash = $"hash-{i}",
+                    LastModified = DateTime.UtcNow,
+                    Chunks = []
+                });
+            }
+        }
+        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+
+        LegacyCatalogMigrator.Migrate(request);
+
+        using var migrated = new InMemorySnapshotBackend();
+        migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
+        var all = migrated.GetAllBackedUpFiles();
+        Assert.Equal(fileCount, all.Count);
+        var sample = migrated.GetBackedUpFile("C:/data/file-1499.dat");
+        Assert.NotNull(sample);
+        Assert.Equal(1499, sample!.FileSize);
     }
 }

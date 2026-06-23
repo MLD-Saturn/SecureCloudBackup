@@ -1,4 +1,3 @@
-using System.Text.Json;
 using AzureBackup.Migration;
 
 // One-time legacy-database migration helper.
@@ -10,48 +9,7 @@ using AzureBackup.Migration;
 // line to STDERR and returns a MigrationExitCode as the process exit code.
 //
 // Usage is intended to be programmatic; there are no command-line arguments.
+// The real logic lives in MigrationRunner so it is unit-testable with injected
+// reader/writer streams.
 
-return Run();
-
-static int Run()
-{
-    MigrationRequest? request;
-    try
-    {
-        var json = Console.In.ReadToEnd();
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            Console.Error.WriteLine("migration: no request received on stdin");
-            return (int)MigrationExitCode.BadRequest;
-        }
-
-        request = JsonSerializer.Deserialize(json, MigrationJsonContext.Default.MigrationRequest);
-        if (request is null)
-        {
-            Console.Error.WriteLine("migration: request deserialized to null");
-            return (int)MigrationExitCode.BadRequest;
-        }
-    }
-    catch (JsonException ex)
-    {
-        Console.Error.WriteLine($"migration: invalid request json -- {ex.Message}");
-        return (int)MigrationExitCode.BadRequest;
-    }
-
-    try
-    {
-        LegacyCatalogMigrator.Migrate(request);
-        Console.Error.WriteLine("migration: success");
-        return (int)MigrationExitCode.Success;
-    }
-    catch (MigrationException ex)
-    {
-        Console.Error.WriteLine($"migration: failed ({ex.ExitCode}) -- {ex.Message}");
-        return (int)ex.ExitCode;
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"migration: unexpected error -- {ex.GetType().Name}: {ex.Message}");
-        return (int)MigrationExitCode.Unexpected;
-    }
-}
+return MigrationRunner.Run(Console.In, Console.Error);

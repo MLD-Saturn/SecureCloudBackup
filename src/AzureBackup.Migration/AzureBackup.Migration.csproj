@@ -25,6 +25,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\AzureBackup.Crypto\AzureBackup.Crypto.csproj" />
+    <ProjectReference Include="..\AzureBackup.SqliteInterop\AzureBackup.SqliteInterop.csproj" />
   </ItemGroup>
 
   <ItemGroup>
