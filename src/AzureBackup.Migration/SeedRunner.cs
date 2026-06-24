@@ -1,7 +1,6 @@
 using System.Text.Json;
 using AzureBackup.Crypto;
 using Microsoft.Data.Sqlite;
-using SQLitePCL;
 
 namespace AzureBackup.Migration;
 
@@ -43,8 +42,8 @@ internal static class SeedRunner
         byte[]? jsonBytes = null;
         try
         {
-            jsonChars = ReadAll(stdin);
-            if (jsonChars.Length == 0 || IsAllWhitespace(jsonChars))
+            jsonChars = StdinRequest.ReadAll(stdin);
+            if (jsonChars.Length == 0 || StdinRequest.IsAllWhitespace(jsonChars))
             {
                 stderr.WriteLine("seed: no request received on stdin");
                 return (int)MigrationExitCode.BadRequest;
@@ -116,7 +115,7 @@ internal static class SeedRunner
             throw new MigrationException(MigrationExitCode.BadRequest,
                 $"Salt must be {KdfParameters.SaltSize} bytes (got {salt.Length}).");
 
-        EnsureSqlCipherProvider();
+        SqlCipherProvider.Ensure();
 
         // Derive the SQLCipher unlock key with the SAME purpose string the
         // migrator reads with, so a seeded catalog is unlockable by that path.
@@ -291,52 +290,5 @@ internal static class SeedRunner
         }
 
         tx.Commit();
-    }
-
-    private static char[] ReadAll(TextReader reader)
-    {
-        var buffer = new char[8192];
-        var length = 0;
-        int read;
-        while ((read = reader.Read(buffer, length, buffer.Length - length)) > 0)
-        {
-            length += read;
-            if (length == buffer.Length)
-            {
-                var bigger = new char[buffer.Length * 2];
-                Array.Copy(buffer, bigger, length);
-                Array.Clear(buffer);
-                buffer = bigger;
-            }
-        }
-
-        if (length == buffer.Length)
-            return buffer;
-
-        var result = new char[length];
-        Array.Copy(buffer, result, length);
-        Array.Clear(buffer);
-        return result;
-    }
-
-    private static bool IsAllWhitespace(char[] chars)
-    {
-        foreach (var c in chars)
-            if (!char.IsWhiteSpace(c)) return false;
-        return true;
-    }
-
-    private static readonly object ProviderGate = new();
-    private static bool _providerRegistered;
-
-    private static void EnsureSqlCipherProvider()
-    {
-        if (_providerRegistered) return;
-        lock (ProviderGate)
-        {
-            if (_providerRegistered) return;
-            raw.SetProvider(new SQLite3Provider_e_sqlcipher());
-            _providerRegistered = true;
-        }
     }
 }

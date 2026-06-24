@@ -2,7 +2,6 @@ using System.Security.Cryptography;
 using AzureBackup.Crypto;
 using AzureBackup.SqliteInterop;
 using Microsoft.Data.Sqlite;
-using SQLitePCL;
 
 namespace AzureBackup.Migration;
 
@@ -58,7 +57,7 @@ internal static class LegacyCatalogMigrator
                 $"Salt must be {KdfParameters.SaltSize} bytes (got {salt.Length}).");
 
         // Ensure the SQLCipher provider is the active engine before opening.
-        EnsureSqlCipherProvider();
+        SqlCipherProvider.Ensure();
 
         // Derive the legacy SQLCipher unlock key (same KDF the app used). The
         // password is a char[] the caller zeroes; it never becomes a string here.
@@ -213,21 +212,4 @@ internal static class LegacyCatalogMigrator
            || (ex.Message?.Contains("not a database", StringComparison.OrdinalIgnoreCase) ?? false)
            || (ex.Message?.Contains("file is encrypted", StringComparison.OrdinalIgnoreCase) ?? false)
            || (ex.Message?.Contains("database disk image is malformed", StringComparison.OrdinalIgnoreCase) ?? false);
-
-    private static readonly object ProviderGate = new();
-    private static bool _providerRegistered;
-
-    private static void EnsureSqlCipherProvider()
-    {
-        // This process references ONLY the SQLCipher bundle, but register
-        // explicitly (once) so the active engine is deterministic regardless of
-        // module-initializer order.
-        if (_providerRegistered) return;
-        lock (ProviderGate)
-        {
-            if (_providerRegistered) return;
-            raw.SetProvider(new SQLite3Provider_e_sqlcipher());
-            _providerRegistered = true;
-        }
-    }
 }
