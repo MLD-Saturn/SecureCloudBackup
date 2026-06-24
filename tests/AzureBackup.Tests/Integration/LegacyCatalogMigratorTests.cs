@@ -1,4 +1,6 @@
-using AzureBackup.Core.Models;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
 using AzureBackup.Core.Services.Backends;
 using AzureBackup.Crypto;
 using AzureBackup.Migration;
@@ -7,11 +9,20 @@ using Xunit;
 namespace AzureBackup.Tests;
 
 /// <summary>
-/// Tests for <see cref="LegacyCatalogMigrator"/>: the single-engine migration
-/// helper that reads a legacy SQLCipher catalog and writes the new AES-256-GCM
-/// encrypted snapshot. Seeds a real SQLCipher database via <see cref="SqliteBackend"/>
-/// (the test process runs the SQLCipher engine), migrates it, and asserts the
-/// snapshot decrypts and contains the original data.
+/// Cross-process integration tests for the legacy SQLCipher to AES-256-GCM
+/// snapshot migration (W-DB-enc Step 9).
+///
+/// <para>
+/// The two SQLite native engines cannot coexist in one process: this test
+/// assembly loads <c>e_sqlite3</c> (via Core) which disables SQLCipher
+/// (AGENT_CONTEXT facts 61/62), so the migration -- and even SEEDING a legacy
+/// catalog -- must run OUT OF PROCESS in the single-engine
+/// <c>azurebackup-migrate</c> helper. Each test drives that helper twice: once in
+/// its <c>seed</c> subcommand to write a real SQLCipher catalog, then in its
+/// default migrate mode to produce the snapshot, which is finally opened in the
+/// in-process <see cref="InMemorySnapshotBackend"/> (the modern engine) to assert
+/// the data round-tripped.
+/// </para>
 /// </summary>
 public sealed class LegacyCatalogMigratorTests : IDisposable
 {
@@ -33,188 +44,287 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         try { Directory.Delete(_dir, recursive: true); } catch { /* best effort */ }
     }
 
-    private (BackedUpFile file, ChunkIndexEntry chunk) SeedLegacyDatabase()
+    // ---- helper-process plumbing -------------------------------------------
+
+    /// <summary>
+    /// Resolves the migrate helper exe from the Migration project's OWN build
+    /// output, NOT the test output directory.
+    ///
+    /// <para>
+    /// This matters: the test output directory contains BOTH native SQLite
+    /// engines (e_sqlite3 from Core + e_sqlcipher from Migration, because the test
+    /// project references both), and SQLitePCLRaw's native resolution then binds
+    /// the PLAIN e_sqlite3 engine in that folder -- so the helper's SQLCipher
+    /// PRAGMA key is silently ignored and the seeded database comes out
+    /// unencrypted (AGENT_CONTEXT facts 61/62, observed at the file-copy level).
+    /// The Migration project's own output is single-engine (e_sqlcipher only),
+    /// exactly as the helper ships in production next to the app, so the helper
+    /// must run from there to behave correctly.
+    /// </para>
+    /// </summary>
+    private static string HelperPath()
     {
-        BackedUpFile file;
-        ChunkIndexEntry chunk;
-        using (var backend = new SqliteBackend())
-        {
-            backend.Initialize(_legacyDbPath, Password.AsSpan());
+        var exeName = OperatingSystem.IsWindows() ? "azurebackup-migrate.exe" : "azurebackup-migrate";
 
-            file = new BackedUpFile
-            {
-                LocalPath = "C:/docs/quarterly-report.xlsx",
-                FileSize = 987654,
-                FileHash = "sha256-deadbeef",
-                LastModified = new DateTime(2024, 2, 2, 2, 2, 2, DateTimeKind.Utc),
-                Chunks = []
-            };
-            backend.SaveBackedUpFile(file);
+        // Derive the build configuration + TFM from the test assembly's own path
+        // (.../tests/AzureBackup.Tests/bin/<Config>/<Tfm>/), then point at the
+        // sibling Migration project's single-engine output for the same config+TFM.
+        var baseDir = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var tfm = Path.GetFileName(baseDir);                                  // e.g. net10.0
+        var config = Path.GetFileName(Path.GetDirectoryName(baseDir)!);       // e.g. Debug
 
-            chunk = new ChunkIndexEntry
-            {
-                ChunkHash = "chunk-hash-0001",
-                SizeBytes = 65536,
-                ReferenceCount = 1,
-                CurrentTier = StorageTier.Hot
-            };
-            backend.SaveChunkIndexEntry(chunk);
-        }
-        return (file, chunk);
+        // Walk up to the repository root (the folder that contains 'src').
+        var dir = new DirectoryInfo(baseDir);
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src")))
+            dir = dir.Parent;
+        Assert.True(dir is not null, $"Could not locate the repository root above '{baseDir}'.");
+
+        var candidate = Path.Combine(
+            dir!.FullName, "src", "AzureBackup.Migration", "bin", config, tfm, exeName);
+        Assert.True(File.Exists(candidate),
+            $"Migration helper not found at '{candidate}'. Build the AzureBackup.Migration project " +
+            $"(its single-engine output is required; the test output dir is polluted with e_sqlite3).");
+        return candidate;
     }
 
-    private string ReadSaltBase64()
-        => Convert.ToBase64String(File.ReadAllBytes(_legacyDbPath + ".salt"));
+    /// <summary>
+    /// Launches the helper with an optional subcommand, writes <paramref name="stdinJson"/>
+    /// to its stdin, and returns (exitCode, stderr). Mirrors the production
+    /// orchestrator's process plumbing: redirect stdin + stderr only (never the
+    /// undrained stdout), write, close stdin, wait.
+    /// </summary>
+    private static (int exitCode, string stderr) RunHelper(string? subcommand, string stdinJson)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = HelperPath(),
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        if (!string.IsNullOrEmpty(subcommand))
+            psi.ArgumentList.Add(subcommand);
 
-    private static MigrationRequest MakeRequest(string dbPath, string saltBase64, string password, string outputPath)
-        => new()
+        using var process = new Process { StartInfo = psi };
+        var stderr = new StringBuilder();
+        process.ErrorDataReceived += (_, e) => { if (e.Data != null) stderr.AppendLine(e.Data); };
+
+        Assert.True(process.Start(), "Failed to start the migration helper process.");
+        process.BeginErrorReadLine();
+        process.StandardInput.Write(stdinJson);
+        process.StandardInput.Close();
+
+        Assert.True(process.WaitForExit((int)TimeSpan.FromMinutes(2).TotalMilliseconds),
+            "Migration helper did not exit within the time budget.");
+        process.WaitForExit(); // flush async stderr
+        return (process.ExitCode, stderr.ToString().Trim());
+    }
+
+    private string ReadSaltBase64() =>
+        Convert.ToBase64String(File.ReadAllBytes(_legacyDbPath + ".salt"));
+
+    private static string SeedJson(string dbPath, string saltBase64, string password, int fileCount) =>
+        JsonSerializer.Serialize(new
+        {
+            DatabasePath = dbPath,
+            SaltBase64 = saltBase64,
+            Password = password,
+            FileCount = fileCount,
+        });
+
+    private static string MigrateJson(string dbPath, string saltBase64, string password, string outputPath) =>
+        JsonSerializer.Serialize(new
         {
             LegacyDatabasePath = dbPath,
             LegacySaltBase64 = saltBase64,
-            Password = password.ToCharArray(),
-            OutputSnapshotPath = outputPath
-        };
+            Password = password,
+            OutputSnapshotPath = outputPath,
+        });
 
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
+    /// <summary>
+    /// Seeds a real SQLCipher catalog with <paramref name="fileCount"/> file rows
+    /// via the helper's seed subcommand. Generates a fresh 16-byte salt and writes
+    /// it (and the catalog) under <see cref="_legacyDbPath"/>.
+    /// </summary>
+    private void SeedLegacyDatabase(int fileCount)
+    {
+        var salt = new byte[KdfParameters.SaltSize];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(salt);
+        var (exit, stderr) = RunHelper("seed", SeedJson(_legacyDbPath, Convert.ToBase64String(salt), Password, fileCount));
+        Assert.True(exit == 0, $"Seed helper failed (exit {exit}): {stderr}");
+        Assert.True(File.Exists(_legacyDbPath), "Seed did not create the legacy database.");
+        Assert.True(File.Exists(_legacyDbPath + ".salt"), "Seed did not create the salt sidecar.");
+    }
+
+    // ---- happy path / empty / large ----------------------------------------
+
+    [Fact]
     public void Migrate_LegacySqlCipherCatalog_WritesDecryptableSnapshot()
     {
-        SeedLegacyDatabase();
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        SeedLegacyDatabase(fileCount: 3);
 
-        LegacyCatalogMigrator.Migrate(request);
+        var (exit, stderr) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
 
+        Assert.True(exit == 0, $"Migrate helper failed (exit {exit}): {stderr}");
         Assert.True(File.Exists(_outputSnapshotPath));
         var bytes = File.ReadAllBytes(_outputSnapshotPath);
         Assert.True(DbSnapshotEnvelope.HasMagic(bytes), "Output must be an AZDB snapshot.");
-        // Decrypts with the same password.
         var image = DbSnapshotEnvelope.Decrypt(bytes, Password);
         Assert.NotEmpty(image);
     }
 
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
+    [Fact]
     public void Migrate_SnapshotOpensInTheModernBackend_WithSameData()
     {
-        var (seededFile, seededChunk) = SeedLegacyDatabase();
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        SeedLegacyDatabase(fileCount: 5);
 
-        LegacyCatalogMigrator.Migrate(request);
+        var (exit, stderr) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
+        Assert.True(exit == 0, $"Migrate helper failed (exit {exit}): {stderr}");
 
-        // The migrated snapshot must open in the new in-memory snapshot backend
-        // and contain the seeded data verbatim.
         using var backend = new InMemorySnapshotBackend();
         backend.Initialize(_outputSnapshotPath, Password.AsSpan());
 
-        var file = backend.GetBackedUpFile(seededFile.LocalPath);
+        var file = backend.GetBackedUpFile("C:/data/file-0.dat");
         Assert.NotNull(file);
-        Assert.Equal(seededFile.FileSize, file!.FileSize);
-        Assert.Equal(seededFile.FileHash, file.FileHash);
-
-        var chunk = backend.GetChunkIndexEntry(seededChunk.ChunkHash);
-        Assert.NotNull(chunk);
-        Assert.Equal(seededChunk.SizeBytes, chunk!.SizeBytes);
+        Assert.Equal(0, file!.FileSize);
+        Assert.Equal("hash-0", file.FileHash);
     }
 
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WithWrongPassword_ThrowsInvalidPassword()
-    {
-        SeedLegacyDatabase();
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), "wrong-password", _outputSnapshotPath);
-
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.InvalidPassword, ex.ExitCode);
-        Assert.False(File.Exists(_outputSnapshotPath), "No snapshot should be written on a wrong password.");
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WithMissingLegacyDatabase_ThrowsSourceNotFound()
-    {
-        var request = MakeRequest(
-            Path.Combine(_dir, "does-not-exist.db"),
-            Convert.ToBase64String(new byte[KdfParameters.SaltSize]),
-            Password,
-            _outputSnapshotPath);
-
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.SourceNotFound, ex.ExitCode);
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WithBadSaltLength_ThrowsBadRequest()
-    {
-        SeedLegacyDatabase();
-        var request = MakeRequest(
-            _legacyDbPath,
-            Convert.ToBase64String(new byte[8]), // wrong length
-            Password,
-            _outputSnapshotPath);
-
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WithNonBase64Salt_ThrowsBadRequest()
-    {
-        SeedLegacyDatabase();
-        var request = MakeRequest(_legacyDbPath, "not!base64!", Password, _outputSnapshotPath);
-
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WithEmptyPassword_ThrowsBadRequest()
-    {
-        SeedLegacyDatabase();
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), string.Empty, _outputSnapshotPath);
-
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.BadRequest, ex.ExitCode);
-    }
-
-    // ---- T1: empty catalog (schema, zero rows) -----------------------------
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
+    [Fact]
     public void Migrate_EmptyCatalog_ProducesValidSnapshotWithSchemaOnly()
     {
-        // Seed a fresh SQLCipher catalog with NO data rows beyond the seeded
-        // config row (a never-used database). Migration must still succeed and
-        // produce a valid, openable snapshot.
-        using (var backend = new SqliteBackend())
-        {
-            backend.Initialize(_legacyDbPath, Password.AsSpan());
-            // Intentionally save nothing.
-        }
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        SeedLegacyDatabase(fileCount: 0);
 
-        LegacyCatalogMigrator.Migrate(request);
+        var (exit, stderr) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
+        Assert.True(exit == 0, $"Migrate helper failed (exit {exit}): {stderr}");
 
-        Assert.True(File.Exists(_outputSnapshotPath));
         using var migrated = new InMemorySnapshotBackend();
         migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
-        // No backed-up files, but the catalog is valid and queryable.
         Assert.Empty(migrated.GetAllBackedUpFiles());
         Assert.NotNull(migrated.GetConfiguration());
     }
 
-    // ---- T2: verification-failure path -------------------------------------
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_WhenOutputPathIsADirectory_ThrowsWriteFailed()
+    [Fact]
+    public void Migrate_LargeCatalog_RoundTripsAllRows()
     {
-        SeedLegacyDatabase();
-        // Make the output path a directory so the atomic write cannot create the
-        // file, exercising the WriteFailed branch.
-        Directory.CreateDirectory(_outputSnapshotPath);
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
+        const int fileCount = 1500;
+        SeedLegacyDatabase(fileCount);
 
-        var ex = Assert.Throws<MigrationException>(() => LegacyCatalogMigrator.Migrate(request));
-        Assert.Equal(MigrationExitCode.WriteFailed, ex.ExitCode);
+        var (exit, stderr) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
+        Assert.True(exit == 0, $"Migrate helper failed (exit {exit}): {stderr}");
+
+        using var migrated = new InMemorySnapshotBackend();
+        migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
+        var all = migrated.GetAllBackedUpFiles();
+        Assert.Equal(fileCount, all.Count);
+        var sample = migrated.GetBackedUpFile("C:/data/file-1499.dat");
+        Assert.NotNull(sample);
+        Assert.Equal(1499, sample!.FileSize);
     }
 
-    // ---- T3: MigrationRunner stdin handling --------------------------------
+    // ---- migrate error paths (exit codes across the process boundary) -------
 
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
+    [Fact]
+    public void Migrate_WithWrongPassword_ReturnsInvalidPasswordAndWritesNoSnapshot()
+    {
+        SeedLegacyDatabase(fileCount: 2);
+
+        var (exit, _) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), "wrong-password", _outputSnapshotPath));
+
+        Assert.Equal((int)MigrationExitCode.InvalidPassword, exit);
+        Assert.False(File.Exists(_outputSnapshotPath), "No snapshot should be written on a wrong password.");
+    }
+
+    [Fact]
+    public void Migrate_WithMissingLegacyDatabase_ReturnsSourceNotFound()
+    {
+        var missing = Path.Combine(_dir, "does-not-exist.db");
+        var saltBase64 = Convert.ToBase64String(new byte[KdfParameters.SaltSize]);
+
+        var (exit, _) = RunHelper(null, MigrateJson(missing, saltBase64, Password, _outputSnapshotPath));
+
+        Assert.Equal((int)MigrationExitCode.SourceNotFound, exit);
+    }
+
+    [Fact]
+    public void Migrate_WithBadSaltLength_ReturnsBadRequest()
+    {
+        SeedLegacyDatabase(fileCount: 1);
+
+        var (exit, _) = RunHelper(null, MigrateJson(_legacyDbPath, Convert.ToBase64String(new byte[8]), Password, _outputSnapshotPath));
+
+        Assert.Equal((int)MigrationExitCode.BadRequest, exit);
+    }
+
+    [Fact]
+    public void Migrate_WithNonBase64Salt_ReturnsBadRequest()
+    {
+        SeedLegacyDatabase(fileCount: 1);
+
+        var (exit, _) = RunHelper(null, MigrateJson(_legacyDbPath, "not!base64!", Password, _outputSnapshotPath));
+
+        Assert.Equal((int)MigrationExitCode.BadRequest, exit);
+    }
+
+    [Fact]
+    public void Migrate_WithEmptyPassword_ReturnsBadRequest()
+    {
+        SeedLegacyDatabase(fileCount: 1);
+
+        var (exit, _) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), string.Empty, _outputSnapshotPath));
+
+        Assert.Equal((int)MigrationExitCode.BadRequest, exit);
+    }
+
+    // ---- interrupted migration / crash safety ------------------------------
+
+    [Fact]
+    public void Migrate_KilledMidRun_LeavesNoSnapshotAndRetrySucceeds()
+    {
+        // A large catalog makes the helper take long enough to kill mid-run.
+        SeedLegacyDatabase(fileCount: 20000);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = HelperPath(),
+            RedirectStandardInput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using (var process = new Process { StartInfo = psi })
+        {
+            Assert.True(process.Start());
+            process.StandardInput.Write(MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
+            process.StandardInput.Close();
+            // Kill almost immediately so the migration cannot have completed the
+            // atomic write + rename of the final snapshot.
+            process.Kill(entireProcessTree: true);
+            process.WaitForExit();
+        }
+
+        // The helper writes the snapshot atomically (temp + rename), so a kill
+        // must never leave a partial file at the final output path. The original
+        // legacy catalog is untouched (the helper only reads it).
+        Assert.False(File.Exists(_outputSnapshotPath),
+            "A killed migration must not leave a snapshot at the final output path.");
+        Assert.True(File.Exists(_legacyDbPath), "The legacy source must be left intact.");
+
+        // A clean retry must now succeed end-to-end.
+        var (exit, stderr) = RunHelper(null, MigrateJson(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath));
+        Assert.True(exit == 0, $"Retry after interrupted migration failed (exit {exit}): {stderr}");
+        Assert.True(File.Exists(_outputSnapshotPath));
+        using var migrated = new InMemorySnapshotBackend();
+        migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
+        Assert.Equal(20000, migrated.GetAllBackedUpFiles().Count);
+    }
+
+    // ---- MigrationRunner stdin contract (no SQLCipher; safe in-process) -----
+    // These short-circuit on a bad request BEFORE any SQLCipher engine call, so
+    // they run safely in the test process via internals (InternalsVisibleTo).
+
+    [Fact]
     public void Runner_WithEmptyStdin_ReturnsBadRequest()
     {
         using var stdin = new StringReader(string.Empty);
@@ -225,7 +335,7 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         Assert.Equal((int)MigrationExitCode.BadRequest, code);
     }
 
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
+    [Fact]
     public void Runner_WithMalformedJson_ReturnsBadRequest()
     {
         using var stdin = new StringReader("{ this is not valid json ");
@@ -234,77 +344,5 @@ public sealed class LegacyCatalogMigratorTests : IDisposable
         var code = MigrationRunner.Run(stdin, stderr);
 
         Assert.Equal((int)MigrationExitCode.BadRequest, code);
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Runner_WithWellFormedRequest_RunsMigrationAndReturnsSuccess()
-    {
-        SeedLegacyDatabase();
-        var json = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            LegacyDatabasePath = _legacyDbPath,
-            LegacySaltBase64 = ReadSaltBase64(),
-            Password,
-            OutputSnapshotPath = _outputSnapshotPath
-        });
-        using var stdin = new StringReader(json);
-        using var stderr = new StringWriter();
-
-        var code = MigrationRunner.Run(stdin, stderr);
-
-        Assert.Equal((int)MigrationExitCode.Success, code);
-        Assert.True(File.Exists(_outputSnapshotPath));
-    }
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Runner_WithMissingSource_ReturnsSourceNotFound()
-    {
-        var json = System.Text.Json.JsonSerializer.Serialize(new
-        {
-            LegacyDatabasePath = Path.Combine(_dir, "nope.db"),
-            LegacySaltBase64 = Convert.ToBase64String(new byte[KdfParameters.SaltSize]),
-            Password,
-            OutputSnapshotPath = _outputSnapshotPath
-        });
-        using var stdin = new StringReader(json);
-        using var stderr = new StringWriter();
-
-        var code = MigrationRunner.Run(stdin, stderr);
-
-        Assert.Equal((int)MigrationExitCode.SourceNotFound, code);
-    }
-
-    // ---- T4: large catalog round-trip --------------------------------------
-
-    [Fact(Skip = "In-process SQLCipher is no longer possible: after W-DB-enc Step 7 the test assembly loads BOTH bundle_e_sqlite3 (via Core) and bundle_e_sqlcipher (via Migration), and per the two-engines-cannot-coexist rule e_sqlite3 wins process-wide so SQLCipher is disabled. These tests seeded a SQLCipher catalog in-process and ran the migrator in-process; real coverage moves to the cross-process two-exe integration phase (Step 9).")]
-    public void Migrate_LargeCatalog_RoundTripsAllRows()
-    {
-        const int fileCount = 1500;
-        using (var backend = new SqliteBackend())
-        {
-            backend.Initialize(_legacyDbPath, Password.AsSpan());
-            for (var i = 0; i < fileCount; i++)
-            {
-                backend.SaveBackedUpFile(new BackedUpFile
-                {
-                    LocalPath = $"C:/data/file-{i}.dat",
-                    FileSize = i,
-                    FileHash = $"hash-{i}",
-                    LastModified = DateTime.UtcNow,
-                    Chunks = []
-                });
-            }
-        }
-        var request = MakeRequest(_legacyDbPath, ReadSaltBase64(), Password, _outputSnapshotPath);
-
-        LegacyCatalogMigrator.Migrate(request);
-
-        using var migrated = new InMemorySnapshotBackend();
-        migrated.Initialize(_outputSnapshotPath, Password.AsSpan());
-        var all = migrated.GetAllBackedUpFiles();
-        Assert.Equal(fileCount, all.Count);
-        var sample = migrated.GetBackedUpFile("C:/data/file-1499.dat");
-        Assert.NotNull(sample);
-        Assert.Equal(1499, sample!.FileSize);
     }
 }
