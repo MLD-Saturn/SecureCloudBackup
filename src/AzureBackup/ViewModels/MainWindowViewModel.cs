@@ -250,23 +250,6 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private string _rebuildContainerName = "backup";
 
 
-    /// <summary>
-    /// B80: True when the salt recovery-code panel is expanded in the Settings
-    /// danger zone. The panel shows the recovery code for the active catalog's
-    /// <c>.salt</c> sidecar and lets the user restore the salt file from a code.
-    /// </summary>
-    [ObservableProperty]
-    private bool _isSaltRecoveryPending;
-
-    /// <summary>B80: the generated recovery code shown to the user (read-only display).</summary>
-    [ObservableProperty]
-    private string _saltRecoveryCodeDisplay = string.Empty;
-
-    /// <summary>B80: the recovery code the user types in to restore the salt file.</summary>
-    [ObservableProperty]
-    private string _saltRecoveryCodeInput = string.Empty;
-
-
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(PasswordMismatch))]
     private string _password = string.Empty;

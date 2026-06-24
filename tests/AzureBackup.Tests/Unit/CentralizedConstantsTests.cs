@@ -76,10 +76,4 @@ public class CentralizedConstantsTests
     {
         Assert.Equal(16, KdfParameters.SaltSize);
     }
-
-    [Fact]
-    public void SaltRecoveryCodeSaltSizeMatchesKdfParameters()
-    {
-        Assert.Equal(KdfParameters.SaltSize, SaltRecoveryCode.SaltSize);
-    }
 }

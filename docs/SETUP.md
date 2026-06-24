@@ -156,12 +156,6 @@ Encrypted blob in Azure
 - **CRC32 trailer** — fast tamper detection for partial reads, separate from the GCM tag.
 - **Zero-knowledge** — Azure only sees opaque blobs whose names are SHA-256 hashes of the encrypted content. No filenames, no folder structure, no clear-text metadata.
 
-#### Salt sidecar and recovery code
-
-The local-unlock salt is a 16-byte file stored next to the database as `backup.db.salt`. It is not a secret (it only makes the Argon2id key unique per installation), but it is **required** to unlock the catalog: a missing salt derives a different key and locks the user out even with the correct password.
-
-Settings → danger zone exposes a **Salt Recovery Code** panel that encodes those 16 bytes as a Crockford Base32 string (alphabet `0-9 A-Z` minus `I L O U`) with a CRC32-derived two-symbol checksum, grouped in fives (for example `K7M2Q-9XR4T-...`). Decoding is case-insensitive, tolerates hyphens/whitespace and the Crockford aliases (`I/L→1`, `O→0`), and validates the checksum before recreating the salt file, so a mistyped code is rejected rather than restoring wrong bytes. The encode/decode logic lives in `SaltRecoveryCode` (`AzureBackup.Core`); the recovery code restores the salt sidecar only and is not a password backup.
-
 ### Content-defined chunking (deduplication)
 
 Files are split into variable-sized chunks using a Rabin-style rolling hash (window 48, prime 31). Chunk size is configured per file extension; the defaults aim for "small chunks for small files, large chunks for media":
@@ -220,7 +214,7 @@ For a guided UX walkthrough see `docs/USER_GUIDE.md`.
 | File | Installed mode | Portable mode |
 |---|---|---|
 | `backup.db` | `%LOCALAPPDATA%\AzureBackup\backup.db` | `<exe-dir>\backup.db` |
-| Argon2id salt | next to `backup.db` (`backup.db.salt`; recoverable via the Settings salt recovery code) | next to `backup.db` |
+| Argon2id salt | embedded inside `backup.db` (the AES-256-GCM AZDB snapshot envelope); no separate `.salt` file | embedded inside `backup.db` |
 | Daily logs | `<DataDirectory>\logs\` | `<DataDirectory>\logs\` |
 | Per-file `.diag` files (when present) | `<DataDirectory>\diagnostics\<session-id>\` | same |
 | Crash log | `<DataDirectory>\` | `<DataDirectory>\` |
