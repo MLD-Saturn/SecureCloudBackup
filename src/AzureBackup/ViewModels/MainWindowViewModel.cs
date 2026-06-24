@@ -226,9 +226,10 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <summary>
     /// B51: True when the rebuild-from-quarantined-catalog form is
     /// expanded in the Settings danger zone. The form collects the
-    /// quarantined DB + salt sidecar paths and the original password
-    /// so the orchestrator can recover the in-DB <c>PasswordSalt</c>
-    /// and rebuild a fresh catalog from Azure metadata.
+    /// quarantined DB path and the original password so the
+    /// orchestrator can decrypt the snapshot (its salt is embedded in
+    /// the AZDB envelope), recover the in-DB <c>PasswordSalt</c>, and
+    /// rebuild a fresh catalog from Azure metadata.
     /// </summary>
     [ObservableProperty]
     private bool _isRebuildFromQuarantinePending;

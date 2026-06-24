@@ -447,17 +447,19 @@ public partial class MainWindowViewModel
 
     /// <summary>
     /// B51: opens the rebuild-from-quarantined-catalog form in the
-    /// Settings danger zone. The form collects the quarantined DB and
-    /// salt sidecar paths, the original password, and fresh Azure
-    /// connection details so the orchestrator can recover the
-    /// in-database PasswordSalt and rebuild the local catalog from
-    /// Azure metadata.
+    /// Settings danger zone. The form collects the quarantined DB
+    /// path, the original password, and fresh Azure connection
+    /// details so the orchestrator can decrypt the quarantined
+    /// snapshot (its salt is embedded in the AZDB envelope), recover
+    /// the in-database PasswordSalt, and rebuild the local catalog
+    /// from Azure metadata.
     /// <para>
-    /// B61: the two path fields are pre-populated from the most-recent
-    /// quarantine pair found in <see cref="AppMode.DataDirectory"/> so
-    /// the user can usually click Confirm without typing or browsing.
-    /// The Browse buttons are still wired for the case where the
-    /// quarantined files were copied somewhere else.
+    /// B61: the quarantined-database path field is pre-populated from
+    /// the most-recent quarantined catalog found in
+    /// <see cref="AppMode.DataDirectory"/> so the user can usually
+    /// click Confirm without typing or browsing. The Browse button is
+    /// still wired for the case where the quarantined file was copied
+    /// somewhere else.
     /// </para>
     /// </summary>
     [RelayCommand]

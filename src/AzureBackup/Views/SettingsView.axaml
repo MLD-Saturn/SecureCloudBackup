@@ -409,12 +409,12 @@
                             <Button Content="Confirm Rebuild"
                                     Command="{Binding ConfirmRebuildFromQuarantineCommand}"
                                     Background="SteelBlue" Foreground="White"
-                                                             ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from Azure metadata."/>
-                                                </StackPanel>
-                                            </StackPanel>
-                                        </StackPanel>
-                                    </Border>
-                                    </StackPanel>
+                                    ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from Azure metadata."/>
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+            </StackPanel>
             </LayoutTransformControl>
         </StackPanel>
     </ScrollViewer>
