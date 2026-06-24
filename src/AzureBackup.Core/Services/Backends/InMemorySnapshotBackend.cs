@@ -87,18 +87,9 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
 
         var snapshotExists = File.Exists(_snapshotPath) && new FileInfo(_snapshotPath).Length > 0;
 
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = _memoryDataSource,
-            Mode = SqliteOpenMode.Memory,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-        }.ToString();
-
-        var connection = new SqliteConnection(connectionString);
+        var connection = OpenInMemoryConnection(_memoryDataSource);
         try
         {
-            connection.Open();
             _connection = connection;
 
             if (snapshotExists)
@@ -290,6 +281,50 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         out byte[] key, out byte[] salt)
     {
         var encrypted = File.ReadAllBytes(path);
+        DecryptSnapshotInto(connection, encrypted, password, out key, out salt);
+    }
+
+    /// <summary>
+    /// Opens a fresh process-local in-memory SQLite connection. A unique
+    /// <paramref name="dataSource"/> name plus <see cref="SqliteCacheMode.Private"/>
+    /// and pooling-off keep every in-memory database isolated.
+    /// </summary>
+    private static SqliteConnection OpenInMemoryConnection(string dataSource)
+    {
+        var connectionString = new SqliteConnectionStringBuilder
+        {
+            DataSource = dataSource,
+            Mode = SqliteOpenMode.Memory,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false,
+        }.ToString();
+
+        var connection = new SqliteConnection(connectionString);
+        try
+        {
+            connection.Open();
+            return connection;
+        }
+        catch
+        {
+            connection.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Decrypts <paramref name="encrypted"/> (an AZDB snapshot blob) and
+    /// deserializes the plaintext image into <paramref name="connection"/>,
+    /// always zeroing the plaintext. A wrong password (the AES-256-GCM tag
+    /// failing) is translated to <see cref="InvalidPasswordException"/>;
+    /// structural snapshot errors keep their <see cref="DbSnapshotException"/>
+    /// so corruption is not mislabelled as a bad password. The caller OWNS
+    /// <paramref name="key"/> and must zero it when done.
+    /// </summary>
+    private static void DecryptSnapshotInto(
+        SqliteConnection connection, byte[] encrypted, ReadOnlySpan<char> password,
+        out byte[] key, out byte[] salt)
+    {
         byte[] image;
         try
         {
@@ -298,12 +333,6 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
         catch (DbSnapshotException ex)
             when (ex.InnerException is System.Security.Cryptography.AuthenticationTagMismatchException)
         {
-            // Only the GCM authentication-tag failure means the password is wrong
-            // (or the file was tampered with). Surface the same contract the
-            // unlock flow expects so the UI shows the standard retry prompt.
-            // Structural snapshot errors (truncated, bad magic/version, CRC) keep
-            // their DbSnapshotException so corruption is not mislabelled as a bad
-            // password.
             throw new InvalidPasswordException("Invalid password. Please try again.", ex);
         }
         try
@@ -355,45 +384,15 @@ internal sealed class InMemorySnapshotBackend : SqliteBackend
                 "Quarantined snapshot file does not exist.", quarantinedSnapshotPath);
 
         var encrypted = File.ReadAllBytes(quarantinedSnapshotPath);
-        byte[] image;
-        byte[] key;
-        try
-        {
-            // The recovered key is not needed (we only read the salt); decrypt
-            // purely to validate the password and reach the config row.
-            image = DbSnapshotEnvelope.DecryptAndExtractKey(encrypted, password, out key, out _);
-        }
-        catch (DbSnapshotException ex)
-            when (ex.InnerException is System.Security.Cryptography.AuthenticationTagMismatchException)
-        {
-            // Only the GCM authentication-tag failure means "wrong password"
-            // (or tampering). Structural errors (not an AZDB file, bad version,
-            // CRC failure, truncated) are NOT a password problem and must keep
-            // their DbSnapshotException so the UI shows "corrupted snapshot"
-            // rather than "wrong password".
-            throw new InvalidPasswordException(
-                "The password does not match the quarantined catalog.", ex);
-        }
+
+        using var connection = OpenInMemoryConnection("azbk-quarantine-read-" + Guid.NewGuid().ToString("N"));
+
+        // Decrypt the snapshot into the throwaway connection. The recovered key
+        // is not needed (we only read the salt), so zero it immediately. A wrong
+        // password surfaces as InvalidPasswordException; a corrupted/non-snapshot
+        // file keeps its DbSnapshotException.
+        DecryptSnapshotInto(connection, encrypted, password, out var key, out _);
         System.Security.Cryptography.CryptographicOperations.ZeroMemory(key);
-
-        var connectionString = new SqliteConnectionStringBuilder
-        {
-            DataSource = "azbk-quarantine-read-" + Guid.NewGuid().ToString("N"),
-            Mode = SqliteOpenMode.Memory,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-        }.ToString();
-
-        using var connection = new SqliteConnection(connectionString);
-        connection.Open();
-        try
-        {
-            SqliteSerialization.DeserializeInto(connection, image);
-        }
-        finally
-        {
-            System.Security.Cryptography.CryptographicOperations.ZeroMemory(image);
-        }
 
         using var cmd = connection.CreateCommand();
         cmd.CommandText = "SELECT password_salt FROM config WHERE id = 1;";

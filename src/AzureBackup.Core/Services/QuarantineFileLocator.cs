@@ -43,46 +43,34 @@ public static class QuarantineFileLocator
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
-    /// Scans <paramref name="directory"/> for the most-recent matched
-    /// pair of <c>backup.db.quarantine-*</c> and
-    /// <c>backup.db.salt.quarantine-*</c> files (paired by identical
-    /// timestamp suffix) and returns their absolute paths. Returns
-    /// <c>(null, null)</c> if the directory does not exist, contains no
-    /// quarantine files, or contains quarantine files that cannot be
-    /// matched into a complete pair.
+    /// Scans <paramref name="directory"/> for the most-recent quarantined
+    /// <c>backup.db.quarantine-*</c> snapshot file and returns its absolute
+    /// path, or <c>null</c> if the directory does not exist or contains no
+    /// quarantined catalog.
     /// </summary>
     /// <remarks>
-    /// The "most recent" ordering is by the parsed timestamp suffix in
-    /// the filename, descending. Files whose suffix cannot be parsed are
-    /// ignored. The first stamp that has BOTH a database and a salt
-    /// match wins; lonely halves (database without salt or salt without
-    /// database) are skipped so the caller never sees a half-populated
-    /// pair.
+    /// The "most recent" ordering is by the parsed timestamp suffix in the
+    /// filename, descending. Files whose suffix cannot be parsed are ignored.
+    /// The application-level snapshot is a self-contained AES-256-GCM file with
+    /// NO <c>.salt</c> sidecar, so only the database file matters; companion
+    /// <c>-wal</c> / <c>-shm</c> / <c>-journal</c> / <c>.salt</c> quarantine
+    /// files (which may exist from a legacy SQLCipher quarantine) are ignored.
     /// </remarks>
     /// <param name="directory">
     /// Directory to scan, typically <c>AppMode.DataDirectory</c>. Null,
-    /// whitespace, or a non-existent directory returns <c>(null, null)</c>
-    /// rather than throwing -- the caller is the form-open path and the
-    /// user has not done anything wrong if no quarantine files exist.
+    /// whitespace, or a non-existent directory returns <c>null</c> rather than
+    /// throwing -- the caller is the form-open path and the user has not done
+    /// anything wrong if no quarantine files exist.
     /// </param>
     /// <returns>
-    /// A tuple of full paths. Either both values are non-null (a complete
-    /// pair was found) or both are null (no complete pair was found).
+    /// The absolute path of the most-recent quarantined catalog, or <c>null</c>.
     /// </returns>
-    public static (string? DatabasePath, string? SaltPath) FindMostRecentQuarantinePair(string? directory)
+    public static string? FindMostRecentQuarantinedDatabase(string? directory)
     {
         if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
         {
-            return (null, null);
+            return null;
         }
-
-        // Two filename shapes to match. Order matters: the salt file's
-        // path also contains "backup.db" so we have to test for the
-        // longer ".salt.quarantine-" pattern first OR distinguish by
-        // the post-stamp prefix. We do the latter so the patterns stay
-        // explicit and the pair-matching logic stays simple.
-        var dbStamps = new Dictionary<string, string>(StringComparer.Ordinal);
-        var saltStamps = new Dictionary<string, string>(StringComparer.Ordinal);
 
         IEnumerable<string> files;
         try
@@ -91,8 +79,11 @@ public static class QuarantineFileLocator
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return (null, null);
+            return null;
         }
+
+        string? newestPath = null;
+        string? newestStamp = null;
 
         foreach (var path in files)
         {
@@ -100,36 +91,21 @@ public static class QuarantineFileLocator
             var match = QuarantineStampPattern.Match(name);
             if (!match.Success) continue;
 
-            var stamp = match.Groups[1].Value;
-            // Strip the matched suffix to inspect the original artefact name.
+            // Only the main catalog file (backup.db.quarantine-...), not the
+            // companion artefacts (backup.db.salt / -wal / -shm / -journal).
             var prefix = name[..(name.Length - match.Length)];
+            if (!string.Equals(prefix, "backup.db", StringComparison.OrdinalIgnoreCase))
+                continue;
 
-            if (string.Equals(prefix, "backup.db", StringComparison.OrdinalIgnoreCase))
+            var stamp = match.Groups[1].Value;
+            if (newestStamp is null || string.CompareOrdinal(stamp, newestStamp) > 0)
             {
-                dbStamps[stamp] = path;
+                newestStamp = stamp;
+                newestPath = path;
             }
-            else if (string.Equals(prefix, "backup.db.salt", StringComparison.OrdinalIgnoreCase))
-            {
-                saltStamps[stamp] = path;
-            }
-            // Other prefixes (-wal, -shm, -journal companions) are ignored;
-            // they do not feed the rebuild flow.
         }
 
-        // Pair only by identical stamp. Sort the paired stamps descending
-        // so the newest matched pair is returned first.
-        var pairedStamps = dbStamps.Keys
-            .Where(saltStamps.ContainsKey)
-            .OrderByDescending(s => s, StringComparer.Ordinal)
-            .ToList();
-
-        if (pairedStamps.Count == 0)
-        {
-            return (null, null);
-        }
-
-        var newest = pairedStamps[0];
-        return (dbStamps[newest], saltStamps[newest]);
+        return newestPath;
     }
 
     /// <summary>

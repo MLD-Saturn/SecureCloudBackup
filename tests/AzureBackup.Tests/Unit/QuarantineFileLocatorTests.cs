@@ -25,168 +25,113 @@ public sealed class QuarantineFileLocatorTests : IDisposable
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_NullDirectory_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_NullDirectory_ReturnsNull()
     {
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(null);
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase(null));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_WhitespaceDirectory_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_WhitespaceDirectory_ReturnsNull()
     {
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair("   ");
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase("   "));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_NonExistentDirectory_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_NonExistentDirectory_ReturnsNull()
     {
         var bogus = Path.Combine(_dir, "does-not-exist");
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(bogus);
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase(bogus));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_EmptyDirectory_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_EmptyDirectory_ReturnsNull()
     {
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_OnlyDbHalf_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_DbOnly_ReturnsTheDb()
     {
-        File.WriteAllText(Path.Combine(_dir, "backup.db.quarantine-20260427-153012"), "x");
+        // The snapshot format has no .salt sidecar, so a lone quarantined
+        // catalog is a complete, rebuildable input.
+        var dbPath = Path.Combine(_dir, "backup.db.quarantine-20260427-153012");
+        File.WriteAllText(dbPath, "x");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Equal(dbPath, QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_OnlySaltHalf_ReturnsNullPair()
+    public void FindMostRecentQuarantinedDatabase_SaltOnly_ReturnsNull()
     {
+        // A lone .salt quarantine file (legacy SQLCipher leftover) is not a
+        // catalog and cannot be rebuilt from.
         File.WriteAllText(Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012"), "x");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_SinglePair_ReturnsBothPaths()
+    public void FindMostRecentQuarantinedDatabase_WithLegacySaltSidecar_StillReturnsTheDb()
     {
+        // A legacy quarantine event left both a db and a .salt sidecar; only
+        // the catalog is returned (the sidecar is ignored).
         var dbPath = Path.Combine(_dir, "backup.db.quarantine-20260427-153012");
-        var saltPath = Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012");
         File.WriteAllText(dbPath, "x");
-        File.WriteAllText(saltPath, "y");
+        File.WriteAllText(Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012"), "y");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Equal(dbPath, db);
-        Assert.Equal(saltPath, salt);
+        Assert.Equal(dbPath, QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_MultipleEvents_ReturnsNewestStamp()
+    public void FindMostRecentQuarantinedDatabase_MultipleEvents_ReturnsNewestStamp()
     {
         File.WriteAllText(Path.Combine(_dir, "backup.db.quarantine-20260427-100000"), "x");
-        File.WriteAllText(Path.Combine(_dir, "backup.db.salt.quarantine-20260427-100000"), "y");
 
         var newestDb = Path.Combine(_dir, "backup.db.quarantine-20260427-153012");
-        var newestSalt = Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012");
         File.WriteAllText(newestDb, "x");
-        File.WriteAllText(newestSalt, "y");
 
         File.WriteAllText(Path.Combine(_dir, "backup.db.quarantine-20260101-000000"), "x");
-        File.WriteAllText(Path.Combine(_dir, "backup.db.salt.quarantine-20260101-000000"), "y");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Equal(newestDb, db);
-        Assert.Equal(newestSalt, salt);
+        Assert.Equal(newestDb, QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_NewestDbStampMissingItsSalt_ReturnsOlderCompletePair()
+    public void FindMostRecentQuarantinedDatabase_IgnoresWalShmJournalCompanions()
     {
-        // The newest stamp has only the db file; the older stamp has both halves.
-        // Pairing must walk past the lonely newest and return the complete older pair
-        // rather than handing back a half-populated tuple.
-        File.WriteAllText(Path.Combine(_dir, "backup.db.quarantine-20260427-200000"), "x");
-
-        var olderDb = Path.Combine(_dir, "backup.db.quarantine-20260427-100000");
-        var olderSalt = Path.Combine(_dir, "backup.db.salt.quarantine-20260427-100000");
-        File.WriteAllText(olderDb, "x");
-        File.WriteAllText(olderSalt, "y");
-
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Equal(olderDb, db);
-        Assert.Equal(olderSalt, salt);
-    }
-
-    [Fact]
-    public void FindMostRecentQuarantinePair_IgnoresWalShmJournalCompanions()
-    {
-        // -wal/-shm/-journal companions are also moved by QuarantineCorruptDatabase
-        // and live in the same directory; they share the prefix backup.db but must
-        // not be returned in place of the real database file.
+        // -wal/-shm/-journal companions share the prefix backup.db but must
+        // not be returned in place of the real catalog file.
         var dbPath = Path.Combine(_dir, "backup.db.quarantine-20260427-153012");
-        var saltPath = Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012");
         File.WriteAllText(dbPath, "x");
-        File.WriteAllText(saltPath, "y");
         File.WriteAllText(Path.Combine(_dir, "backup.db-wal.quarantine-20260427-153012"), "wal");
         File.WriteAllText(Path.Combine(_dir, "backup.db-shm.quarantine-20260427-153012"), "shm");
         File.WriteAllText(Path.Combine(_dir, "backup.db-journal.quarantine-20260427-153012"), "journal");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Equal(dbPath, db);
-        Assert.Equal(saltPath, salt);
+        Assert.Equal(dbPath, QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_IgnoresUnrelatedFilesInDirectory()
+    public void FindMostRecentQuarantinedDatabase_IgnoresUnrelatedFilesInDirectory()
     {
-        // The data directory contains the live backup.db, .salt sidecar, log files,
-        // and other artefacts. None of these should be misread as quarantine candidates.
+        // The data directory contains the live backup.db, log files, and other
+        // artefacts. None of these should be misread as quarantine candidates.
         File.WriteAllText(Path.Combine(_dir, "backup.db"), "live");
-        File.WriteAllText(Path.Combine(_dir, "backup.db.salt"), "live-salt");
         File.WriteAllText(Path.Combine(_dir, "backup.db-wal"), "wal");
         File.WriteAllText(Path.Combine(_dir, "azurebackup-2026-04-27.log"), "log");
 
         var dbPath = Path.Combine(_dir, "backup.db.quarantine-20260427-153012");
-        var saltPath = Path.Combine(_dir, "backup.db.salt.quarantine-20260427-153012");
         File.WriteAllText(dbPath, "x");
-        File.WriteAllText(saltPath, "y");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Equal(dbPath, db);
-        Assert.Equal(saltPath, salt);
+        Assert.Equal(dbPath, QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Fact]
-    public void FindMostRecentQuarantinePair_MalformedTimestamp_IsIgnored()
+    public void FindMostRecentQuarantinedDatabase_MalformedTimestamp_IsIgnored()
     {
-        // A file whose suffix doesn't match the strict yyyyMMdd-HHmmss pattern is
-        // skipped rather than crashing the locator. Quarantine flows produce only
-        // strict timestamps so any deviation is either a user-renamed file or
-        // bit-rot of the filename itself; either way ignoring is the safe choice.
+        // A file whose suffix doesn't match the strict yyyyMMdd-HHmmss pattern
+        // is skipped rather than crashing the locator.
         File.WriteAllText(Path.Combine(_dir, "backup.db.quarantine-not-a-stamp"), "x");
-        File.WriteAllText(Path.Combine(_dir, "backup.db.salt.quarantine-not-a-stamp"), "y");
 
-        var (db, salt) = QuarantineFileLocator.FindMostRecentQuarantinePair(_dir);
-
-        Assert.Null(db);
-        Assert.Null(salt);
+        Assert.Null(QuarantineFileLocator.FindMostRecentQuarantinedDatabase(_dir));
     }
 
     [Theory]

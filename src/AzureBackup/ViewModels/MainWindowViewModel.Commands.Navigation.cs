@@ -468,9 +468,9 @@ public partial class MainWindowViewModel
         // B61: pre-populate the path from the data directory if a recent
         // quarantined catalog exists. We only overwrite an empty field so a
         // user re-opening the form after a typo doesn't lose their edits.
-        // (The snapshot format has no .salt sidecar, so only the DB path is
-        // pre-filled; the SaltPath element of the pair is ignored.)
-        var (defaultDb, _) = QuarantineFileLocator.FindMostRecentQuarantinePair(AppMode.DataDirectory);
+        // The snapshot format has no .salt sidecar, so only the catalog file is
+        // located.
+        var defaultDb = QuarantineFileLocator.FindMostRecentQuarantinedDatabase(AppMode.DataDirectory);
         if (string.IsNullOrWhiteSpace(RebuildQuarantinedDbPath) && defaultDb is not null)
         {
             RebuildQuarantinedDbPath = defaultDb;
