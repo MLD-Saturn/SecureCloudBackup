@@ -345,7 +345,7 @@ public partial class ChunkIndexService
 
                 try
                 {
-                    var (size, blobTier) = await GetChunkInfoFromAzureAsync(chunkHash, ct);
+                    var (size, blobTier) = await GetChunkInfoFromRemoteAsync(chunkHash, ct);
                     sizeBytes = size;
                     tier = blobTier;
                 }

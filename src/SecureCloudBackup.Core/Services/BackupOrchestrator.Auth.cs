@@ -49,22 +49,22 @@ public partial class BackupOrchestrator
     /// <summary>
     /// Tests the connection to Azure storage using the current Entra ID credential.
     /// </summary>
-    public async Task<(bool success, string message)> TestAzureConnectionAsync(
+    public async Task<(bool success, string message)> TestRemoteConnectionAsync(
         string storageAccountName, string bucketName)
     {
-        Log($"TestAzureConnectionAsync: Testing Entra ID connection to {storageAccountName}/{bucketName}");
+        Log($"TestRemoteConnectionAsync: Testing Entra ID connection to {storageAccountName}/{bucketName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
         ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
         if (_tokenProvider == null)
         {
-            Log("TestAzureConnectionAsync: No credential available");
+            Log("TestRemoteConnectionAsync: No credential available");
             return (false, "Not authenticated with Entra ID. Please sign in first.");
         }
 
         Uri blobServiceUri = new($"https://{storageAccountName}.blob.core.windows.net");
         var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, bucketName, _tokenProvider);
-        Log($"TestAzureConnectionAsync: Result success={result.success}");
+        Log($"TestRemoteConnectionAsync: Result success={result.success}");
         return result;
     }
     

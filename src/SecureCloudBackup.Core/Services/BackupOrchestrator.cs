@@ -591,7 +591,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         Log("InitializeAsync: Connecting to Azure storage");
         try
         {
-            await ConnectToAzureAsync(config);
+            await ConnectToRemoteAsync(config);
             Log("InitializeAsync: Initialization complete");
         }
         catch (Exception ex)
@@ -625,10 +625,10 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// Safe to call multiple times. After this call, any Azure operation will fail
     /// with a connection error until the user signs in again.
     /// </remarks>
-    public void InvalidateAzureCredential(AzureAuthenticationException exception)
+    public void InvalidateRemoteCredential(AzureAuthenticationException exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
-        Log($"InvalidateAzureCredential: Clearing cached credential after {exception.Status} {exception.ErrorCode}");
+        Log($"InvalidateRemoteCredential: Clearing cached credential after {exception.Status} {exception.ErrorCode}");
 
         _tokenProvider = null;
 
@@ -644,7 +644,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            Log($"InvalidateAzureCredential: Could not update config: {ex.Message}");
+            Log($"InvalidateRemoteCredential: Could not update config: {ex.Message}");
         }
 
         AuthenticationFailed?.Invoke(this, exception);
@@ -654,7 +654,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
 
     /// <summary>
     /// Returns <c>true</c> if the given exception indicates an Azure auth/authz failure.
-    /// Callers in backup/restore loops use this to route via <see cref="InvalidateAzureCredential"/>.
+    /// Callers in backup/restore loops use this to route via <see cref="InvalidateRemoteCredential"/>.
     /// </summary>
     internal static bool TryExtractAuthFailure(Exception ex, out AzureAuthenticationException? auth)
     {
@@ -682,27 +682,27 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// <summary>
     /// Connects to Azure based on the configured authentication method.
     /// </summary>
-    private async Task ConnectToAzureAsync(BackupConfiguration config)
+    private async Task ConnectToRemoteAsync(BackupConfiguration config)
     {
         AzureConnectionError = null;
         var bucketName = config.ContainerName ?? "backup";
-        Log($"ConnectToAzureAsync: AuthMethod={config.AuthMethod}, Container={bucketName}");
+        Log($"ConnectToRemoteAsync: AuthMethod={config.AuthMethod}, Container={bucketName}");
         
         if (config.AuthMethod == AzureAuthMethod.EntraId)
         {
             // Entra ID authentication
             if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _tokenProvider != null)
             {
-                Log($"ConnectToAzureAsync: Connecting with Entra ID to {config.BlobServiceUri}");
+                Log($"ConnectToRemoteAsync: Connecting with Entra ID to {config.BlobServiceUri}");
                 await _blobService.ConnectWithTokenAsync(
                     config.BlobServiceUri, 
                     bucketName, 
                     _tokenProvider);
-                Log("ConnectToAzureAsync: Entra ID connection established");
+                Log("ConnectToRemoteAsync: Entra ID connection established");
             }
             else
             {
-                Log("ConnectToAzureAsync: Skipping Entra ID connection - not fully configured");
+                Log("ConnectToRemoteAsync: Skipping Entra ID connection - not fully configured");
             }
         }
         else
@@ -710,13 +710,13 @@ public partial class BackupOrchestrator : IAsyncDisposable
             // Connection String authentication
             if (config.EncryptedConnectionString != null && _encryptionService.IsInitialized)
             {
-                Log("ConnectToAzureAsync: Decrypting and connecting with connection string");
+                Log("ConnectToRemoteAsync: Decrypting and connecting with connection string");
                 var decrypted = _encryptionService.Decrypt(config.EncryptedConnectionString);
                 try
                 {
                     var connectionString = System.Text.Encoding.UTF8.GetString(decrypted);
                     await _blobService.ConnectAsync(connectionString, bucketName);
-                    Log("ConnectToAzureAsync: Connection string connection established");
+                    Log("ConnectToRemoteAsync: Connection string connection established");
                 }
                 finally
                 {
@@ -726,7 +726,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             }
             else
             {
-                Log("ConnectToAzureAsync: Skipping connection string connection - not configured");
+                Log("ConnectToRemoteAsync: Skipping connection string connection - not configured");
             }
         }
     }
@@ -817,7 +817,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// other piece of state (connection string, container name, watched
     /// folders, backed-up file graph) is either provided by the caller or
     /// reconstructed from Azure metadata via
-    /// <c>ChunkIndexService.RebuildIndexFromAzureAsync</c>.
+    /// <c>ChunkIndexService.RebuildIndexFromRemoteAsync</c>.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -834,7 +834,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// A wrong password fails the tag and surfaces as
     /// <see cref="Models.InvalidPasswordException"/> from this method;
     /// a wrong Azure connection string surfaces as a connectivity error
-    /// from <c>ChunkIndexService.RebuildIndexFromAzureAsync</c>.
+    /// from <c>ChunkIndexService.RebuildIndexFromRemoteAsync</c>.
     /// </para>
     /// </remarks>
     /// <param name="quarantinedDatabasePath">Path to the quarantined catalog (the
@@ -979,7 +979,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         // every metadata blob to repopulate chunk_index, chunk_file_refs,
         // and the backed-up files graph. Cancellation is honoured here.
         StatusChanged?.Invoke(this, "Rebuilding catalog from Azure metadata...");
-        await _chunkIndexService.RebuildIndexFromAzureAsync(progress, cancellationToken);
+        await _chunkIndexService.RebuildIndexFromRemoteAsync(progress, cancellationToken);
 
         StatusChanged?.Invoke(this,
             "Catalog rebuild from quarantined source complete. The fresh catalog can be " +
@@ -1102,7 +1102,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// overwrite semantics. This is the contract used by
     /// <c>IntegrityCheckService</c>'s auto-repair path and the manual
     /// Repair / Force Full Scan UI commands. Production hot paths
-    /// (file watcher, MirrorSyncToAzureAsync, normal scheduled backups)
+    /// (file watcher, MirrorSyncToRemoteAsync, normal scheduled backups)
     /// MUST keep this <c>false</c> -- forcing re-upload defeats dedup
     /// and re-encrypts every byte of every file.
     /// </para>

@@ -608,7 +608,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanSetCustomRestorePath))]
-    [NotifyPropertyChangedFor(nameof(CanDeleteFromAzure))]
+    [NotifyPropertyChangedFor(nameof(CanDeleteFromRemote))]
     private FileTreeNodeViewModel? _selectedTreeNode;
 
     /// <summary>
@@ -621,7 +621,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <summary>
     /// True if deletion from Azure is possible (either selected tree node or checked files exist).
     /// </summary>
-    public bool CanDeleteFromAzure => HasSelectedFiles || SelectedTreeNode != null;
+    public bool CanDeleteFromRemote => HasSelectedFiles || SelectedTreeNode != null;
 
 
 
@@ -726,7 +726,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// True when files are being dragged over the Azure panel (for backup).
     /// </summary>
     [ObservableProperty]
-    private bool _isDragOverAzurePanel;
+    private bool _isDragOverRemotePanel;
 
     /// <summary>
     /// True when files are being dragged over the Local panel (for restore).
@@ -737,7 +737,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <summary>
     /// True when a drag operation is in progress.
     /// </summary>
-    public bool IsDragging => IsDragOverAzurePanel || IsDragOverLocalPanel;
+    public bool IsDragging => IsDragOverRemotePanel || IsDragOverLocalPanel;
 
     #endregion
 

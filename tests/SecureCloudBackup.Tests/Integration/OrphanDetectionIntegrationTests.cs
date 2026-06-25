@@ -245,7 +245,7 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// C-5: BackupIndexToAzureAsync + RestoreIndexFromAzureAsync must
+    /// C-5: BackupIndexToRemoteAsync + RestoreIndexFromRemoteAsync must
     /// preserve the chunk_file_refs reverse-index. Pre-C-5 the v1
     /// backup carried only ChunkIndexEntry rows and relied on the
     /// LiteDB-era ReferencingFiles list to reconstruct refs on
@@ -278,10 +278,10 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         Assert.Equal(2, _databaseService.GetReferenceCountForChunk(sharedHash));
         Assert.Equal(1, _databaseService.GetReferenceCountForChunk(soloHash));
 
-        // Act: backup -> wipe + restore (RestoreIndexFromAzureAsync
+        // Act: backup -> wipe + restore (RestoreIndexFromRemoteAsync
         // already calls ClearChunkIndex internally).
-        await _indexService.BackupIndexToAzureAsync();
-        var ok = await _indexService.RestoreIndexFromAzureAsync();
+        await _indexService.BackupIndexToRemoteAsync();
+        var ok = await _indexService.RestoreIndexFromRemoteAsync();
         Assert.True(ok);
 
         // Assert: reference counts and the reverse-index reflect the

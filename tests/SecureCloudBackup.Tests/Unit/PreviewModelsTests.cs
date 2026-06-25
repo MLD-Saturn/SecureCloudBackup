@@ -262,11 +262,11 @@ public class PreviewModelsTests
     #region WarningMessage
 
     [Fact]
-    public void WarningMessageForDeleteFromAzureMentionsPermanentDeletion()
+    public void WarningMessageForDeleteFromRemoteMentionsPermanentDeletion()
     {
         var preview = new OperationPreview
         {
-            OperationType = OperationType.DeleteFromAzure,
+            OperationType = OperationType.DeleteFromRemote,
             FilesToDelete = [File("a", 1)]
         };
 

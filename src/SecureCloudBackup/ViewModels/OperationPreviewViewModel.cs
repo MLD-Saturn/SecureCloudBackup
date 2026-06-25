@@ -24,7 +24,7 @@ public partial class OperationPreviewViewModel : ObservableObject
     public string Title => _preview.OperationType switch
     {
         OperationType.Restore => "Restore Preview",
-        OperationType.DeleteFromAzure => "Delete Preview",
+        OperationType.DeleteFromRemote => "Delete Preview",
         OperationType.MirrorSync => "Mirror Sync Preview",
         OperationType.Backup => "Backup Preview",
         _ => "Operation Preview"
@@ -36,7 +36,7 @@ public partial class OperationPreviewViewModel : ObservableObject
     public string Icon => _preview.OperationType switch
     {
         OperationType.Restore => "??",
-        OperationType.DeleteFromAzure => "???",
+        OperationType.DeleteFromRemote => "???",
         OperationType.MirrorSync => "??",
         OperationType.Backup => "??",
         _ => "??"
@@ -186,7 +186,7 @@ public partial class OperationPreviewViewModel : ObservableObject
     public string ConfirmButtonText => _preview.OperationType switch
     {
         OperationType.Restore => "Restore",
-        OperationType.DeleteFromAzure => "Delete",
+        OperationType.DeleteFromRemote => "Delete",
         OperationType.MirrorSync => "Sync",
         OperationType.Backup => "Backup",
         _ => "Proceed"
@@ -196,7 +196,7 @@ public partial class OperationPreviewViewModel : ObservableObject
     /// Style hint for the confirm button (danger for destructive operations).
     /// </summary>
     public bool IsDangerousOperation => 
-        _preview.OperationType == OperationType.DeleteFromAzure || 
+        _preview.OperationType == OperationType.DeleteFromRemote || 
         (_preview.OperationType == OperationType.MirrorSync && _preview.DeleteCount > 0);
 
     /// <summary>

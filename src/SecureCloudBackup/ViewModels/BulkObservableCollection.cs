@@ -19,7 +19,7 @@ namespace SecureCloudBackup.ViewModels;
 ///     (Avalonia's <c>ItemsControl</c> behaves this way).</item>
 ///   <item>You are doing a "Clear + foreach Add" in a hot path where the
 ///     N item-add events dominate cost (e.g. the Logs drain or
-///     <c>RefreshFromAzureAsync</c> rebuilding 50K rows).</item>
+///     <c>RefreshFromRemoteAsync</c> rebuilding 50K rows).</item>
 /// </list>
 ///
 /// <para>

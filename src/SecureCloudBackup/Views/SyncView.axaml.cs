@@ -246,7 +246,7 @@ public partial class SyncView : UserControl
 
         if (DataContext is MainWindowViewModel vm)
         {
-            vm.IsDragOverAzurePanel = false;
+            vm.IsDragOverRemotePanel = false;
             vm.IsDragOverLocalPanel = false;
         }
     }
@@ -451,7 +451,7 @@ public partial class SyncView : UserControl
             _isDragging = false;
             _dragStartPoint = null;
             HideDragBadge();
-            vm.IsDragOverAzurePanel = false;
+            vm.IsDragOverRemotePanel = false;
             vm.IsDragOverLocalPanel = false;
         }
     }
@@ -529,7 +529,7 @@ public partial class SyncView : UserControl
             _isDragging = false;
             _dragStartPoint = null;
             HideDragBadge();
-            vm.IsDragOverAzurePanel = false;
+            vm.IsDragOverRemotePanel = false;
             vm.IsDragOverLocalPanel = false;
         }
     }
@@ -606,18 +606,18 @@ public partial class SyncView : UserControl
         if (e.Data.Contains(LocalFileDragFormat))
         {
             e.DragEffects = DragDropEffects.Copy;
-            vm.IsDragOverAzurePanel = true;
+            vm.IsDragOverRemotePanel = true;
         }
         // Check for external files (backup from explorer)
         else if (e.Data.GetFiles()?.Any() == true)
         {
             e.DragEffects = DragDropEffects.Copy;
-            vm.IsDragOverAzurePanel = true;
+            vm.IsDragOverRemotePanel = true;
         }
         else
         {
             e.DragEffects = DragDropEffects.None;
-            vm.IsDragOverAzurePanel = false;
+            vm.IsDragOverRemotePanel = false;
         }
     }
     
@@ -625,7 +625,7 @@ public partial class SyncView : UserControl
     {
         if (DataContext is MainWindowViewModel vm)
         {
-            vm.IsDragOverAzurePanel = false;
+            vm.IsDragOverRemotePanel = false;
         }
     }
     
@@ -673,7 +673,7 @@ public partial class SyncView : UserControl
         if (DataContext is not MainWindowViewModel vm) return;
         
         // Clear visual state
-        vm.IsDragOverAzurePanel = false;
+        vm.IsDragOverRemotePanel = false;
         
         // Check if app is initialized
         if (!vm.IsInitialized)

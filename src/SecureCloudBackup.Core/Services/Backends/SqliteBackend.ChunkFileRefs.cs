@@ -126,7 +126,7 @@ internal partial class SqliteBackend
     /// Returns every row in <c>chunk_file_refs</c>. Used by the
     /// Azure index backup path so the encrypted blob carries the
     /// reverse-index alongside the primary chunk_index. Without
-    /// this, RestoreIndexFromAzureAsync would lose every reference
+    /// this, RestoreIndexFromRemoteAsync would lose every reference
     /// (under SQLite GetAllChunkIndexEntries leaves
     /// ChunkIndexEntry.ReferencingFiles empty by design).
     /// </summary>

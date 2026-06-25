@@ -13,7 +13,7 @@ namespace SecureCloudBackup.Tests;
 /// consumer that called <c>GetBackedUpFile</c> / <c>GetAllBackedUpFiles</c>
 /// after a recovery (Sync, Data Integrity, etc.).
 /// </summary>
-public class RebuildIndexFromAzureTests : IAsyncLifetime
+public class RebuildIndexFromRemoteTests : IAsyncLifetime
 {
     private const string TestPassword = "TestPassword123!";
     private string _testDbPath = null!;
@@ -55,7 +55,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RebuildIndexFromAzureAsync_RepopulatesFilesAndChunksFromAzureMetadata()
+    public async Task RebuildIndexFromRemoteAsync_RepopulatesFilesAndChunksFromAzureMetadata()
     {
         // Arrange: seed Azure with two complete files, each referencing
         // its own chunk(s). Then wipe the local catalog and rebuild.
@@ -67,7 +67,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
         Assert.Empty(_databaseService.GetAllBackedUpFiles());
 
         // Act
-        await _indexService.RebuildIndexFromAzureAsync();
+        await _indexService.RebuildIndexFromRemoteAsync();
 
         // Assert: chunk index restored.
         Assert.Equal(3, _databaseService.GetChunkIndexCount());
@@ -93,7 +93,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RebuildIndexFromAzureAsync_OmitsFilesWithMissingChunks()
+    public async Task RebuildIndexFromRemoteAsync_OmitsFilesWithMissingChunks()
     {
         // Arrange: a complete file plus a metadata-only entry whose chunk
         // is missing from Azure. The rebuild deletes the incomplete
@@ -106,7 +106,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
         _databaseService.ClearChunkIndex();
 
         // Act
-        await _indexService.RebuildIndexFromAzureAsync();
+        await _indexService.RebuildIndexFromRemoteAsync();
 
         // Assert
         var files = _databaseService.GetAllBackedUpFiles();
@@ -116,7 +116,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RebuildIndexFromAzureAsync_DiscardsStaleFilesNotInAzure()
+    public async Task RebuildIndexFromRemoteAsync_DiscardsStaleFilesNotInAzure()
     {
         // Arrange: Azure has one file. The local catalog has a stale row
         // for a path whose Azure metadata has since been deleted. After
@@ -140,7 +140,7 @@ public class RebuildIndexFromAzureTests : IAsyncLifetime
         _databaseService.SaveBackedUpFile(staleFile);
 
         // Act
-        await _indexService.RebuildIndexFromAzureAsync();
+        await _indexService.RebuildIndexFromRemoteAsync();
 
         // Assert
         var files = _databaseService.GetAllBackedUpFiles();

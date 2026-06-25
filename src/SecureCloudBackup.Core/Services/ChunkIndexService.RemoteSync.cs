@@ -12,7 +12,7 @@ public partial class ChunkIndexService
     /// Backs up the chunk index to Azure storage.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
-    public async Task BackupIndexToAzureAsync(CancellationToken cancellationToken = default)
+    public async Task BackupIndexToRemoteAsync(CancellationToken cancellationToken = default)
     {
         Log("Backing up chunk index to Azure...");
 
@@ -57,7 +57,7 @@ public partial class ChunkIndexService
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if restore was successful</returns>
-    public async Task<bool> RestoreIndexFromAzureAsync(CancellationToken cancellationToken = default)
+    public async Task<bool> RestoreIndexFromRemoteAsync(CancellationToken cancellationToken = default)
     {
         Log("Restoring chunk index from Azure...");
 
@@ -158,7 +158,7 @@ public partial class ChunkIndexService
     /// </summary>
     /// <param name="progress">Progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    public async Task RebuildIndexFromAzureAsync(
+    public async Task RebuildIndexFromRemoteAsync(
         IProgress<(int processed, int total, string currentFile)>? progress = null,
         CancellationToken cancellationToken = default)
     {
@@ -406,7 +406,7 @@ public partial class ChunkIndexService
             $"{missingChunkHashes.Count} missing chunks detected");
 
         // Backup the newly rebuilt index
-        await BackupIndexToAzureAsync(cancellationToken);
+        await BackupIndexToRemoteAsync(cancellationToken);
     }
 
     private async Task<List<string>> ListAzureChunksAsync(CancellationToken cancellationToken)
@@ -415,7 +415,7 @@ public partial class ChunkIndexService
         return await _blobService.ListChunkKeysAsync(cancellationToken);
     }
 
-    private async Task<(long size, StorageTier tier)> GetChunkInfoFromAzureAsync(
+    private async Task<(long size, StorageTier tier)> GetChunkInfoFromRemoteAsync(
         string chunkHash, CancellationToken cancellationToken)
     {
         var objectKey = $"chunks/{chunkHash}";

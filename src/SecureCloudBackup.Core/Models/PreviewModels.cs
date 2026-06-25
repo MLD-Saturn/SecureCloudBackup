@@ -12,7 +12,7 @@ public enum OperationType
     Restore,
     
     /// <summary>Deleting files from Azure storage.</summary>
-    DeleteFromAzure,
+    DeleteFromRemote,
     
     /// <summary>Mirror sync (restore + delete local extras).</summary>
     MirrorSync,
@@ -192,7 +192,7 @@ public class OperationPreview
     {
         get
         {
-            if (FilesToDelete.Count > 0 && OperationType == OperationType.DeleteFromAzure)
+            if (FilesToDelete.Count > 0 && OperationType == OperationType.DeleteFromRemote)
                 return $"⚠️ WARNING: {FilesToDelete.Count} file(s) will be PERMANENTLY deleted from Azure storage. This cannot be undone!";
             if (FilesToDelete.Count > 0 && OperationType == OperationType.MirrorSync)
                 return $"⚠️ WARNING: {FilesToDelete.Count} local file(s) will be deleted to match the backup.";

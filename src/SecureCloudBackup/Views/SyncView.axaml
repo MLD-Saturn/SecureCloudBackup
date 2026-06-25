@@ -184,8 +184,8 @@
                                           Command="{Binding ForceReuploadSelectedLocalFilesCommand}"
                                           IsEnabled="{Binding HasSelectedLocalFiles}"
                                           ToolTip.Tip="Bypasses dedup and the metadata-skip fast path. Use after an integrity-check non-repairable failure or to recover suspected remote corruption for files whose local copy is known-good."/>
-                                <MenuItem Header="Mirror Sync to Azure" Command="{Binding MirrorSyncToAzureCommand}"
-                                          IsEnabled="{Binding CanMirrorSyncToAzure}"/>
+                                <MenuItem Header="Mirror Sync to Azure" Command="{Binding MirrorSyncToRemoteCommand}"
+                                          IsEnabled="{Binding CanMirrorSyncToRemote}"/>
                                 <Separator/>
                                 <MenuItem Header="Add Watched Folder..." Command="{Binding AddWatchedFolderCommand}"/>
                                 <MenuItem Header="Remove from Watch List" Command="{Binding RemoveSelectedLocalFolderCommand}"
@@ -263,8 +263,8 @@
             <Border Grid.Column="2" Classes="card"
                     x:Name="AzureFilesPanel"
                     DragDrop.AllowDrop="True"
-                    BorderThickness="{Binding IsDragOverAzurePanel, Converter={x:Static local:DragDropConverters.BoolToBorderThickness}}"
-                    BorderBrush="{Binding IsDragOverAzurePanel, Converter={StaticResource BoolToColorConverter}}">
+                    BorderThickness="{Binding IsDragOverRemotePanel, Converter={x:Static local:DragDropConverters.BoolToBorderThickness}}"
+                    BorderBrush="{Binding IsDragOverRemotePanel, Converter={StaticResource BoolToColorConverter}}">
                 <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
                     <!-- Panel header -->
                     <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,8">
@@ -274,9 +274,9 @@
                         </StackPanel>
                         <TextBlock Grid.Column="2" Text="Drop local files here to backup" FontSize="10" Opacity="0.5" 
                                    VerticalAlignment="Center" FontStyle="Italic"
-                                   IsVisible="{Binding !IsDragOverAzurePanel}"/>
+                                   IsVisible="{Binding !IsDragOverRemotePanel}"/>
                         <Border Grid.Column="2" Background="#4CAF50" CornerRadius="4" Padding="8,4"
-                                IsVisible="{Binding IsDragOverAzurePanel}">
+                                IsVisible="{Binding IsDragOverRemotePanel}">
                             <TextBlock Text="Drop to BACKUP to Azure" FontSize="11" FontWeight="SemiBold" 
                                        Foreground="White"/>
                         </Border>
@@ -333,7 +333,7 @@
                                           IsEnabled="{Binding CanSetCustomRestorePath}"/>
                                 <Separator/>
                                 <MenuItem Header="Delete from Azure" Command="{Binding DeleteSelectedFilesCommand}"
-                                          IsEnabled="{Binding CanDeleteFromAzure}"
+                                          IsEnabled="{Binding CanDeleteFromRemote}"
                                           ToolTip.Tip="Delete checked files, or if none checked, delete the right-clicked item"/>
                                 <Separator/>
                                 <MenuItem Header="Select All" Command="{Binding SelectAllSyncFilesCommand}"/>
@@ -342,7 +342,7 @@
                                 <MenuItem Header="Expand All" Command="{Binding ExpandAllTreeNodesCommand}"/>
                                 <MenuItem Header="Collapse All" Command="{Binding CollapseAllTreeNodesCommand}"/>
                                 <Separator/>
-                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromAzureUiCommand}"/>
+                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromRemoteUiCommand}"/>
                             </ContextMenu>
                         </TreeView.ContextMenu>
                         <TreeView.ItemTemplate>
@@ -440,9 +440,9 @@
                     <Button Content="Backup Selected" Command="{Binding BackupSelectedLocalFilesCommand}"
                             Classes="primary" ToolTip.Tip="Backup selected local files to Azure"
                             IsEnabled="{Binding HasSelectedLocalFiles}"/>
-                    <Button Content="Mirror Sync to Azure" Command="{Binding MirrorSyncToAzureCommand}"
+                    <Button Content="Mirror Sync to Azure" Command="{Binding MirrorSyncToRemoteCommand}"
                             ToolTip.Tip="Mirror sync: backup new/modified files from the selected watched folder to Azure and mark deleted files"
-                            IsEnabled="{Binding CanMirrorSyncToAzure}"
+                            IsEnabled="{Binding CanMirrorSyncToRemote}"
                             Foreground="DodgerBlue"/>
                 </StackPanel>
             </Grid>

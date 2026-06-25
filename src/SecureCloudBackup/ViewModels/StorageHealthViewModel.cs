@@ -361,7 +361,7 @@ public partial class StorageHealthViewModel : ViewModelBase
                 ProgressText = $"Processing: {p.processed}/{p.total} - {p.currentFile}";
             });
 
-            await _chunkIndexService.RebuildIndexFromAzureAsync(progress, ct);
+            await _chunkIndexService.RebuildIndexFromRemoteAsync(progress, ct);
 
             await RefreshSummaryAsync();
             StatusMessage = "Catalog rebuild complete";
@@ -394,7 +394,7 @@ public partial class StorageHealthViewModel : ViewModelBase
 
         try
         {
-            await _chunkIndexService.BackupIndexToAzureAsync();
+            await _chunkIndexService.BackupIndexToRemoteAsync();
             await RefreshSummaryAsync();
             StatusMessage = "Index backup complete";
         }
@@ -419,7 +419,7 @@ public partial class StorageHealthViewModel : ViewModelBase
 
         try
         {
-            var success = await _chunkIndexService.RestoreIndexFromAzureAsync();
+            var success = await _chunkIndexService.RestoreIndexFromRemoteAsync();
             
             if (success)
             {

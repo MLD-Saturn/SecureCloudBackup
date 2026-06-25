@@ -128,7 +128,7 @@ public partial class MainWindowViewModel
             // Optionally refresh Azure files
             if (refreshAzure && _blobService.IsConnected)
             {
-                await RefreshFromAzureAsync();
+                await RefreshFromRemoteAsync();
             }
             
             // Notify property changes for filtered views
@@ -142,7 +142,7 @@ public partial class MainWindowViewModel
     }
 
     [RelayCommand]
-    private async Task RefreshFromAzureUiAsync()
+    private async Task RefreshFromRemoteUiAsync()
     {
         if (!IsInitialized)
         {
@@ -153,7 +153,7 @@ public partial class MainWindowViewModel
         IsOperationInProgress = true;
         try
         {
-            await RefreshFromAzureAsync();
+            await RefreshFromRemoteAsync();
         }
         finally
         {
@@ -638,7 +638,7 @@ public partial class MainWindowViewModel
     /// Called automatically after successful initialization.
     /// Caches the result so RefreshLocalFilesAsync can reuse it.
     /// </summary>
-    private async Task RefreshFromAzureAsync()
+    private async Task RefreshFromRemoteAsync()
     {
         // Check if blob service is connected
         if (!_blobService.IsConnected)
@@ -731,7 +731,7 @@ public partial class MainWindowViewModel
 
         AddLog("Scanning local files...");
 
-        // Use cached Azure file paths from RefreshFromAzureAsync if available.
+        // Use cached Azure file paths from RefreshFromRemoteAsync if available.
         // This avoids a duplicate ListRestorableFilesAsync call (which downloads all metadata again).
         var azureFilePaths = _cachedAzureFilePaths;
 
@@ -801,7 +801,7 @@ public partial class MainWindowViewModel
 
                 LocalFilesFlatList.ReplaceAll(flatFiles);
 
-                // Mirror the right-pane invalidation in RefreshFromAzureAsync
+                // Mirror the right-pane invalidation in RefreshFromRemoteAsync
                 // (line 378). Without this the flat-list view bound to
                 // FilteredLocalFiles does not re-evaluate after the
                 // underlying LocalFilesFlatList is rebuilt.
@@ -822,7 +822,7 @@ public partial class MainWindowViewModel
     {
         if (_blobService.IsConnected)
         {
-            await RefreshFromAzureAsync();
+            await RefreshFromRemoteAsync();
         }
         await RefreshLocalFilesAsync();
     }

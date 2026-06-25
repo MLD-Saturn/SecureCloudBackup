@@ -222,14 +222,14 @@ public partial class BackupOrchestrator
     /// <param name="localFolder">Local folder to sync from</param>
     /// <param name="progress">Progress reporter</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    public async Task<MirrorSyncResult> MirrorSyncToAzureAsync(
+    public async Task<MirrorSyncResult> MirrorSyncToRemoteAsync(
         WatchedFolder localFolder,
         IProgress<(int current, int total, string file, string action)>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(localFolder);
 
-        Log($"MirrorSyncToAzureAsync: Starting mirror sync from '{localFolder.Path}' to Azure");
+        Log($"MirrorSyncToRemoteAsync: Starting mirror sync from '{localFolder.Path}' to Azure");
         MirrorSyncResult result = new();
         var mirrorAzureStopwatch = Stopwatch.StartNew();
         // Snapshot CRC counters so we can record the per-op delta in the
@@ -244,7 +244,7 @@ public partial class BackupOrchestrator
         var localFiles = await _fileWatcherService.ScanFolderAsync(localFolder, cancellationToken);
         HashSet<string> localFilePaths = new(localFiles, StringComparer.OrdinalIgnoreCase);
 
-        Log($"MirrorSyncToAzureAsync: Found {localFiles.Count} local files");
+        Log($"MirrorSyncToRemoteAsync: Found {localFiles.Count} local files");
 
         // Phase 2: Get existing backups for this folder
         var existingBackups = _databaseService.GetAllBackedUpFiles()
@@ -276,7 +276,7 @@ public partial class BackupOrchestrator
         var totalOperations = localFiles.Count + existingBackups.Count;
 
         // Phase 4: Backup new and modified files using the shared parallel core.
-        // This gives MirrorSyncToAzureAsync the same parallelism, memory budget,
+        // This gives MirrorSyncToRemoteAsync the same parallelism, memory budget,
         // and per-file metrics recording as BackupFilesAsync.
         // B54: hoist effective file concurrency out of the if-block so the
         // post-loop metrics record the same value the loop actually used.
@@ -335,7 +335,7 @@ public partial class BackupOrchestrator
             effectiveFileConcurrency =
                 ComputeEffectiveFileConcurrency(memoryBudget, EffectiveMaxParallelFileBackups);
 
-            Log($"MirrorSyncToAzureAsync: Backing up {filesToBackup.Count} new/modified files " +
+            Log($"MirrorSyncToRemoteAsync: Backing up {filesToBackup.Count} new/modified files " +
                 $"(max {effectiveFileConcurrency} concurrent, " +
                 $"memoryBudget={(!memoryBudget.IsUnlimited ? $"{config.MemoryLimitMB} MB" : "unlimited")})");
 
@@ -373,7 +373,7 @@ public partial class BackupOrchestrator
             }
             catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
             {
-                InvalidateAzureCredential(auth!);
+                InvalidateRemoteCredential(auth!);
                 throw;
             }
 
@@ -402,7 +402,7 @@ public partial class BackupOrchestrator
                             backupPath, cancellationToken);
                         if (deletedChunks > 0)
                         {
-                            Log($"MirrorSyncToAzureAsync: Deleted {deletedChunks} orphaned chunks " +
+                            Log($"MirrorSyncToRemoteAsync: Deleted {deletedChunks} orphaned chunks " +
                                 $"for deleted file: {backupPath}");
                         }
                     }
@@ -411,7 +411,7 @@ public partial class BackupOrchestrator
                     _databaseService.SaveBackedUpFile(backupFile);
                     result.FilesDeleted++;
 
-                    Log($"MirrorSyncToAzureAsync: Marked as deleted: {backupPath}");
+                    Log($"MirrorSyncToRemoteAsync: Marked as deleted: {backupPath}");
                 }
                 catch (Exception ex)
                 {
@@ -424,7 +424,7 @@ public partial class BackupOrchestrator
             $"Mirror sync complete: {result.FilesTransferred} backed up, {result.FilesDeleted} marked deleted, " +
             $"{result.FilesUnchanged} unchanged, {result.FilesErrored} errors");
 
-        Log($"MirrorSyncToAzureAsync: Complete - {result.FilesTransferred} transferred, " +
+        Log($"MirrorSyncToRemoteAsync: Complete - {result.FilesTransferred} transferred, " +
             $"{result.FilesDeleted} deleted, {result.FilesUnchanged} unchanged");
 
         mirrorAzureStopwatch.Stop();
@@ -656,7 +656,7 @@ public partial class BackupOrchestrator
         // configured budget (see ComputePoolCapBytes).
         // B72 (W5 Phase 4): attribute the pool's cached retention to
         // the same MemoryBudget so the cached bytes show up inside
-        // PeakUsedBytes (see MirrorSyncToAzureAsync for the full
+        // PeakUsedBytes (see MirrorSyncToRemoteAsync for the full
         // rationale; same pattern here).
         using var largeChunkPool = new ChunkBufferPool(
             ChunkBufferPool.LargeChunkBucketSizes,
@@ -671,7 +671,7 @@ public partial class BackupOrchestrator
             ChunkBufferPool.SmallChunkBucketSizes,
             ComputeSmallPoolCapBytes(memoryBudget),
             memoryBudget);
-        // B36: see MirrorSyncToAzureAsync for the rationale; same pattern
+        // B36: see MirrorSyncToRemoteAsync for the rationale; same pattern
         // here so any backup operation -- not just mirror -- gets the
         // periodic memory snapshot in the always-visible log pane.
         // Gated on EnableMemoryTelemetry (DIAGNOSTICLOG by default); see the
@@ -725,7 +725,7 @@ public partial class BackupOrchestrator
         }
         catch (Exception ex) when (TryExtractAuthFailure(ex, out var auth))
         {
-            InvalidateAzureCredential(auth!);
+            InvalidateRemoteCredential(auth!);
             throw;
         }
 
@@ -766,7 +766,7 @@ public partial class BackupOrchestrator
 
     /// <summary>
     /// Core parallel backup logic shared by <see cref="BackupFilesAsync"/> and
-    /// <see cref="MirrorSyncToAzureAsync"/>. Backs up files using
+    /// <see cref="MirrorSyncToRemoteAsync"/>. Backs up files using
     /// <paramref name="effectiveFileConcurrency"/> concurrent workers with a
     /// shared <see cref="MemoryBudget"/>. Does NOT record operation-level
     /// metrics — callers are responsible.

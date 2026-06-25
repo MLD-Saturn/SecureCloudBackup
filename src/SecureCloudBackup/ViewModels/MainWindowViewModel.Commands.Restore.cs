@@ -76,7 +76,7 @@ public partial class MainWindowViewModel
         }
 
         // Generate preview
-        var preview = _restoreService.PreviewDeleteFromAzure(filesToDelete.Select(f => f.Model));
+        var preview = _restoreService.PreviewDeleteFromRemote(filesToDelete.Select(f => f.Model));
 
         // Show preview dialog and get user confirmation
         var confirmed = await ShowPreviewDialogAsync(preview);

@@ -324,7 +324,7 @@ public partial class MainWindowViewModel
     /// evaluations and make First throw. Take(2) bounds the walk so very
     /// large root lists still short-circuit on the second selected entry.
     /// </remarks>
-    public bool CanMirrorSyncToAzure
+    public bool CanMirrorSyncToRemote
     {
         get
         {
@@ -346,7 +346,7 @@ public partial class MainWindowViewModel
     /// backs up new/modified files, marks deleted files as excluded.
     /// </summary>
     [RelayCommand]
-    private async Task MirrorSyncToAzureAsync()
+    private async Task MirrorSyncToRemoteAsync()
     {
         if (!IsInitialized || !_blobService.IsConnected)
         {
@@ -389,7 +389,7 @@ public partial class MainWindowViewModel
                 ProgressText = $"[{p.current}/{p.total}] {p.action}: {p.file}";
             });
 
-            var result = await _orchestrator.MirrorSyncToAzureAsync(watchedFolder, progress, _operationCts!.Token);
+            var result = await _orchestrator.MirrorSyncToRemoteAsync(watchedFolder, progress, _operationCts!.Token);
 
             ProgressTab.CompleteOperation(result.FilesTransferred, result.FilesErrored, 0, result.BytesTransferred);
 
@@ -437,7 +437,7 @@ public partial class MainWindowViewModel
         OnPropertyChanged(nameof(SelectedLocalFilesCount));
         OnPropertyChanged(nameof(SelectedLocalFilesText));
         OnPropertyChanged(nameof(CanRemoveSelectedLocalFolder));
-        OnPropertyChanged(nameof(CanMirrorSyncToAzure));
+        OnPropertyChanged(nameof(CanMirrorSyncToRemote));
     }
 
     /// <summary>

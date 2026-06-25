@@ -148,14 +148,14 @@ public partial class RestoreService
     /// <summary>
     /// Generates a preview of deleting files from Azure storage.
     /// </summary>
-    public OperationPreview PreviewDeleteFromAzure(IEnumerable<BackedUpFile> filesToDelete)
+    public OperationPreview PreviewDeleteFromRemote(IEnumerable<BackedUpFile> filesToDelete)
     {
         ArgumentNullException.ThrowIfNull(filesToDelete);
 
         var fileList = filesToDelete.ToList();
         OperationPreview preview = new()
         {
-            OperationType = OperationType.DeleteFromAzure,
+            OperationType = OperationType.DeleteFromRemote,
             OperationDescription = $"Permanently delete {fileList.Count} file(s) from Azure storage",
             SourceDescription = "Azure Blob Storage",
             TargetDescription = "N/A (files will be removed)"

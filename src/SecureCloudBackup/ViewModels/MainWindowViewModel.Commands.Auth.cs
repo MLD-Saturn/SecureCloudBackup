@@ -136,7 +136,7 @@ public partial class MainWindowViewModel
                     return;
                 }
 
-                var (success, message) = await _orchestrator.TestAzureConnectionAsync(StorageAccountName, ContainerName);
+                var (success, message) = await _orchestrator.TestRemoteConnectionAsync(StorageAccountName, ContainerName);
                 AddLog(success ? $"? {message}" : $"? {message}");
             }
             else
@@ -399,7 +399,7 @@ public partial class MainWindowViewModel
             if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
                 AddLog("Loading files from Azure...");
-                await RefreshFromAzureAsync();
+                await RefreshFromRemoteAsync();
             }
             else if (_orchestrator.AzureConnectionError == null && !isNewSetup)
             {
@@ -516,7 +516,7 @@ public partial class MainWindowViewModel
             if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
                 AddLog("Loading files from Azure...");
-                await RefreshFromAzureAsync();
+                await RefreshFromRemoteAsync();
             }
 
             await RefreshLocalFilesAsync();
