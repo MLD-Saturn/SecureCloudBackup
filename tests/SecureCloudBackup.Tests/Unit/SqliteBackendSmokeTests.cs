@@ -70,33 +70,6 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Equal(12, second.CountSchemaTables());
     }
 
-    [Fact(Skip = "SQLCipher-specific diagnostic (different passwords produce different SQLCipher on-disk bytes). Not meaningful for the AES-256-GCM snapshot format; the snapshot backend's wrong-password behavior is covered by InMemorySnapshotBackendTests.Reopen_WithWrongPassword_Throws. W-DB-enc Step 7.")]
-    public void Initialize_WrongPassword_ProducesDifferentEncryption()
-    {
-        // Diagnostic: prove SQLCipher is at least using the key by showing
-        // that two different passwords produce different on-disk bytes for
-        // the same logical content. If this passes but the wrong-password
-        // test fails, the issue is detection, not encryption.
-        const string password1 = "Password1";
-        const string password2 = "Password2";
-        var db1 = Path.Combine(_testDir, "p1.db");
-        var db2 = Path.Combine(_testDir, "p2.db");
-
-        using (var b1 = new InMemorySnapshotBackend()) b1.Initialize(db1, password1.AsSpan());
-        using (var b2 = new InMemorySnapshotBackend()) b2.Initialize(db2, password2.AsSpan());
-
-        var bytes1 = File.ReadAllBytes(db1);
-        var bytes2 = File.ReadAllBytes(db2);
-
-        Assert.Equal(bytes1.Length, bytes2.Length);
-        // First 16 bytes are the SQLCipher salt (random per-DB, so they'll
-        // differ regardless of password). Compare bytes 16..32 which are
-        // page-1 header content - encrypted, so they must differ when keys
-        // differ.
-        Assert.False(bytes1.AsSpan(16, 16).SequenceEqual(bytes2.AsSpan(16, 16)),
-            "Page-1 ciphertext is identical between two passwords - encryption is not actually keyed");
-    }
-
     [Fact]
     public void Initialize_ReopenWithWrongPassword_ThrowsInvalidPassword()
     {
@@ -465,27 +438,6 @@ public class SqliteBackendSmokeTests : IDisposable
         Assert.Empty(repair.FailedIndexes);
         Assert.Null(repair.PostRepairDiagnosis);
         Assert.Contains("healthy", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact(Skip = "SQLCipher-specific: the snapshot backend's ReindexCorruptIndexes has no cipher_integrity_check dimension (the AES-256-GCM tag authenticates the whole snapshot at load). W-DB-enc Step 7.")]
-    public void ReindexCorruptIndexes_OnCipherDamage_RefusesBeforeTouchingAnyIndex()
-    {
-        // B45: a synthetic diagnosis with cipher failures must short-
-        // circuit BEFORE any REINDEX runs. We do not need to actually
-        // corrupt the file; the repair API takes the diagnosis as
-        // input so we can construct the failure shape directly.
-        using var backend = new InMemorySnapshotBackend();
-        backend.Initialize(_dbPath, "RepairPassword123!".AsSpan());
-
-        var fakeCipherFailure = new DatabaseFileIntegrityResult(
-            CipherIntegrityMessages: new[] { "page 7 corrupted" },
-            SqliteIntegrityMessages: System.Array.Empty<string>());
-
-        var repair = backend.ReindexCorruptIndexes(fakeCipherFailure);
-
-        Assert.False(repair.WasAttempted);
-        Assert.Contains("cipher", repair.RefusalReason, System.StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("REINDEX cannot fix", repair.RefusalReason, System.StringComparison.Ordinal);
     }
 
     [Fact]
