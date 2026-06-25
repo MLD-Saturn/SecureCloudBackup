@@ -1,6 +1,8 @@
-# Azure Backup Tool
+# SecureCloudBackup
 
 A zero-knowledge encrypted backup tool that syncs your files to Microsoft Azure Blob Storage with client-side encryption. Built with [Avalonia UI](https://avaloniaui.net/) and .NET 10.
+
+The application core is **storage-provider-neutral**: all backup, restore, encryption, and database logic lives in `SecureCloudBackup.Core`, which references no cloud SDK. Azure Blob Storage is the only provider implemented today, isolated behind a neutral interface in `SecureCloudBackup.Storage.Azure`, so a future provider is a new sibling project rather than a core rewrite.
 
 ## Features
 
@@ -50,8 +52,8 @@ dotnet build
 
 ### 4. Start Backup
 
-1. Go to the **Dashboard**.
-2. Click **Start Monitoring** -- the app scans your folders and begins backing up.
+1. Open the **Sync** view.
+2. Click **Start Monitoring** -- the app scans your watched folders and begins backing up.
 3. Changed files are detected automatically and uploaded in the background.
 
 For detailed instructions see the **[User Guide](docs/USER_GUIDE.md)**.
@@ -66,7 +68,7 @@ For detailed instructions see the **[User Guide](docs/USER_GUIDE.md)**.
 
 ```bash
 git clone https://github.com/MLD-Saturn/SecureCloudBackup.git
-cd azurebackup
+cd SecureCloudBackup
 
 # Build the solution
 dotnet build
@@ -97,13 +99,24 @@ To run in **portable mode**, place a `portable.marker` file next to the executab
 
 ```
 src/
-  SecureCloudBackup/            Avalonia UI application (MVVM, CommunityToolkit.Mvvm)
-  SecureCloudBackup.Core/       Core library -- encryption, chunking, blob storage, database, restore
+  SecureCloudBackup/              Avalonia UI application (MVVM, CommunityToolkit.Mvvm)
+  SecureCloudBackup.Core/         Core library -- encryption, chunking, restore, database;
+                                  provider-neutral (no cloud SDK reference)
+  SecureCloudBackup.Storage.Azure/ Azure Blob Storage provider -- the only project that
+                                  references the Azure SDK (Azure.Storage.Blobs, Azure.Identity)
+  SecureCloudBackup.Crypto/       Engine-agnostic crypto -- AES-256-GCM snapshot envelope,
+                                  Argon2id key derivation
+  SecureCloudBackup.SqliteInterop/ Managed SQLite serialize/row-copy helpers (no native bundle)
+  SecureCloudBackup.Migration/    Single-engine helper exe that reads a legacy SQLCipher
+                                  catalog during one-time migration to the snapshot format
 tests/
-  SecureCloudBackup.Tests/      Unit and integration tests (xUnit)
+  SecureCloudBackup.Tests/        Unit and integration tests (xUnit)
+benchmarks/
+  SecureCloudBackup.Benchmarks/   BenchmarkDotNet micro-benchmarks (Release-only, not in CI)
 docs/
-  SETUP.md                Azure resource setup instructions
-  USER_GUIDE.md           End-user guide
+  SETUP.md                        Azure resource setup instructions
+  USER_GUIDE.md                   End-user guide
+  ARCHITECTURE_PRESENTATION.md    Architecture and data-flow slide deck
 ```
 
 ## Architecture
