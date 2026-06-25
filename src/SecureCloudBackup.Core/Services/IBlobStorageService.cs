@@ -1,4 +1,3 @@
-using Azure.Core;
 using SecureCloudBackup.Core.Models;
 
 namespace SecureCloudBackup.Core.Services;
@@ -71,18 +70,18 @@ public interface IBlobStorageService : IAsyncDisposable
     Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName);
 
     /// <summary>
-    /// Initializes connection to blob storage using Entra ID (TokenCredential).
-    /// Use this for organizational/work accounts.
+    /// Initializes connection to object storage using a token credential
+    /// (e.g. an interactive sign-in). Use this for organizational/work accounts.
     /// </summary>
-    /// <param name="blobServiceUri">The blob service URI (e.g., https://account.blob.core.windows.net)</param>
-    /// <param name="containerName">The container name to use for backups</param>
-    /// <param name="credential">The TokenCredential for authentication</param>
-    Task ConnectWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential);
+    /// <param name="serviceUri">The storage service URI (e.g., https://account.blob.core.windows.net)</param>
+    /// <param name="containerName">The container/bucket name to use for backups</param>
+    /// <param name="tokenProvider">The provider-neutral source of bearer tokens.</param>
+    Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider);
 
     /// <summary>
-    /// Tests the connection to blob storage using Entra ID.
+    /// Tests the connection to object storage using a token credential.
     /// </summary>
-    Task<(bool success, string message)> TestConnectionWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential);
+    Task<(bool success, string message)> TestConnectionWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider);
 
     #endregion
 

@@ -127,7 +127,7 @@ public partial class BackupOrchestrator
         }
         
         Uri blobServiceUri = new($"https://{storageAccountName}.blob.core.windows.net");
-        var result = await _blobService.TestConnectionWithEntraIdAsync(blobServiceUri, containerName, _credential);
+        var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, containerName, new AzureTokenCredentialProvider(_credential));
         Log($"TestAzureConnectionAsync: Result success={result.success}");
         return result;
     }
@@ -153,10 +153,10 @@ public partial class BackupOrchestrator
         Log("SaveStorageAccountAsync: Configuration saved");
         
         // Connect immediately
-        await _blobService.ConnectWithEntraIdAsync(
+        await _blobService.ConnectWithTokenAsync(
             config.BlobServiceUri!, 
             containerName, 
-            _credential);
+            new AzureTokenCredentialProvider(_credential));
         Log("SaveStorageAccountAsync: Connected to Azure storage");
     }
     

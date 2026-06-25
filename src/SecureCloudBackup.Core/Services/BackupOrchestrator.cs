@@ -690,10 +690,10 @@ public partial class BackupOrchestrator : IAsyncDisposable
             if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _credential != null)
             {
                 Log($"ConnectToAzureAsync: Connecting with Entra ID to {config.BlobServiceUri}");
-                await _blobService.ConnectWithEntraIdAsync(
+                await _blobService.ConnectWithTokenAsync(
                     config.BlobServiceUri, 
                     containerName, 
-                    _credential);
+                    new AzureTokenCredentialProvider(_credential));
                 Log("ConnectToAzureAsync: Entra ID connection established");
             }
             else

@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
-using Azure.Core;
 using SecureCloudBackup.Core.Models;
 
 namespace SecureCloudBackup.Core.Services;
@@ -139,30 +138,30 @@ public class InMemoryBlobService : IBlobStorageService
 
     #endregion
 
-    #region Entra ID Authentication
+    #region Token Authentication
 
-    public Task ConnectWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential)
+    public Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
     {
         // For in-memory, we just validate inputs and mark as connected
-        ArgumentNullException.ThrowIfNull(blobServiceUri);
+        ArgumentNullException.ThrowIfNull(serviceUri);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-        ArgumentNullException.ThrowIfNull(credential);
-        
+        ArgumentNullException.ThrowIfNull(tokenProvider);
+
         _isConnected = true;
         return Task.CompletedTask;
     }
 
-    public Task<(bool success, string message)> TestConnectionWithEntraIdAsync(
-        Uri blobServiceUri, string containerName, TokenCredential credential)
+    public Task<(bool success, string message)> TestConnectionWithTokenAsync(
+        Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
     {
-        if (blobServiceUri == null)
-            return Task.FromResult((false, "Blob service URI is required"));
+        if (serviceUri == null)
+            return Task.FromResult((false, "Service URI is required"));
         if (string.IsNullOrWhiteSpace(containerName))
             return Task.FromResult((false, "Container name is required"));
-        if (credential == null)
-            return Task.FromResult((false, "Credential is required"));
-            
-        return Task.FromResult((true, "In-memory connection successful (Entra ID simulated)"));
+        if (tokenProvider == null)
+            return Task.FromResult((false, "Token provider is required"));
+
+        return Task.FromResult((true, "In-memory connection successful (token credential simulated)"));
     }
 
 
@@ -881,7 +880,7 @@ public class InMemoryBlobService : IBlobStorageService
     private void EnsureConnected()
     {
         if (!_isConnected)
-            throw new InvalidOperationException("Not connected. Call ConnectAsync or ConnectWithEntraIdAsync first.");
+            throw new InvalidOperationException("Not connected. Call ConnectAsync or ConnectWithTokenAsync first.");
     }
 
     /// <summary>

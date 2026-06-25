@@ -369,53 +369,53 @@ public partial class AzureBlobService : IBlobStorageService
 
     #endregion
 
-    #region Entra ID Authentication
+    #region Token Authentication
 
     /// <summary>
-    /// Initializes connection to Azure Blob Storage using Entra ID (TokenCredential).
-    /// Use this for organizational/work accounts.
+    /// Initializes connection to Azure Blob Storage using a token credential
+    /// (e.g. an interactive Entra ID sign-in). Use this for organizational/work accounts.
     /// </summary>
-    public async Task ConnectWithEntraIdAsync(Uri blobServiceUri, string containerName, TokenCredential credential)
+    public async Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
     {
-        Log($"ConnectWithEntraIdAsync: Connecting with Entra ID to {blobServiceUri}, container '{containerName}'");
-        ArgumentNullException.ThrowIfNull(blobServiceUri);
+        Log($"ConnectWithTokenAsync: Connecting with a token credential to {serviceUri}, container '{containerName}'");
+        ArgumentNullException.ThrowIfNull(serviceUri);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-        ArgumentNullException.ThrowIfNull(credential);
-        
-        _serviceClient = new BlobServiceClient(blobServiceUri, credential, CreateClientOptions());
+        ArgumentNullException.ThrowIfNull(tokenProvider);
+
+        _serviceClient = new BlobServiceClient(serviceUri, ToTokenCredential(tokenProvider), CreateClientOptions());
         _containerClient = _serviceClient.GetBlobContainerClient(containerName);
 
         // Create container if it doesn't exist
         await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
-        Log("ConnectWithEntraIdAsync: Connection established successfully");
+        Log("ConnectWithTokenAsync: Connection established successfully");
     }
 
     /// <summary>
-    /// Tests the connection to Azure Blob Storage using Entra ID.
+    /// Tests the connection to Azure Blob Storage using a token credential.
     /// </summary>
-    public async Task<(bool success, string message)> TestConnectionWithEntraIdAsync(
-        Uri blobServiceUri, string containerName, TokenCredential credential)
+    public async Task<(bool success, string message)> TestConnectionWithTokenAsync(
+        Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
     {
-        Log($"TestConnectionWithEntraIdAsync: Testing Entra ID to {blobServiceUri}, container '{containerName}'");
+        Log($"TestConnectionWithTokenAsync: Testing token credential to {serviceUri}, container '{containerName}'");
         try
         {
-            ArgumentNullException.ThrowIfNull(blobServiceUri);
+            ArgumentNullException.ThrowIfNull(serviceUri);
             ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
-            ArgumentNullException.ThrowIfNull(credential);
-            
-            BlobServiceClient testClient = new(blobServiceUri, credential, CreateClientOptions());
+            ArgumentNullException.ThrowIfNull(tokenProvider);
+
+            BlobServiceClient testClient = new(serviceUri, ToTokenCredential(tokenProvider), CreateClientOptions());
             var testContainer = testClient.GetBlobContainerClient(containerName);
-            
+
             // Try to get container properties or create it
             await testContainer.CreateIfNotExistsAsync(PublicAccessType.None);
             await testContainer.GetPropertiesAsync();
-            
-            Log("TestConnectionWithEntraIdAsync: Test successful");
+
+            Log("TestConnectionWithTokenAsync: Test successful");
             return (true, "Connection successful! Authenticated with Microsoft Entra ID.");
         }
         catch (AuthenticationFailedException ex)
         {
-            Log($"TestConnectionWithEntraIdAsync: AuthenticationFailedException - {ex.Message}");
+            Log($"TestConnectionWithTokenAsync: AuthenticationFailedException - {ex.Message}");
             if (ex.Message.Contains("AADSTS500200", StringComparison.OrdinalIgnoreCase))
             {
                 return (false, "Personal Microsoft accounts are not supported with Entra ID. Please use the Connection String option instead.");
@@ -433,6 +433,42 @@ public partial class AzureBlobService : IBlobStorageService
         catch (Exception ex)
         {
             return (false, $"Connection failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Resolves a provider-neutral <see cref="IStorageTokenProvider"/> to the Azure
+    /// <see cref="TokenCredential"/> the <see cref="BlobServiceClient"/> needs. Unwraps
+    /// an <see cref="AzureTokenCredentialProvider"/> directly (the Azure sign-in path)
+    /// so no token round-trips through the neutral surface; otherwise adapts the neutral
+    /// provider via <see cref="DelegatedStorageTokenCredential"/>. Internal (rather than
+    /// private) only so the unwrap-vs-adapt branch can be unit-tested without a live Azure
+    /// connection; the body is unchanged by the visibility.
+    /// </summary>
+    internal static TokenCredential ToTokenCredential(IStorageTokenProvider tokenProvider)
+        => tokenProvider is AzureTokenCredentialProvider azure
+            ? azure.Credential
+            : new DelegatedStorageTokenCredential(tokenProvider);
+
+    /// <summary>
+    /// Adapts an arbitrary provider-neutral <see cref="IStorageTokenProvider"/> to the
+    /// Azure <see cref="TokenCredential"/> shape. Used only when the supplied provider is
+    /// not an <see cref="AzureTokenCredentialProvider"/> (which is unwrapped directly).
+    /// </summary>
+    private sealed class DelegatedStorageTokenCredential : TokenCredential
+    {
+        private readonly IStorageTokenProvider _provider;
+
+        public DelegatedStorageTokenCredential(IStorageTokenProvider provider) => _provider = provider;
+
+        public override AccessToken GetToken(TokenRequestContext requestContext, CancellationToken cancellationToken)
+            => GetTokenAsync(requestContext, cancellationToken).AsTask().GetAwaiter().GetResult();
+
+        public override async ValueTask<AccessToken> GetTokenAsync(
+            TokenRequestContext requestContext, CancellationToken cancellationToken)
+        {
+            var token = await _provider.GetTokenAsync(requestContext.Scopes, cancellationToken).ConfigureAwait(false);
+            return new AccessToken(token.Token, token.ExpiresOn);
         }
     }
 
@@ -1440,7 +1476,7 @@ public partial class AzureBlobService : IBlobStorageService
     private void EnsureConnected()
     {
         if (_containerClient == null)
-            throw new InvalidOperationException("Not connected to Azure Blob Storage. Call ConnectAsync or ConnectWithEntraIdAsync first.");
+            throw new InvalidOperationException("Not connected to Azure Blob Storage. Call ConnectAsync or ConnectWithTokenAsync first.");
     }
 
     public async ValueTask DisposeAsync()
