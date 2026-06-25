@@ -752,7 +752,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _fileWatcherService = new FileWatcherService(_databaseService);
         _orchestrator = new BackupOrchestrator(
             _databaseService, _encryptionService, _chunkingService, 
-            _blobService, _fileWatcherService);
+            _blobService, _fileWatcherService, new AzureInteractiveAuthenticator());
         _restoreService = new RestoreService(_databaseService, _blobService, _encryptionService);
 
 #if DIAGNOSTICLOG

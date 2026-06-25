@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
-using Azure.Core;
 using SecureCloudBackup.Core.Models;
 
 namespace SecureCloudBackup.Core.Services;
@@ -28,8 +27,11 @@ public partial class BackupOrchestrator : IAsyncDisposable
     private volatile bool _isRunning;
     private volatile bool _isPaused;
     
-    // Entra ID credential (cached after authentication)
-    private TokenCredential? _credential;
+    // Interactive authenticator (provider-supplied; null when interactive sign-in
+    // is not configured) and the provider-neutral token source it produces after
+    // a successful sign-in. No cloud SDK type is referenced here.
+    private readonly IStorageAuthenticator? _authenticator;
+    private IStorageTokenProvider? _tokenProvider;
 
     // Rate limiting for password attempts
     private const int MaxFailedAttempts = 5;
@@ -422,7 +424,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
         EncryptionService encryptionService,
         ChunkingService chunkingService,
         IBlobStorageService blobService,
-        FileWatcherService fileWatcherService)
+        FileWatcherService fileWatcherService,
+        IStorageAuthenticator? authenticator = null)
     {
         ArgumentNullException.ThrowIfNull(databaseService);
         ArgumentNullException.ThrowIfNull(encryptionService);
@@ -435,6 +438,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         _chunkingService = chunkingService;
         _blobService = blobService;
         _fileWatcherService = fileWatcherService;
+        _authenticator = authenticator;
 
         _fileWatcherService.FileChanged += OnFileChanged;
         _fileWatcherService.Error += (s, e) => ErrorOccurred?.Invoke(this, e);
@@ -626,7 +630,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         ArgumentNullException.ThrowIfNull(exception);
         Log($"InvalidateAzureCredential: Clearing cached credential after {exception.Status} {exception.ErrorCode}");
 
-        _credential = null;
+        _tokenProvider = null;
 
         try
         {
@@ -687,13 +691,13 @@ public partial class BackupOrchestrator : IAsyncDisposable
         if (config.AuthMethod == AzureAuthMethod.EntraId)
         {
             // Entra ID authentication
-            if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _credential != null)
+            if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _tokenProvider != null)
             {
                 Log($"ConnectToAzureAsync: Connecting with Entra ID to {config.BlobServiceUri}");
                 await _blobService.ConnectWithTokenAsync(
                     config.BlobServiceUri, 
                     containerName, 
-                    new AzureTokenCredentialProvider(_credential));
+                    _tokenProvider);
                 Log("ConnectToAzureAsync: Entra ID connection established");
             }
             else
@@ -744,7 +748,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         _encryptionService.ClearKey();
         
         // Clear Entra ID credential
-        _credential = null;
+        _tokenProvider = null;
 
         // Securely delete all database data
         _databaseService.SecureReset();
@@ -792,7 +796,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         }
 
         _encryptionService.ClearKey();
-        _credential = null;
+        _tokenProvider = null;
 
         var result = _databaseService.QuarantineAndClose(databasePath);
 
@@ -911,7 +915,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
             await StopAsync();
         }
         _encryptionService.ClearKey();
-        _credential = null;
+        _tokenProvider = null;
 
         if (LocalDatabaseService.DatabaseExists(freshDatabasePath))
         {

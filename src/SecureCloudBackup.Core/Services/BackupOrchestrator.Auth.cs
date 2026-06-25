@@ -1,18 +1,16 @@
-using Azure.Core;
-using Azure.Identity;
 using SecureCloudBackup.Core.Models;
 
 namespace SecureCloudBackup.Core.Services;
 
 /// <summary>
-/// Azure authentication methods: Entra ID and Connection String.
+/// Authentication methods: interactive (token) sign-in and connection string.
 /// </summary>
 public partial class BackupOrchestrator
 {
     /// <summary>
-    /// Authenticates with Microsoft Entra ID using interactive browser flow.
-    /// Opens the system's default browser for seamless sign-in.
-    /// Use this for organizational/work accounts only.
+    /// Authenticates with an interactive sign-in (e.g. Microsoft Entra ID browser flow)
+    /// via the provider-supplied <see cref="IStorageAuthenticator"/> and caches the
+    /// resulting provider-neutral token source. Use this for organizational/work accounts only.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token to cancel the operation</param>
     /// <param name="timeoutSeconds">Timeout in seconds for the authentication (default: 120 seconds)</param>
@@ -20,96 +18,34 @@ public partial class BackupOrchestrator
         CancellationToken cancellationToken = default,
         int timeoutSeconds = 120)
     {
-        Log($"AuthenticateWithEntraIdAsync: Starting browser authentication (timeout={timeoutSeconds}s)");
-        try
+        Log($"AuthenticateWithEntraIdAsync: Starting interactive authentication (timeout={timeoutSeconds}s)");
+
+        if (_authenticator == null)
         {
-            InteractiveBrowserCredentialOptions options = new()
-            {
-                // Use the system's default browser
-                TokenCachePersistenceOptions = new TokenCachePersistenceOptions
-                {
-                    Name = "SecureCloudBackup",
-                    UnsafeAllowUnencryptedStorage = false
-                },
-                // Redirect to localhost after auth completes
-                RedirectUri = new Uri("http://localhost")
-                // The interactive flow uses the system browser by default. The former
-                // BrowserCustomization.UseEmbeddedWebView = false setting is now obsolete
-                // (the embedded web view was removed from Azure.Identity), and the system
-                // browser is the only supported and default behavior, so the option is
-                // omitted -- runtime behavior is unchanged.
-            };
-            
-            _credential = new InteractiveBrowserCredential(options);
-            Log("AuthenticateWithEntraIdAsync: Opening browser for authentication");
-            
-            // Create a timeout cancellation token
-            using CancellationTokenSource timeoutCts = new(TimeSpan.FromSeconds(timeoutSeconds));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutCts.Token);
-            
-            // Force a token request to trigger the browser login
-            TokenRequestContext tokenRequest = new(
-                ["https://storage.azure.com/.default"]);
-            
-            var token = await _credential.GetTokenAsync(tokenRequest, linkedCts.Token);
-            
-            if (!string.IsNullOrEmpty(token.Token))
-            {
-                Log("AuthenticateWithEntraIdAsync: Token obtained successfully");
-                // Update config to mark as authenticated
-                var config = _databaseService.GetConfiguration();
-                config.IsEntraIdAuthenticated = true;
-                _databaseService.SaveConfiguration(config);
-                
-                return (true, "Successfully authenticated with Microsoft Entra ID!");
-            }
-            
-            Log("AuthenticateWithEntraIdAsync: No token returned");
-            _credential = null;
-            return (false, "Authentication did not return a valid token.");
+            Log("AuthenticateWithEntraIdAsync: No interactive authenticator configured");
+            return (false, "Interactive sign-in is not available in this configuration.");
         }
-        catch (AuthenticationFailedException ex)
+
+        var result = await _authenticator.AuthenticateInteractiveAsync(cancellationToken, timeoutSeconds);
+
+        if (result.Success && result.TokenProvider != null)
         {
-            Log($"AuthenticateWithEntraIdAsync: AuthenticationFailedException - {ex.Message}");
-            _credential = null;
-            // Provide more user-friendly messages for common errors
-            if (ex.Message.Contains("canceled", StringComparison.OrdinalIgnoreCase) ||
-                ex.Message.Contains("cancelled", StringComparison.OrdinalIgnoreCase))
-            {
-                return (false, "Sign-in was cancelled. Please try again.");
-            }
-            if (ex.Message.Contains("AADSTS", StringComparison.OrdinalIgnoreCase))
-            {
-                return (false, $"Microsoft sign-in error: {ex.Message}");
-            }
-            return (false, $"Authentication failed: {ex.Message}");
+            _tokenProvider = result.TokenProvider;
+            Log("AuthenticateWithEntraIdAsync: Token obtained successfully");
+
+            // Update config to mark as authenticated.
+            var config = _databaseService.GetConfiguration();
+            config.IsEntraIdAuthenticated = true;
+            _databaseService.SaveConfiguration(config);
+
+            return (true, result.Message);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            Log("AuthenticateWithEntraIdAsync: Cancelled by user");
-            _credential = null;
-            return (false, "Sign-in was cancelled.");
-        }
-        catch (OperationCanceledException)
-        {
-            // Timeout occurred
-            Log($"AuthenticateWithEntraIdAsync: Timeout after {timeoutSeconds} seconds");
-            _credential = null;
-            return (false, $"Sign-in timed out after {timeoutSeconds} seconds. Please try again.");
-        }
-        catch (Exception ex)
-        {
-            Log($"AuthenticateWithEntraIdAsync: Exception - {ex.GetType().Name}: {ex.Message}");
-            _credential = null;
-            // Handle browser-related errors
-            if (ex.Message.Contains("browser", StringComparison.OrdinalIgnoreCase))
-            {
-                return (false, "Could not open browser for sign-in. Please ensure a browser is available.");
-            }
-            return (false, $"Authentication error: {ex.Message}");
-        }
+
+        _tokenProvider = null;
+        Log($"AuthenticateWithEntraIdAsync: Sign-in failed - {result.Message}");
+        return (false, result.Message);
     }
-    
+
     /// <summary>
     /// Tests the connection to Azure storage using the current Entra ID credential.
     /// </summary>
@@ -120,14 +56,14 @@ public partial class BackupOrchestrator
         ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         
-        if (_credential == null)
+        if (_tokenProvider == null)
         {
             Log("TestAzureConnectionAsync: No credential available");
             return (false, "Not authenticated with Entra ID. Please sign in first.");
         }
-        
+
         Uri blobServiceUri = new($"https://{storageAccountName}.blob.core.windows.net");
-        var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, containerName, new AzureTokenCredentialProvider(_credential));
+        var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, containerName, _tokenProvider);
         Log($"TestAzureConnectionAsync: Result success={result.success}");
         return result;
     }
@@ -141,7 +77,7 @@ public partial class BackupOrchestrator
         ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
         ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
         
-        if (_credential == null)
+        if (_tokenProvider == null)
             throw new InvalidOperationException("Must authenticate with Entra ID first.");
         
         var config = _databaseService.GetConfiguration();
@@ -156,14 +92,14 @@ public partial class BackupOrchestrator
         await _blobService.ConnectWithTokenAsync(
             config.BlobServiceUri!, 
             containerName, 
-            new AzureTokenCredentialProvider(_credential));
+            _tokenProvider);
         Log("SaveStorageAccountAsync: Connected to Azure storage");
     }
     
     /// <summary>
     /// Gets whether the user is currently authenticated with Entra ID.
     /// </summary>
-    public bool IsEntraIdAuthenticated => _credential != null;
+    public bool IsEntraIdAuthenticated => _tokenProvider != null;
 
     /// <summary>
     /// Tests the connection using a connection string.
