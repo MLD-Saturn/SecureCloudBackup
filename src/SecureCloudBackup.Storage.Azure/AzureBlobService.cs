@@ -140,45 +140,16 @@ public partial class AzureBlobService : IObjectStorageService
     /// </param>
     internal static StorageTransferOptions ComputeUploadTransferOptions(int encryptedLength)
     {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(encryptedLength);
-
-        const int eightMb = 8 * 1024 * 1024;
-
-        if (encryptedLength <= eightMb)
+        // The (concurrency, block size) bands live in Core's UploadStagingPlanner
+        // so the producer-side MemoryBudget staging charge and these Azure SDK
+        // transfer options derive from ONE source and cannot drift.
+        var (concurrency, blockSize) = UploadStagingPlanner.Plan(encryptedLength);
+        return new StorageTransferOptions
         {
-            // Single PUT path: one in-band transfer at the chunk's actual
-            // size (capped at 8 MB). MaximumConcurrency=1 so the SDK does
-            // not stage a second block speculatively.
-            return new StorageTransferOptions
-            {
-                MaximumConcurrency = 1,
-                MaximumTransferSize = encryptedLength,
-                InitialTransferSize = encryptedLength
-            };
-        }
-
-        if (encryptedLength <= 16 * 1024 * 1024)
-        {
-            return new StorageTransferOptions
-            {
-                MaximumConcurrency = 2,
-                MaximumTransferSize = eightMb,
-                InitialTransferSize = eightMb
-            };
-        }
-
-        if (encryptedLength <= 32 * 1024 * 1024)
-        {
-            return new StorageTransferOptions
-            {
-                MaximumConcurrency = 4,
-                MaximumTransferSize = eightMb,
-                InitialTransferSize = eightMb
-            };
-        }
-
-        // > 32 MB: full pre-B53 fan-out, unchanged.
-        return DefaultTransferOptions;
+            MaximumConcurrency = concurrency,
+            MaximumTransferSize = blockSize,
+            InitialTransferSize = blockSize
+        };
     }
 
     /// <summary>
@@ -206,17 +177,7 @@ public partial class AzureBlobService : IObjectStorageService
     /// <see cref="ComputeUploadTransferOptions"/>.
     /// </param>
     internal static long EstimateUploadStagingBytes(int encryptedLength)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(encryptedLength);
-
-        var options = ComputeUploadTransferOptions(encryptedLength);
-        // Both fields are populated for every band (the helper sets a
-        // concrete value rather than leaving the field null), so the
-        // GetValueOrDefault is a defensive read.
-        var concurrency = options.MaximumConcurrency.GetValueOrDefault(1);
-        var size = options.MaximumTransferSize.GetValueOrDefault(encryptedLength);
-        return (long)concurrency * size;
-    }
+        => UploadStagingPlanner.EstimateStagingBytes(encryptedLength);
 
     // Retry settings for upload failures. We retry on transient failures (MD5 mismatch
     // from in-transit corruption, 5xx, 408, 429, socket / IO errors, timeouts) but NOT

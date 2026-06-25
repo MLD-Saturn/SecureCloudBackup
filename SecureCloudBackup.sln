@@ -23,6 +23,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCloudBackup.Migration
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCloudBackup.SqliteInterop", "src\SecureCloudBackup.SqliteInterop\SecureCloudBackup.SqliteInterop.csproj", "{45071B74-2513-4C40-BE92-F910F353C6ED}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCloudBackup.Storage.Azure", "src\SecureCloudBackup.Storage.Azure\SecureCloudBackup.Storage.Azure.csproj", "{D8236702-40F1-4441-90CC-ECA61884F901}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -117,6 +119,18 @@ Global
 		{45071B74-2513-4C40-BE92-F910F353C6ED}.Release|x64.Build.0 = Release|Any CPU
 		{45071B74-2513-4C40-BE92-F910F353C6ED}.Release|x86.ActiveCfg = Release|Any CPU
 		{45071B74-2513-4C40-BE92-F910F353C6ED}.Release|x86.Build.0 = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|x64.Build.0 = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Debug|x86.Build.0 = Debug|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|x64.ActiveCfg = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|x64.Build.0 = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|x86.ActiveCfg = Release|Any CPU
+		{D8236702-40F1-4441-90CC-ECA61884F901}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -129,5 +143,6 @@ Global
 		{5749E277-CB71-41D7-ABD9-C55E55E88EC5} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{A62B5692-5827-4E15-ACFA-1857C56B361D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{45071B74-2513-4C40-BE92-F910F353C6ED} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{D8236702-40F1-4441-90CC-ECA61884F901} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

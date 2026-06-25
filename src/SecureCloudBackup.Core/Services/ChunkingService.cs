@@ -295,19 +295,19 @@ public class ChunkingService
         // B55 (W3 Phase D): fold the Azure SDK's per-upload staging
         // residency into the producer-side charge. The SDK retains
         // `MaximumConcurrency × MaximumTransferSize` bytes per in-flight
-        // upload (see AzureBlobService.ComputeUploadTransferOptions);
-        // pre-B55 those bytes were entirely invisible to the budget and
-        // could push process working set well above MemoryLimitMB on a
-        // 16-way file × 6-way chunk pipeline. Since B53 the staging
-        // shape is chunk-size-gated, so the per-chunk staging estimate
-        // is exact rather than the worst-case 64 MB constant.
+        // upload (the provider maps the same UploadStagingPlanner.Plan onto its
+        // SDK transfer options); pre-B55 those bytes were entirely invisible to
+        // the budget and could push process working set well above MemoryLimitMB
+        // on a 16-way file × 6-way chunk pipeline. Since B53 the staging shape is
+        // chunk-size-gated, so the per-chunk staging estimate is exact rather
+        // than the worst-case 64 MB constant.
         //
         // The estimate is a conservative upper bound -- the SDK does
         // not necessarily hold the full N×M block at every instant --
         // but the budget needs an upper bound to do its job. Charging
         // the upper bound at acquire time is exactly the same pattern
         // B30/B38 already use for the chunk and encrypt buffers.
-        var stagingCharge = AzureBlobService.EstimateUploadStagingBytes(encryptedPayloadLen);
+        var stagingCharge = UploadStagingPlanner.EstimateStagingBytes(encryptedPayloadLen);
 
         var chargedBytes = payloadCharge + encryptCharge + stagingCharge;
         if (budget != null)

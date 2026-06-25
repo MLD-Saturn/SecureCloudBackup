@@ -747,12 +747,16 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         _databaseService = new LocalDatabaseService();
         _encryptionService = new EncryptionService();
         _chunkingService = new ChunkingService();
-        var blobService = new AzureBlobService(_encryptionService);
+        // Select the storage provider via the composition-root factory. Only
+        // Azure Blob is wired today; the factory is the single seam a future
+        // provider plugs into (Core stays provider-neutral).
+        var (blobService, authenticator) = ObjectStorageProviderFactory.Create(
+            StorageProvider.AzureBlob, _encryptionService);
         _blobService = blobService;
         _fileWatcherService = new FileWatcherService(_databaseService);
         _orchestrator = new BackupOrchestrator(
             _databaseService, _encryptionService, _chunkingService, 
-            _blobService, _fileWatcherService, new AzureInteractiveAuthenticator());
+            _blobService, _fileWatcherService, authenticator);
         _restoreService = new RestoreService(_databaseService, _blobService, _encryptionService);
 
 #if DIAGNOSTICLOG

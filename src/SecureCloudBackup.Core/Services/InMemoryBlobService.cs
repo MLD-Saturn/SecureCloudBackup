@@ -93,6 +93,11 @@ public class InMemoryBlobService : IObjectStorageService
     /// <summary>D6: see <see cref="IObjectStorageService.OnChunkUploaded"/>.</summary>
     public Action<string, byte[]>? OnChunkUploaded { get; set; }
 
+    // Required by IObjectStorageService; the in-memory fake emits no diagnostics.
+#pragma warning disable CS0067 // The event is never used
+    public event EventHandler<string>? DiagnosticLog;
+#pragma warning restore CS0067
+
     public InMemoryBlobService(
         EncryptionService encryptionService,
         int simulatedLatencyMs = 0,

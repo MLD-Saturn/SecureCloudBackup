@@ -353,5 +353,12 @@ public interface IObjectStorageService : IAsyncDisposable
     /// </remarks>
     Action<string, byte[]>? OnChunkUploaded { get; set; }
 
+    /// <summary>
+    /// Optional diagnostic/trace log event raised by the provider. The
+    /// composition root subscribes to surface provider diagnostics in the
+    /// app's log pane; providers that emit no diagnostics simply never raise it.
+    /// </summary>
+    event EventHandler<string>? DiagnosticLog;
+
     #endregion
 }

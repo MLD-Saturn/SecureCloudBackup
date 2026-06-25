@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);DIAGNOSTICLOG</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The Azure-specific provider tests live in SecureCloudBackup.Tests and
+         exercise internal members (CreateClientOptions, ComputeUploadTransferOptions,
+         IsTransientStatus, ToTokenCredential, IsAssembledLengthComplete, ...). -->
+    <InternalsVisibleTo Include="SecureCloudBackup.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Azure SDK lives here now, not in Core, so Core (and everything that
+         only needs the provider-neutral IObjectStorageService) no longer drags in
+         the Azure packages. -->
+    <PackageReference Include="Azure.Identity" Version="1.21.0" />
+    <PackageReference Include="Azure.Storage.Blobs" Version="12.21.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SecureCloudBackup.Core\SecureCloudBackup.Core.csproj" />
+  </ItemGroup>
+
+</Project>

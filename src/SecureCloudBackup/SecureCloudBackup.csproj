@@ -51,5 +51,6 @@
   <ItemGroup>
     <ProjectReference Include="..\SecureCloudBackup.Core\SecureCloudBackup.Core.csproj" />
     <ProjectReference Include="..\SecureCloudBackup.Crypto\SecureCloudBackup.Crypto.csproj" />
+    <ProjectReference Include="..\SecureCloudBackup.Storage.Azure\SecureCloudBackup.Storage.Azure.csproj" />
   </ItemGroup>
 </Project>

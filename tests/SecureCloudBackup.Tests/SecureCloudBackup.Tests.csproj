@@ -34,6 +34,7 @@
       invokes a benchmark or pulls the BDN runtime past load time.
     -->
     <ProjectReference Include="..\..\benchmarks\SecureCloudBackup.Benchmarks\SecureCloudBackup.Benchmarks.csproj" />
+    <ProjectReference Include="..\..\src\SecureCloudBackup.Storage.Azure\SecureCloudBackup.Storage.Azure.csproj" />
   </ItemGroup>
 
 </Project>
