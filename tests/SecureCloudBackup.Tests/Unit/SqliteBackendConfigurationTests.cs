@@ -59,6 +59,7 @@ public class SqliteBackendConfigurationTests : IDisposable
         Assert.Equal(defaults.IsEntraIdAuthenticated, config.IsEntraIdAuthenticated);
         Assert.Equal(defaults.EntraIdUserName, config.EntraIdUserName);
         Assert.Equal(defaults.ConfigVersion, config.ConfigVersion);
+        Assert.Equal(defaults.Provider, config.Provider);
         Assert.Equal(defaults.MemoryLimitEnabled, config.MemoryLimitEnabled);
         // B29: MemoryLimitMB on a fresh DB is the hardware-aware
         // recommended default (NULL column -> SystemMemoryHelper
@@ -72,6 +73,25 @@ public class SqliteBackendConfigurationTests : IDisposable
         Assert.Equal(SystemMemoryHelper.GetRecommendedDefaultLimitMB(), config.MemoryLimitMB);
         Assert.Empty(config.WatchedFolders);
         Assert.Empty(config.GlobalExcludePatterns);
+    }
+
+    [Fact]
+    public void Migration_PreV4Database_BackfillsProviderColumnAsAzureBlobAndBumpsVersion()
+    {
+        // Simulate a pre-v4 catalog in the live snapshot: drop the provider
+        // column and reset config_version, then persist + reopen so the
+        // idempotent v4 migration in CreateSchema runs on load (CreateSchema
+        // runs on every Initialize, including reopening an existing snapshot).
+        _backend.ExecuteNonQueryForTests("ALTER TABLE config DROP COLUMN provider;");
+        _backend.ExecuteNonQueryForTests("UPDATE config SET config_version = 3;");
+        _backend.Checkpoint();
+
+        using var reopened = new InMemorySnapshotBackend();
+        reopened.Initialize(_dbPath, "CfgTestPwd!".AsSpan());
+
+        var config = reopened.GetConfiguration();
+        Assert.Equal(StorageProvider.AzureBlob, config.Provider);
+        Assert.Equal(4, config.ConfigVersion);
     }
 
     [Fact]
@@ -96,6 +116,7 @@ public class SqliteBackendConfigurationTests : IDisposable
             ConfigVersion = 4,
             MemoryLimitEnabled = true,
             MemoryLimitMB = 8192,
+            Provider = StorageProvider.AzureBlob,
         };
 
         // Act
@@ -118,6 +139,7 @@ public class SqliteBackendConfigurationTests : IDisposable
         Assert.Equal(saved.ConfigVersion, loaded.ConfigVersion);
         Assert.Equal(saved.MemoryLimitEnabled, loaded.MemoryLimitEnabled);
         Assert.Equal(saved.MemoryLimitMB, loaded.MemoryLimitMB);
+        Assert.Equal(saved.Provider, loaded.Provider);
     }
 
     [Fact]

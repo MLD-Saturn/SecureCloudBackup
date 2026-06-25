@@ -180,6 +180,35 @@ public class ChunkIndexServiceTests : IAsyncLifetime
     #region Statistics Tests
 
     [Fact]
+    public void GetIndexSummary_FallsBackToLegacyLastAzureSyncAtKey()
+    {
+        // Existing catalogs persisted the last-sync time under the pre-rename key
+        // "LastAzureSyncAt". GetIndexSummary must surface it via the back-compat
+        // fallback until a new sync rewrites it under "LastRemoteSyncAt".
+        var legacy = new DateTime(2026, 4, 17, 8, 30, 0, DateTimeKind.Utc);
+        _databaseService.SetIndexMetadata("LastAzureSyncAt", legacy);
+
+        var summary = _indexService.GetIndexSummary();
+
+        Assert.Equal(legacy, summary.LastRemoteSyncAt);
+    }
+
+    [Fact]
+    public void GetIndexSummary_PrefersNewLastRemoteSyncAtKeyOverLegacy()
+    {
+        // When both keys exist, the new key wins (the legacy fallback only fires
+        // when the new key is absent).
+        var legacy = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var current = new DateTime(2026, 4, 17, 8, 30, 0, DateTimeKind.Utc);
+        _databaseService.SetIndexMetadata("LastAzureSyncAt", legacy);
+        _databaseService.SetIndexMetadata("LastRemoteSyncAt", current);
+
+        var summary = _indexService.GetIndexSummary();
+
+        Assert.Equal(current, summary.LastRemoteSyncAt);
+    }
+
+    [Fact]
     public void GetIndexSummary_ReturnsCorrectStatistics()
     {
         // Arrange - Add some chunks with different states

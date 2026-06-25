@@ -38,7 +38,8 @@ internal partial class SqliteBackend
                            last_backup_time, total_bytes_uploaded,
                            failed_login_attempts, lockout_until_ticks,
                            is_entra_id_authenticated, entra_id_user_name,
-                           config_version, memory_limit_enabled, memory_limit_mb
+                           config_version, memory_limit_enabled, memory_limit_mb,
+                           provider
                     FROM config WHERE id = 1;
                     """;
                 using var reader = cmd.ExecuteReader();
@@ -74,6 +75,7 @@ internal partial class SqliteBackend
                     config.MemoryLimitMB = reader.IsDBNull(14)
                         ? SystemMemoryHelper.GetRecommendedDefaultLimitMB()
                         : reader.GetInt32(14);
+                    config.Provider = (StorageProvider)reader.GetInt32(15);
                 }
             }
 
@@ -154,6 +156,7 @@ internal partial class SqliteBackend
             cmd.CommandText = """
                 UPDATE config SET
                     auth_method = $auth_method,
+                    provider = $provider,
                     storage_account_name = $storage_account_name,
                     encrypted_connection_string = $encrypted_connection_string,
                     container_name = $container_name,
@@ -171,6 +174,7 @@ internal partial class SqliteBackend
                 WHERE id = 1;
                 """;
             cmd.Parameters.AddWithValue("$auth_method", (int)configuration.AuthMethod);
+            cmd.Parameters.AddWithValue("$provider", (int)configuration.Provider);
             cmd.Parameters.AddWithValue("$storage_account_name",
                 (object?)configuration.StorageAccountName ?? DBNull.Value);
             cmd.Parameters.AddWithValue("$encrypted_connection_string",

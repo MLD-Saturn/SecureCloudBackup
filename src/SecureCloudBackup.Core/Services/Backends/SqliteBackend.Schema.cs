@@ -139,6 +139,7 @@ internal partial class SqliteBackend
             CREATE TABLE IF NOT EXISTS config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 auth_method INTEGER NOT NULL DEFAULT 1,            -- StorageAuthMethod, 1 = ConnectionString
+                provider INTEGER NOT NULL DEFAULT 0,               -- StorageProvider, 0 = AzureBlob (v4)
                 storage_account_name TEXT NULL,
                 encrypted_connection_string BLOB NULL,
                 container_name TEXT NULL DEFAULT 'backup',
@@ -150,7 +151,7 @@ internal partial class SqliteBackend
                 lockout_until_ticks INTEGER NULL,
                 is_entra_id_authenticated INTEGER NOT NULL DEFAULT 0,
                 entra_id_user_name TEXT NULL,
-                config_version INTEGER NOT NULL DEFAULT 3,
+                config_version INTEGER NOT NULL DEFAULT 4,
                 memory_limit_enabled INTEGER NOT NULL DEFAULT 1,
                 -- B29: NULL = "user has not yet expressed a preference,
                 -- compute a hardware-aware default at read time via
@@ -344,6 +345,31 @@ internal partial class SqliteBackend
                 using var alterCmd = _connection.CreateCommand();
                 alterCmd.CommandText = "ALTER TABLE integrity_check_runs ADD COLUMN files_auto_repaired INTEGER NOT NULL DEFAULT 0;";
                 alterCmd.ExecuteNonQuery();
+            }
+        }
+
+        // W-provider-abstraction v3->v4 migration: idempotently add the
+        // `provider` discriminator column to config for databases created
+        // before v4. Default 0 = StorageProvider.AzureBlob -- the only provider
+        // that existed when the column was introduced -- so every pre-v4
+        // catalog correctly reads back as AzureBlob. The companion
+        // config_version bump marks the row as v4. Both are no-ops on a fresh
+        // CREATE (the column + DEFAULT 4 are already declared above).
+        using (var probeCmd = _connection.CreateCommand())
+        {
+            probeCmd.CommandText = "SELECT 1 FROM pragma_table_info('config') WHERE name='provider';";
+            var present = probeCmd.ExecuteScalar();
+            if (present == null)
+            {
+                EmitDiag("CreateSchema: v4 migration -- adding provider column to config");
+                using (var alterCmd = _connection.CreateCommand())
+                {
+                    alterCmd.CommandText = "ALTER TABLE config ADD COLUMN provider INTEGER NOT NULL DEFAULT 0;";
+                    alterCmd.ExecuteNonQuery();
+                }
+                using var bumpCmd = _connection.CreateCommand();
+                bumpCmd.CommandText = "UPDATE config SET config_version = 4 WHERE config_version < 4;";
+                bumpCmd.ExecuteNonQuery();
             }
         }
 

@@ -85,7 +85,7 @@ public partial class StorageHealthViewModel : ViewModelBase
     private string _lastRebuildTime = "Never";
 
     [ObservableProperty]
-    private string _lastAzureSyncTime = "Never";
+    private string _lastRemoteSyncTime = "Never";
 
     // Tier Breakdown
     [ObservableProperty]
@@ -163,7 +163,7 @@ public partial class StorageHealthViewModel : ViewModelBase
             DeduplicationSavings = FormatHelper.FormatBytes(summary.DeduplicationSavingsBytes);
 
             LastRebuildTime = summary.LastFullRebuildAt?.ToString("g") ?? "Never";
-            LastAzureSyncTime = summary.LastAzureSyncAt?.ToString("g") ?? "Never";
+            LastRemoteSyncTime = summary.LastRemoteSyncAt?.ToString("g") ?? "Never";
 
             // Tier breakdown
             if (summary.TierBreakdown.TryGetValue(StorageTier.Hot, out var hot))

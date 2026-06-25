@@ -148,7 +148,7 @@ public class ChunkIndexSummary
     /// <summary>
     /// When the index was last synced to Azure backup.
     /// </summary>
-    public DateTime? LastAzureSyncAt { get; set; }
+    public DateTime? LastRemoteSyncAt { get; set; }
 }
 
 /// <summary>

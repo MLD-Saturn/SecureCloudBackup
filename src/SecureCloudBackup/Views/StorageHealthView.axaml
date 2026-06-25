@@ -87,7 +87,7 @@
                             </StackPanel>
                             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="4">
                                 <TextBlock Text="Last Azure Sync:" Opacity="0.6"/>
-                                <TextBlock Text="{Binding LastAzureSyncTime}"/>
+                                <TextBlock Text="{Binding LastRemoteSyncTime}"/>
                             </StackPanel>
                         </Grid>
                     </StackPanel>

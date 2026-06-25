@@ -559,7 +559,12 @@ public partial class ChunkIndexService
         }
 
         summary.LastFullRebuildAt = _databaseService.GetIndexMetadata("LastFullRebuildAt");
-        summary.LastAzureSyncAt = _databaseService.GetIndexMetadata("LastAzureSyncAt");
+        // Back-compat: the key was "LastAzureSyncAt" before the provider-neutral
+        // rename (W-provider-abstraction Phase 7). Read the new key first, then
+        // fall back to the legacy key so existing catalogs keep showing their
+        // last-sync time until the next sync rewrites it under the new key.
+        summary.LastRemoteSyncAt = _databaseService.GetIndexMetadata("LastRemoteSyncAt")
+            ?? _databaseService.GetIndexMetadata("LastAzureSyncAt");
 
         return summary;
     }

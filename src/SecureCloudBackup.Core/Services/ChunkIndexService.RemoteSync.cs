@@ -46,7 +46,7 @@ public partial class ChunkIndexService
         }
         catch { /* Ignore if legacy blob doesn't exist */ }
 
-        _databaseService.SetIndexMetadata("LastAzureSyncAt", DateTime.UtcNow);
+        _databaseService.SetIndexMetadata("LastRemoteSyncAt", DateTime.UtcNow);
         Log($"Index backup complete: {backup.Entries.Count} entries, " +
             $"{backup.ReverseIndex.Count} reverse-index rows, " +
             $"{FormatHelper.FormatBytes(data.Length)} stored (encrypted)");

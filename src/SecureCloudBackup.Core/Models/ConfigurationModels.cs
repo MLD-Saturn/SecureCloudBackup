@@ -152,7 +152,7 @@ public class BackupConfiguration
     /// <summary>
     /// Configuration format version for migration support.
     /// </summary>
-    public int ConfigVersion { get; set; } = 3; // Bumped for hybrid auth
+    public int ConfigVersion { get; set; } = 4; // v4: provider discriminator (W-provider-abstraction)
 
     /// <summary>
     /// Whether the user has enabled a manual memory limit for backup/restore operations.
