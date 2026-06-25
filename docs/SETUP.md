@@ -66,42 +66,42 @@ Prerequisites: .NET 10 SDK. The repo includes a `global.json` pinning the SDK ve
 From the repo root:
 
 ```
-dotnet restore azurebackup.sln
-dotnet build azurebackup.sln -c Debug
+dotnet restore SecureCloudBackup.sln
+dotnet build SecureCloudBackup.sln -c Debug
 ```
 
-NuGet restore handles the native SQLite binaries automatically through the `SQLitePCLRaw.bundle_e_sqlite3` package (the CVE-2025-6965-fixed engine). The one-time legacy-migration helper (`azurebackup-migrate`) is the only component that still ships `SQLitePCLRaw.bundle_e_sqlcipher`, used solely to read a pre-existing SQLCipher catalog during migration.
+NuGet restore handles the native SQLite binaries automatically through the `SQLitePCLRaw.bundle_e_sqlite3` package (the CVE-2025-6965-fixed engine). The one-time legacy-migration helper (`securecloudbackup-migrate`) is the only component that still ships `SQLitePCLRaw.bundle_e_sqlcipher`, used solely to read a pre-existing SQLCipher catalog during migration.
 
 To run the desktop app from source:
 
 ```
-dotnet run --project src/AzureBackup -c Debug
+dotnet run --project src/SecureCloudBackup -c Debug
 ```
 
 To run the test suite:
 
 ```
-dotnet test tests/AzureBackup.Tests/AzureBackup.Tests.csproj -c Debug
+dotnet test tests/SecureCloudBackup.Tests/SecureCloudBackup.Tests.csproj -c Debug
 ```
 
-For the BenchmarkDotNet performance suite, see `benchmarks/AzureBackup.Benchmarks/`. Benchmarks are Release-only and not part of CI.
+For the BenchmarkDotNet performance suite, see `benchmarks/SecureCloudBackup.Benchmarks/`. Benchmarks are Release-only and not part of CI.
 
 ---
 
 ## Publishing a portable single-file build
 
-The `src/AzureBackup` project is pre-configured for single-file self-contained publish (see `<PublishSingleFile>`, `<SelfContained>`, `<EnableCompressionInSingleFile>`, `<PublishReadyToRun>` in `src/AzureBackup/AzureBackup.csproj`).
+The `src/SecureCloudBackup` project is pre-configured for single-file self-contained publish (see `<PublishSingleFile>`, `<SelfContained>`, `<EnableCompressionInSingleFile>`, `<PublishReadyToRun>` in `src/SecureCloudBackup/SecureCloudBackup.csproj`).
 
 Pick the runtime identifier for your target OS:
 
 ```
-dotnet publish src/AzureBackup -c Release -r win-x64
-dotnet publish src/AzureBackup -c Release -r linux-x64
-dotnet publish src/AzureBackup -c Release -r osx-x64
-dotnet publish src/AzureBackup -c Release -r osx-arm64
+dotnet publish src/SecureCloudBackup -c Release -r win-x64
+dotnet publish src/SecureCloudBackup -c Release -r linux-x64
+dotnet publish src/SecureCloudBackup -c Release -r osx-x64
+dotnet publish src/SecureCloudBackup -c Release -r osx-arm64
 ```
 
-The output ends up under `src/AzureBackup/bin/Release/net10.0/<rid>/publish/`.
+The output ends up under `src/SecureCloudBackup/bin/Release/net10.0/<rid>/publish/`.
 
 ### Portable mode
 
@@ -167,7 +167,7 @@ Files are split into variable-sized chunks using a Rabin-style rolling hash (win
 | Photos (`.jpg` and similar) | 256 KB — 4 MB |
 | Video (`.mkv` and similar) | 1 MB — 64 MB |
 
-Files larger than **500 MB** ignore the per-extension config and use 16 MB — 128 MB chunks regardless of type, for upload throughput. See `src/AzureBackup.Core/Services/ChunkingService.cs` for the authoritative table.
+Files larger than **500 MB** ignore the per-extension config and use 16 MB — 128 MB chunks regardless of type, for upload throughput. See `src/SecureCloudBackup.Core/Services/ChunkingService.cs` for the authoritative table.
 
 Each chunk is hashed; only chunks whose content has changed are uploaded. Chunks shared between files are stored once.
 
@@ -213,7 +213,7 @@ For a guided UX walkthrough see `docs/USER_GUIDE.md`.
 
 | File | Installed mode | Portable mode |
 |---|---|---|
-| `backup.db` | `%LOCALAPPDATA%\AzureBackup\backup.db` | `<exe-dir>\backup.db` |
+| `backup.db` | `%LOCALAPPDATA%\SecureCloudBackup\backup.db` | `<exe-dir>\backup.db` |
 | Argon2id salt | embedded inside `backup.db` (the AES-256-GCM AZDB snapshot envelope); no separate `.salt` file | embedded inside `backup.db` |
 | Daily logs | `<DataDirectory>\logs\` | `<DataDirectory>\logs\` |
 | Per-file `.diag` files (when present) | `<DataDirectory>\diagnostics\<session-id>\` | same |
@@ -227,7 +227,7 @@ For a guided UX walkthrough see `docs/USER_GUIDE.md`.
 
 If something goes wrong, the **Logs** view has an **Export Bundle** button that zips up all logs, `.diag` files, and throughput metrics into a single archive suitable for sharing in a bug report. The bundle exporter excludes the encrypted database and salt files. The **Data Integrity Check** view also has an **Auto-export bundle on failure** option that writes the bundle automatically the first time an integrity-check failure is detected.
 
-The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runtime opt-in for service-level logging in builds that were compiled with the `DIAGNOSTICLOG` constant defined (Debug builds, by default — see `src/AzureBackup/AzureBackup.csproj` `DefineConstants`). Release builds omit the diagnostic log code entirely; the toggle has no effect there.
+The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runtime opt-in for service-level logging in builds that were compiled with the `DIAGNOSTICLOG` constant defined (Debug builds, by default — see `src/SecureCloudBackup/SecureCloudBackup.csproj` `DefineConstants`). Release builds omit the diagnostic log code entirely; the toggle has no effect there.
 
 ---
 
@@ -282,7 +282,7 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Encryption envelope overhead | 37 bytes per chunk (`EncryptionService.EncryptionOverhead` = 4-byte magic + 1-byte version + 12-byte nonce + 16-byte GCM tag + 4-byte CRC32) |
 | Catalog snapshot envelope overhead | 53 bytes per snapshot (`DbSnapshotEnvelope.Overhead` = 4-byte `AZDB` magic + 1-byte version + 16-byte salt + 12-byte nonce + 16-byte GCM tag + 4-byte CRC32) |
 | Local database (production) | In-memory SQLite persisted as a single application-level **AES-256-GCM encrypted snapshot** (the `AZDB` envelope; `InMemorySnapshotBackend` on `SQLitePCLRaw.bundle_e_sqlite3` 3.x, `Microsoft.Data.Sqlite` 10.x). The snapshot is decrypted into memory at unlock and re-encrypted on each checkpoint, so plaintext never touches disk. `bundle_e_sqlite3` ships SQLite 3.50.4, which **fixes** CVE-2025-6965. |
-| Legacy migration helper | `azurebackup-migrate` (project `src/AzureBackup.Migration`, output `azurebackup-migrate[.exe]`) is the only component that ships `SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, used solely to read a pre-existing SQLCipher catalog during the one-time, automatic-at-unlock migration to the snapshot format. It runs as a SEPARATE single-engine process because the SQLCipher and `e_sqlite3` native engines cannot coexist in one process. That bundle still carries the CVE-2025-6965 SQLite (no patched release exists; 2.1.11 is the latest), so the advisory's NuGet audit warning is suppressed once, scoped to GHSA-2m69-gcr7-jv3q only, in the repo-root `Directory.Build.props`; the flaw needs attacker-controlled SQL and the helper only runs its own parameterized statements against a local, app-owned database. |
+| Legacy migration helper | `securecloudbackup-migrate` (project `src/SecureCloudBackup.Migration`, output `securecloudbackup-migrate[.exe]`) is the only component that ships `SQLitePCLRaw.bundle_e_sqlcipher` 2.1.x, used solely to read a pre-existing SQLCipher catalog during the one-time, automatic-at-unlock migration to the snapshot format. It runs as a SEPARATE single-engine process because the SQLCipher and `e_sqlite3` native engines cannot coexist in one process. That bundle still carries the CVE-2025-6965 SQLite (no patched release exists; 2.1.11 is the latest), so the advisory's NuGet audit warning is suppressed once, scoped to GHSA-2m69-gcr7-jv3q only, in the repo-root `Directory.Build.props`; the flaw needs attacker-controlled SQL and the helper only runs its own parameterized statements against a local, app-owned database. |
 | Chunking | Content-defined, Rabin-style rolling hash (window 48, prime 31), per-extension config |
 | Default file-level concurrency | 16 (`MaxParallelFileBackups`, raised from 8 in B27 based on `TwoTierFileSplitBigScaleBenchmark`). W6: this is now the CEILING for the large-file lane, which dispatches through an AIMD `BandwidthScheduler` that converges file-level concurrency on the upstream link (probing up from a low initial of 4). The budget-derived clamp (`ComputeEffectiveFileConcurrency`) caps that ceiling further on small memory budgets, so AIMD can only reduce concurrency below the memory-safe bound, never exceed it. |
 | Small-file backup lane concurrency (W6) | 32 (`MaxParallelSmallFileBackups`). Files at or below 16 MB (`RestoreService.SmallFileThresholdBytes`) back up on a fixed-concurrency lane independent of the budget-derived large-file fan-out, so a small `MemoryLimitMB` no longer serialises small files. The shared `MemoryBudget` remains the hard throttle on in-flight bytes. Mirrors the restore side's small-file lane. |
@@ -290,7 +290,7 @@ The **Logs** view has a **Diagnostic Logging** ON/OFF toggle. This controls runt
 | Default `MemoryLimitEnabled` | `true` (raised from `false` in B27) |
 | Default `MemoryLimitMB` | hardware-aware: `min(round_down_to_step(0.25 * total_physical_RAM), 8192 MB)` (B29; was a flat `8192` from B27, was `2048` pre-B27). Existing user databases keep whatever value they previously stored; the rule only applies on fresh installs. See `SystemMemoryHelper.GetRecommendedDefaultLimitMB`. |
 | Memory-budget enforcement | Producer-side charging (B30+B38): `ChunkingService.ChunkAndStreamChangedAsync` calls `MemoryBudget.AcquireAsync` BEFORE allocating each chunk's payload buffer, charging both the chunk-payload buffer AND the downstream encrypt-side rented buffer (B38) in a single atomic Acquire. The consumer NEVER acquires from the same budget -- doing so would create a producer-vs-consumer circular wait, since the producer charge can only release after the consumer finishes the upload, but the consumer's encrypt-Acquire would block on the producer charge that already filled the budget. Charging both stages on the producer side eliminates that cycle: the budget is a strict throttle on the producer alone; the consumer only Releases. Per chunk the producer charges roughly `2 x payloadSize` (payload tier + encrypt tier). The consumer mirrors the producer's allocation decision via `ChunkPayload.ChargedBytes`, `ChunkPayload.ReturnToPool`, and `ChunkPayload.LargeChunkPool`. Chunks at or above `ChunkingService.PoolSkipThresholdBytes` (16 MB) bypass `ArrayPool<byte>.Shared` and instead flow through a per-operation `LargeChunkBufferPool` (B37), a bounded LOH recycler with power-of-two-sized buckets (16/32/64/128/256 MB) and a 32-buffer-per-bucket cap. Cached buffers stay alive forever (no gen-2 retention pressure on the heap), but the per-bucket cap strictly bounds total residency: 32 x (16 + 32 + 64 + 128 + 256) MB = 15.5 GB worst-case across all buckets. Returns above the cap are dropped on the floor (the GC reclaims them); rents from an empty bucket allocate fresh at the bucket's full size so the next return matches a bucket. Pre-B37 the equivalent path was `new byte[]` per chunk, which only the GC could reclaim, and with one gen-2 collection per minute under load ~6 GB of dead-but-unreclaimed LOH accumulated between collections -- the dominant remaining residency leak after B30/B33/B34 landed. The deadlock-avoidance branch in `MemoryBudget.AcquireAsync` only fires for genuinely oversized requests (`bytes > totalBytes && _usedBytes == 0`); each such admission increments `MemoryBudget.OversizedAdmissions` (B34). Per-operation `BackupMemoryReporter` emits a structured memory line through `StatusChanged` every 30 seconds (B36); the line carries budget usage, stall delta, oversized-admission delta, GC heap, GC memory load, working set, private memory, the unaccounted-for delta (working set minus budget used), the LOH pool's cached residency, and the LOH pool's hit rate. |
-| Azure SDK | `Azure.Storage.Blobs` (see `src/AzureBackup.Core/AzureBackup.Core.csproj` for current pinned version) |
+| Azure SDK | `Azure.Storage.Blobs` (see `src/SecureCloudBackup.Core/SecureCloudBackup.Core.csproj` for current pinned version) |
 | Azure SDK client configuration (W6 Phase 4) | Every `BlobServiceClient` is constructed with explicit `BlobClientOptions` from `AzureBlobService.CreateClientOptions()`: exponential-backoff retry (5 retries, 0.8 s base delay, 30 s max delay), a 100 s per-try network timeout, and a process-wide shared `SocketsHttpHandler` transport (`PooledConnectionLifetime` 5 minutes so long-running transfers pick up Azure Storage load-balancer / DNS changes; `MaxConnectionsPerServer` left uncapped so a multi-Gbps transfer is not serialised by a per-host connection cap). Pre-W6 the clients used the SDK defaults with no options. |
 
 If you need exact version numbers, check the `.csproj` files; this table is updated when those references change but the `.csproj` files are the source of truth.

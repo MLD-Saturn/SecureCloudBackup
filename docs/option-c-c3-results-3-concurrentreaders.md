@@ -7,7 +7,7 @@
 **Runtime:** .NET 10.0.6 (X64 RyuJIT, x86-64-v3)
 **Tool:** BenchmarkDotNet 0.15.8
 
-## Result table (from `BenchmarkDotNet.Artifacts/results/AzureBackup.Benchmarks.ConcurrentReadersBackendBenchmark-report-github.md`)
+## Result table (from `BenchmarkDotNet.Artifacts/results/SecureCloudBackup.Benchmarks.ConcurrentReadersBackendBenchmark-report-github.md`)
 
 | Readers | LiteDB | SQLiteSingleConn | SQLitePooled | **Pooled / LiteDB ratio** | **SingleConn / LiteDB ratio** |
 |--------:|-------:|-----------------:|-------------:|--------------------------:|------------------------------:|

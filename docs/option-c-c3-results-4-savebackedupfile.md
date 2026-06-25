@@ -7,7 +7,7 @@
 **Runtime:** .NET 10.0.6 (X64 RyuJIT, x86-64-v3)
 **Tool:** BenchmarkDotNet 0.15.8
 
-## Result table (from `BenchmarkDotNet.Artifacts/results/AzureBackup.Benchmarks.SaveBackedUpFileBackendBenchmark-report-github.md`)
+## Result table (from `BenchmarkDotNet.Artifacts/results/SecureCloudBackup.Benchmarks.SaveBackedUpFileBackendBenchmark-report-github.md`)
 
 | ChunkCount | Method     | LiteDB    | SQLite    | **Time ratio** | LiteDB allocs | SQLite allocs | **Alloc ratio** |
 |-----------:|------------|----------:|----------:|---------------:|--------------:|--------------:|----------------:|

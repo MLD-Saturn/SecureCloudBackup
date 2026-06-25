@@ -1,6 +1,6 @@
 # Memory Profiling Runbook
 
-A step-by-step guide for capturing detailed memory data from real AzureBackup
+A step-by-step guide for capturing detailed memory data from real SecureCloudBackup
 backup and restore workloads, so the results can be reviewed to find and
 explain memory-budget overshoots.
 
@@ -54,14 +54,14 @@ dotnet tool update -g dotnet-counters; dotnet tool update -g dotnet-gcdump; dotn
 
 | Mode | Data directory (logs / metrics / db) |
 | --- | --- |
-| Installed (default) | `%LocalAppData%\AzureBackup\` |
+| Installed (default) | `%LocalAppData%\SecureCloudBackup\` |
 | Portable (a `portable.marker` file sits next to the .exe) | the executable's own folder |
 
 For the rest of this runbook the data directory is referred to as `$DATA`.
 Set it for your session (installed mode shown):
 
 ```pwsh
-$DATA = Join-Path $env:LOCALAPPDATA 'AzureBackup'
+$DATA = Join-Path $env:LOCALAPPDATA 'SecureCloudBackup'
 ```
 
 Key files inside `$DATA`:
@@ -93,18 +93,18 @@ multi-minute workload.
 Each scenario below follows the same three-window pattern. Open **three**
 PowerShell windows.
 
-**Window A — launch the app under test.** Start AzureBackup (Debug build) and
-note its process name is `AzureBackup`.
+**Window A — launch the app under test.** Start SecureCloudBackup (Debug build) and
+note its process name is `SecureCloudBackup`.
 
 ```pwsh
 cd C:\Users\midesjar.REDMOND\source\repos\azurebackup
-dotnet run -c Debug --project src\AzureBackup
+dotnet run -c Debug --project src\SecureCloudBackup
 ```
 
 **Window B — live counters to CSV.** Start this the moment the workload begins.
 
 ```pwsh
-dotnet-counters collect -n AzureBackup --refresh-interval 1 --format csv -o "$RUN\counters-SCENARIO.csv" --counters System.Runtime
+dotnet-counters collect -n SecureCloudBackup --refresh-interval 1 --format csv -o "$RUN\counters-SCENARIO.csv" --counters System.Runtime
 ```
 
 Counters of interest in the CSV: `working-set`, `gc-heap-size`,
@@ -115,14 +115,14 @@ Counters of interest in the CSV: `working-set`, `gc-heap-size`,
 moment working set is at its **peak** for the workload, grab a gcdump:
 
 ```pwsh
-dotnet-gcdump collect -n AzureBackup -o "$RUN\peak-SCENARIO.gcdump"
+dotnet-gcdump collect -n SecureCloudBackup -o "$RUN\peak-SCENARIO.gcdump"
 ```
 
 Take a second one **after** the operation settles (so the diff shows what was
 released vs retained):
 
 ```pwsh
-dotnet-gcdump collect -n AzureBackup -o "$RUN\settled-SCENARIO.gcdump"
+dotnet-gcdump collect -n SecureCloudBackup -o "$RUN\settled-SCENARIO.gcdump"
 ```
 
 **After the workload completes**, copy the telemetry for that scenario:
@@ -241,7 +241,7 @@ In Visual Studio, open the **peak** dump and use "Compare to…" against the
 If the heap is the suspect and you want allocation call stacks:
 
 ```pwsh
-dotnet-trace collect -n AzureBackup --providers Microsoft-DotNETCore-SampleProfiler,Microsoft-Windows-DotNETRuntime:0x1:5 -o "$RUN\gc-trace.nettrace"
+dotnet-trace collect -n SecureCloudBackup --providers Microsoft-DotNETCore-SampleProfiler,Microsoft-Windows-DotNETRuntime:0x1:5 -o "$RUN\gc-trace.nettrace"
 ```
 
 Open the `.nettrace` in Visual Studio or PerfView ("GC Heap Alloc Stacks").
@@ -253,7 +253,7 @@ dump at the limit:
 
 ```pwsh
 $env:DOTNET_GCHeapHardLimit = "0x180000000"  # 6 GB, hex bytes
-dotnet run -c Debug --project src\AzureBackup
+dotnet run -c Debug --project src\SecureCloudBackup
 ```
 
 (Unset afterwards: `Remove-Item Env:\DOTNET_GCHeapHardLimit`.)
@@ -283,17 +283,17 @@ on the backup and restore sides respectively.
 # one-time
 dotnet build -c Debug
 dotnet tool install -g dotnet-counters; dotnet tool install -g dotnet-gcdump; dotnet tool install -g dotnet-trace
-$DATA = Join-Path $env:LOCALAPPDATA 'AzureBackup'
+$DATA = Join-Path $env:LOCALAPPDATA 'SecureCloudBackup'
 $RUN  = "C:\memprofile\$(Get-Date -Format yyyyMMdd-HHmmss)"; New-Item -ItemType Directory -Force -Path $RUN | Out-Null
 
 # per scenario (three windows)
 # A:
-dotnet run -c Debug --project src\AzureBackup
+dotnet run -c Debug --project src\SecureCloudBackup
 # B (start with the workload):
-dotnet-counters collect -n AzureBackup --refresh-interval 1 --format csv -o "$RUN\counters-s1.csv" --counters System.Runtime
+dotnet-counters collect -n SecureCloudBackup --refresh-interval 1 --format csv -o "$RUN\counters-s1.csv" --counters System.Runtime
 # C (at peak, then at settle):
-dotnet-gcdump collect -n AzureBackup -o "$RUN\peak-s1.gcdump"
-dotnet-gcdump collect -n AzureBackup -o "$RUN\settled-s1.gcdump"
+dotnet-gcdump collect -n SecureCloudBackup -o "$RUN\peak-s1.gcdump"
+dotnet-gcdump collect -n SecureCloudBackup -o "$RUN\settled-s1.gcdump"
 # after:
 Copy-Item "$DATA\azurebackup-*.log" "$RUN\log-s1.log"; Copy-Item "$DATA\metrics\throughput-*.jsonl" "$RUN\metrics-s1.jsonl" -ErrorAction SilentlyContinue
 

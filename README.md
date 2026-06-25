@@ -1,4 +1,4 @@
-﻿# Azure Backup Tool
+# Azure Backup Tool
 
 A zero-knowledge encrypted backup tool that syncs your files to Microsoft Azure Blob Storage with client-side encryption. Built with [Avalonia UI](https://avaloniaui.net/) and .NET 10.
 
@@ -33,7 +33,7 @@ dotnet build
 # Or use the build scripts
 ./build-portable.cmd          # Windows portable (single exe + marker file)
 ./build-portable.sh           # All platforms portable (win-x64, linux-x64, osx-x64, osx-arm64)
-./build-installed.cmd         # Windows installed (data in %LocalAppData%\AzureBackup)
+./build-installed.cmd         # Windows installed (data in %LocalAppData%\SecureCloudBackup)
 ./build-installed.sh          # All platforms installed
 ```
 
@@ -65,14 +65,14 @@ For detailed instructions see the **[User Guide](docs/USER_GUIDE.md)**.
 ### Build and Run
 
 ```bash
-git clone https://github.com/MLD-Saturn/azurebackup.git
+git clone https://github.com/MLD-Saturn/SecureCloudBackup.git
 cd azurebackup
 
 # Build the solution
 dotnet build
 
 # Run the application in development
-dotnet run --project src/AzureBackup
+dotnet run --project src/SecureCloudBackup
 
 # Run the test suite
 dotnet test
@@ -82,13 +82,13 @@ dotnet test
 
 ```bash
 # Portable single-file executable (Windows x64)
-dotnet publish src/AzureBackup -c Release -r win-x64 --self-contained true -o publish/portable
+dotnet publish src/SecureCloudBackup -c Release -r win-x64 --self-contained true -o publish/portable
 
 # macOS Apple Silicon
-dotnet publish src/AzureBackup -c Release -r osx-arm64 --self-contained true -o publish/portable
+dotnet publish src/SecureCloudBackup -c Release -r osx-arm64 --self-contained true -o publish/portable
 
 # Linux x64
-dotnet publish src/AzureBackup -c Release -r linux-x64 --self-contained true -o publish/portable
+dotnet publish src/SecureCloudBackup -c Release -r linux-x64 --self-contained true -o publish/portable
 ```
 
 To run in **portable mode**, place a `portable.marker` file next to the executable. The database and configuration will be stored in the same directory (ideal for USB drives). Without the marker, data is stored in the platform's local app data folder.
@@ -97,10 +97,10 @@ To run in **portable mode**, place a `portable.marker` file next to the executab
 
 ```
 src/
-  AzureBackup/            Avalonia UI application (MVVM, CommunityToolkit.Mvvm)
-  AzureBackup.Core/       Core library -- encryption, chunking, blob storage, database, restore
+  SecureCloudBackup/            Avalonia UI application (MVVM, CommunityToolkit.Mvvm)
+  SecureCloudBackup.Core/       Core library -- encryption, chunking, blob storage, database, restore
 tests/
-  AzureBackup.Tests/      Unit and integration tests (xUnit)
+  SecureCloudBackup.Tests/      Unit and integration tests (xUnit)
 docs/
   SETUP.md                Azure resource setup instructions
   USER_GUIDE.md           End-user guide
@@ -220,20 +220,20 @@ Releases between C-2 (`9fda662`) and C-5 retained the `.litedb-backup` file inde
 
 ## Benchmarks
 
-Local-developer micro-benchmarks live in `benchmarks/AzureBackup.Benchmarks/` and use
+Local-developer micro-benchmarks live in `benchmarks/SecureCloudBackup.Benchmarks/` and use
 [BenchmarkDotNet](https://github.com/dotnet/BenchmarkDotNet). They are **not** part of
 the CI pipeline -- CI runners have unreliable performance characteristics for
 micro-benchmarking. Run locally to validate performance changes:
 
 ```powershell
 # Run every benchmark in the project (Release config is enforced by BDN):
-dotnet run -c Release --project benchmarks/AzureBackup.Benchmarks
+dotnet run -c Release --project benchmarks/SecureCloudBackup.Benchmarks
 
 # Run a single benchmark class:
-dotnet run -c Release --project benchmarks/AzureBackup.Benchmarks -- --filter *CdcRollingHash*
+dotnet run -c Release --project benchmarks/SecureCloudBackup.Benchmarks -- --filter *CdcRollingHash*
 
 # Quick smoke-test run (fewer iterations, ~1 minute total):
-dotnet run -c Release --project benchmarks/AzureBackup.Benchmarks -- --job short --warmupCount 2 --iterationCount 5
+dotnet run -c Release --project benchmarks/SecureCloudBackup.Benchmarks -- --job short --warmupCount 2 --iterationCount 5
 ```
 
 Reports are written to `BenchmarkDotNet.Artifacts/results/` as CSV, Markdown, and HTML.

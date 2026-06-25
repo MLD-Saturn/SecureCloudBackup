@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Debug'">
+    <DefineConstants>$(DefineConstants);DIAGNOSTICLOG</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.2" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SecureCloudBackup.Core\SecureCloudBackup.Core.csproj" />
+    <ProjectReference Include="..\..\src\SecureCloudBackup.Crypto\SecureCloudBackup.Crypto.csproj" />
+    <ProjectReference Include="..\..\src\SecureCloudBackup.Migration\SecureCloudBackup.Migration.csproj" />
+    <!--
+      B75: reference the benchmarks project so the
+      BenchmarkSummaryWriter format helpers (gated by InternalsVisibleTo
+      on the benchmarks csproj) can be pinned by unit tests. The
+      reference is metadata-only. Nothing in the test assembly
+      invokes a benchmark or pulls the BDN runtime past load time.
+    -->
+    <ProjectReference Include="..\..\benchmarks\SecureCloudBackup.Benchmarks\SecureCloudBackup.Benchmarks.csproj" />
+  </ItemGroup>
+
+</Project>

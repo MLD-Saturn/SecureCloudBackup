@@ -11,9 +11,9 @@ echo Building PORTABLE executable for Windows x64...
 echo.
 
 REM Check if the exe is running
-tasklist /FI "IMAGENAME eq AzureBackup.exe" 2>NUL | find /I /N "AzureBackup.exe">NUL
+tasklist /FI "IMAGENAME eq SecureCloudBackup.exe" 2>NUL | find /I /N "SecureCloudBackup.exe">NUL
 if "%ERRORLEVEL%"=="0" (
-    echo ERROR: AzureBackup.exe is currently running.
+    echo ERROR: SecureCloudBackup.exe is currently running.
     echo Please close the application and try again.
     echo.
     pause
@@ -35,7 +35,7 @@ if exist "publish\portable" (
 )
 
 REM Build and publish
-dotnet publish src\AzureBackup -c Release -r win-x64 --self-contained true -o publish\portable
+dotnet publish src\SecureCloudBackup -c Release -r win-x64 --self-contained true -o publish\portable
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
@@ -47,7 +47,7 @@ if %ERRORLEVEL% NEQ 0 (
 REM Create portable marker file
 echo This file marks the application as running in portable mode. > "publish\portable\portable.marker"
 echo Data will be stored alongside the executable. >> "publish\portable\portable.marker"
-echo Delete this file to switch to installed mode (data in %%LocalAppData%%\AzureBackup). >> "publish\portable\portable.marker"
+echo Delete this file to switch to installed mode (data in %%LocalAppData%%\SecureCloudBackup). >> "publish\portable\portable.marker"
 
 echo.
 echo ============================================
@@ -57,7 +57,7 @@ echo.
 echo Output location: publish\portable\
 echo.
 echo Files to copy to USB:
-echo   - AzureBackup.exe (the main application)
+echo   - SecureCloudBackup.exe (the main application)
 echo   - portable.marker (keeps it in portable mode)
 echo.
 echo The database (backup.db) will be created in the 
@@ -67,7 +67,7 @@ echo Window title will show: "Azure Backup - Encrypted Cloud Backup (Portable)"
 echo.
 
 REM Show file size
-for %%A in (publish\portable\AzureBackup.exe) do (
+for %%A in (publish\portable\SecureCloudBackup.exe) do (
     set /a size=%%~zA / 1048576
     echo Executable size: approximately !size! MB
 )

@@ -16,16 +16,16 @@ rm -rf publish/portable
 
 # Build for each platform
 echo "Building for Windows x64..."
-dotnet publish src/AzureBackup -c Release -r win-x64 --self-contained true -o publish/portable/win-x64
+dotnet publish src/SecureCloudBackup -c Release -r win-x64 --self-contained true -o publish/portable/win-x64
 
 echo "Building for Linux x64..."
-dotnet publish src/AzureBackup -c Release -r linux-x64 --self-contained true -o publish/portable/linux-x64
+dotnet publish src/SecureCloudBackup -c Release -r linux-x64 --self-contained true -o publish/portable/linux-x64
 
 echo "Building for macOS x64..."
-dotnet publish src/AzureBackup -c Release -r osx-x64 --self-contained true -o publish/portable/osx-x64
+dotnet publish src/SecureCloudBackup -c Release -r osx-x64 --self-contained true -o publish/portable/osx-x64
 
 echo "Building for macOS ARM64 (Apple Silicon)..."
-dotnet publish src/AzureBackup -c Release -r osx-arm64 --self-contained true -o publish/portable/osx-arm64
+dotnet publish src/SecureCloudBackup -c Release -r osx-arm64 --self-contained true -o publish/portable/osx-arm64
 
 # Create portable marker files
 echo "Creating portable marker files..."
@@ -41,10 +41,10 @@ echo "PORTABLE Build successful!"
 echo "============================================"
 echo ""
 echo "Output locations:"
-echo "  - publish/portable/win-x64/AzureBackup.exe"
-echo "  - publish/portable/linux-x64/AzureBackup"
-echo "  - publish/portable/osx-x64/AzureBackup"
-echo "  - publish/portable/osx-arm64/AzureBackup"
+echo "  - publish/portable/win-x64/SecureCloudBackup.exe"
+echo "  - publish/portable/linux-x64/SecureCloudBackup"
+echo "  - publish/portable/osx-x64/SecureCloudBackup"
+echo "  - publish/portable/osx-arm64/SecureCloudBackup"
 echo ""
 echo "Each folder also contains portable.marker file."
 echo "Window title will show: 'Azure Backup - Encrypted Cloud Backup (Portable)'"
@@ -52,20 +52,20 @@ echo ""
 
 # Show file sizes
 echo "Executable sizes:"
-if [ -f "publish/portable/win-x64/AzureBackup.exe" ]; then
-    size=$(du -m "publish/portable/win-x64/AzureBackup.exe" 2>/dev/null | cut -f1)
+if [ -f "publish/portable/win-x64/SecureCloudBackup.exe" ]; then
+    size=$(du -m "publish/portable/win-x64/SecureCloudBackup.exe" 2>/dev/null | cut -f1)
     echo "  - Windows x64: approximately ${size} MB"
 fi
-if [ -f "publish/portable/linux-x64/AzureBackup" ]; then
-    size=$(du -m "publish/portable/linux-x64/AzureBackup" 2>/dev/null | cut -f1)
+if [ -f "publish/portable/linux-x64/SecureCloudBackup" ]; then
+    size=$(du -m "publish/portable/linux-x64/SecureCloudBackup" 2>/dev/null | cut -f1)
     echo "  - Linux x64: approximately ${size} MB"
 fi
-if [ -f "publish/portable/osx-x64/AzureBackup" ]; then
-    size=$(du -m "publish/portable/osx-x64/AzureBackup" 2>/dev/null | cut -f1)
+if [ -f "publish/portable/osx-x64/SecureCloudBackup" ]; then
+    size=$(du -m "publish/portable/osx-x64/SecureCloudBackup" 2>/dev/null | cut -f1)
     echo "  - macOS x64: approximately ${size} MB"
 fi
-if [ -f "publish/portable/osx-arm64/AzureBackup" ]; then
-    size=$(du -m "publish/portable/osx-arm64/AzureBackup" 2>/dev/null | cut -f1)
+if [ -f "publish/portable/osx-arm64/SecureCloudBackup" ]; then
+    size=$(du -m "publish/portable/osx-arm64/SecureCloudBackup" 2>/dev/null | cut -f1)
     echo "  - macOS ARM64: approximately ${size} MB"
 fi
 echo ""

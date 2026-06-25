@@ -1,0 +1,424 @@
+using System.Text.Json;
+using SecureCloudBackup.Core.Models;
+
+namespace SecureCloudBackup.Core.Services;
+
+/// <summary>
+/// Azure backup/restore, index rebuild, and tier mismatch detection.
+/// </summary>
+public partial class ChunkIndexService
+{
+    /// <summary>
+    /// Backs up the chunk index to Azure storage.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task BackupIndexToAzureAsync(CancellationToken cancellationToken = default)
+    {
+        Log("Backing up chunk index to Azure...");
+
+        // C-5: capture reverse-index rows alongside chunk_index entries.
+        // Pre-C-5 the LiteDB backend returned ChunkIndexEntry rows with
+        // ReferencingFiles populated, so the reverse index was implicitly
+        // part of the backup. Under SQLite GetAllChunkIndexEntries leaves
+        // ReferencingFiles empty by design, so a v1 backup-then-restore
+        // round-trip would silently lose every reference. v2 carries the
+        // reverse-index as a flat list and the restore path replays it
+        // via BulkInsertChunkFileRefs.
+        var backup = new ChunkIndexBackup
+        {
+            Version = 2,
+            CreatedAt = DateTime.UtcNow,
+            Entries = _databaseService.GetAllChunkIndexEntries(),
+            ReverseIndex = _databaseService.GetAllChunkFileRefs(),
+            Summary = GetIndexSummary()
+        };
+
+        var json = JsonSerializer.Serialize(backup, new JsonSerializerOptions { WriteIndented = false });
+        var plaintext = System.Text.Encoding.UTF8.GetBytes(json);
+        var data = _encryptionService.Encrypt(plaintext);
+
+        await _blobService.UploadBlobAsync(IndexBackupBlobName, data, StorageTier.Cool, cancellationToken);
+
+        // Delete legacy unencrypted backup if it exists
+        try
+        {
+            await _blobService.DeleteBlobAsync("index/chunk-index-backup.json", cancellationToken);
+        }
+        catch { /* Ignore if legacy blob doesn't exist */ }
+
+        _databaseService.SetIndexMetadata("LastAzureSyncAt", DateTime.UtcNow);
+        Log($"Index backup complete: {backup.Entries.Count} entries, " +
+            $"{backup.ReverseIndex.Count} reverse-index rows, " +
+            $"{FormatHelper.FormatBytes(data.Length)} stored (encrypted)");
+    }
+
+    /// <summary>
+    /// Restores the chunk index from Azure storage.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token</param>
+    /// <returns>True if restore was successful</returns>
+    public async Task<bool> RestoreIndexFromAzureAsync(CancellationToken cancellationToken = default)
+    {
+        Log("Restoring chunk index from Azure...");
+
+        try
+        {
+            var data = await _blobService.DownloadBlobAsync(IndexBackupBlobName, cancellationToken);
+
+            // Decrypt into a pooled buffer so the plaintext index backup (which can
+            // be tens of megabytes at 1M+ chunks) does not land on the large-object
+            // heap and pin GC memory for the rest of the process lifetime.
+            var plaintextMax = data.Length - EncryptionService.EncryptionOverhead;
+            if (plaintextMax <= 0)
+            {
+                Log("Failed to restore index: backup blob too short to decrypt");
+                return false;
+            }
+
+            var rentedPlaintext = System.Buffers.ArrayPool<byte>.Shared.Rent(plaintextMax);
+            ChunkIndexBackup? backup;
+            try
+            {
+                var plaintextLength = _encryptionService.DecryptInto(data, rentedPlaintext.AsSpan(0, plaintextMax));
+                var json = System.Text.Encoding.UTF8.GetString(rentedPlaintext.AsSpan(0, plaintextLength));
+                backup = JsonSerializer.Deserialize<ChunkIndexBackup>(json);
+            }
+            finally
+            {
+                System.Buffers.ArrayPool<byte>.Shared.Return(rentedPlaintext, clearArray: true);
+            }
+
+            if (backup == null)
+            {
+                Log("Failed to deserialize index backup");
+                return false;
+            }
+
+            // Clear existing index and restore from backup
+            _databaseService.ClearChunkIndex();
+            foreach (var entry in backup.Entries)
+            {
+                _databaseService.SaveChunkIndexEntry(entry);
+            }
+
+            // C-5: restore the reverse index too. Three cases:
+            //   v2 backup -> ReverseIndex carries the canonical rows;
+            //                bulk-insert them.
+            //   v1 backup -> ReverseIndex is empty; reconstruct rows
+            //                from the per-entry ReferencingFiles list,
+            //                which the LiteDB-era backup populated.
+            //   either with no usable refs -> leave chunk_file_refs
+            //                empty; the next backup-or-rebuild pass
+            //                will repopulate it.
+            // ClearChunkIndex above already wiped chunk_file_refs so
+            // we are inserting into an empty table.
+            if (backup.ReverseIndex.Count > 0)
+            {
+                _databaseService.BulkInsertChunkFileRefs(backup.ReverseIndex);
+                Log($"Reverse index restored: {backup.ReverseIndex.Count} rows (v2 backup)");
+            }
+            else
+            {
+                var derived = backup.Entries
+                    .SelectMany(e => e.ReferencingFiles.Select(r => new ChunkFileRefRow
+                    {
+                        FilePath = r.FilePath,
+                        ChunkHash = e.ChunkHash,
+                        ChunkIndex = r.ChunkIndex,
+                        ReferencedAt = r.ReferencedAt,
+                    }))
+                    .ToList();
+                if (derived.Count > 0)
+                {
+                    _databaseService.BulkInsertChunkFileRefs(derived);
+                    Log($"Reverse index reconstructed from v1 backup: {derived.Count} rows");
+                }
+                else
+                {
+                    Log("Reverse index left empty after restore (no rows in backup); " +
+                        "RebuildReverseChunkIndex will repopulate it on next launch");
+                }
+            }
+
+            Log($"Index restored: {backup.Entries.Count} entries from {backup.CreatedAt} (v{backup.Version})");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log($"Failed to restore index from Azure: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Rebuilds the chunk index by scanning all metadata blobs in Azure.
+    /// Uses parallel metadata downloads and batched chunk info lookups.
+    /// Detects and cleans up incomplete metadata entries (files with missing chunks)
+    /// and deletes orphaned chunks that were only referenced by those entries.
+    /// </summary>
+    /// <param name="progress">Progress reporter</param>
+    /// <param name="cancellationToken">Cancellation token</param>
+    public async Task RebuildIndexFromAzureAsync(
+        IProgress<(int processed, int total, string currentFile)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        Log("Rebuilding chunk index from Azure metadata...");
+
+        // B46: clear the backed-up-file catalog (files + file_chunks via FK
+        // cascade) before clearing chunk_index / chunk_file_refs. Pre-B46
+        // the rebuild only restored the chunk index, leaving stale or
+        // empty `files` and `file_chunks` tables behind - the catalog
+        // would forget which local paths had been backed up, breaking
+        // Sync, Data Integrity, and any other consumer that reads
+        // GetBackedUpFile / GetAllBackedUpFiles after a recovery. Order
+        // matters only on SQLite (FK cascade); on LiteDB the two clears
+        // are independent.
+        _databaseService.ClearBackedUpFiles();
+
+        // Clear existing index
+        _databaseService.ClearChunkIndex();
+
+        // Get all metadata blobs
+        var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
+        var total = metadataBlobs.Count;
+        Log($"Found {total} metadata blobs to process");
+
+        // Phase 1 & 2: Download metadata and list chunk blobs concurrently.
+        // These query different prefixes (metadata/ vs chunks/) so they don't contend.
+        const int maxParallelMetadataDownloads = 64;
+        var allMetadata = new System.Collections.Concurrent.ConcurrentBag<(string blobName, BackedUpFile file)>();
+        int downloaded = 0;
+
+        // Start chunk listing immediately — it doesn't depend on metadata results
+        var chunkListingTask = _blobService.ListChunkBlobsWithPropertiesAsync(cancellationToken);
+
+        await Parallel.ForEachAsync(
+            metadataBlobs,
+            new ParallelOptions
+            {
+                MaxDegreeOfParallelism = maxParallelMetadataDownloads,
+                CancellationToken = cancellationToken
+            },
+            async (blobName, ct) =>
+            {
+                try
+                {
+                    var metadata = await _blobService.DownloadFileMetadataAsync(blobName, ct);
+                    if (metadata != null)
+                    {
+                        allMetadata.Add((blobName, metadata));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Error downloading metadata {blobName}: {ex.Message}");
+                }
+
+                var count = Interlocked.Increment(ref downloaded);
+                if (count % 50 == 0 || count == total)
+                {
+                    progress?.Report((count, total, $"Downloading metadata... {count}/{total}"));
+                }
+            });
+
+        Log($"Downloaded {allMetadata.Count} metadata entries. Awaiting chunk listing...");
+
+        // Await the chunk listing that was running concurrently with metadata downloads
+        progress?.Report((0, 1, "Listing all chunks from Azure..."));
+        var chunkInfoCache = await chunkListingTask;
+
+        Log($"Listed {chunkInfoCache.Count} chunks with properties. Checking integrity...");
+
+        // Phase 3: Detect incomplete metadata (files with missing chunks) and clean up
+        var uniqueChunkHashes = allMetadata
+            .SelectMany(m => m.file.Chunks.Select(c => c.Hash))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        var missingChunkHashes = new HashSet<string>(
+            uniqueChunkHashes.Where(h => !chunkInfoCache.ContainsKey(h)),
+            StringComparer.Ordinal);
+
+        var validMetadata = allMetadata.ToList();
+
+        if (missingChunkHashes.Count > 0)
+        {
+            Log($"Found {missingChunkHashes.Count} chunks missing from Azure — checking for incomplete files");
+
+            var incompleteEntries = allMetadata
+                .Where(e => e.file.Chunks.Any(c => missingChunkHashes.Contains(c.Hash)))
+                .ToList();
+
+            if (incompleteEntries.Count > 0)
+            {
+                Log($"Found {incompleteEntries.Count} incomplete metadata entries — deleting from Azure");
+
+                // Collect chunk hashes referenced by valid (complete) metadata
+                var incompleteSet = new HashSet<string>(
+                    incompleteEntries.Select(e => e.blobName), StringComparer.Ordinal);
+                validMetadata = allMetadata.Where(e => !incompleteSet.Contains(e.blobName)).ToList();
+
+                var validChunkHashes = new HashSet<string>(
+                    validMetadata.SelectMany(e => e.file.Chunks.Select(c => c.Hash)),
+                    StringComparer.Ordinal);
+
+                // Chunks only referenced by deleted metadata that still exist in Azure
+                var orphanedChunkHashes = incompleteEntries
+                    .SelectMany(e => e.file.Chunks.Select(c => c.Hash))
+                    .Where(h => !validChunkHashes.Contains(h) && chunkInfoCache.ContainsKey(h))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToList();
+
+                // Build full list of blobs to delete (metadata + orphaned chunks)
+                var blobsToDelete = incompleteEntries
+                    .Select(e => (blobName: e.blobName, label: Path.GetFileName(e.file.LocalPath)))
+                    .Concat(orphanedChunkHashes.Select(h => (blobName: $"chunks/{h}", label: h[..8] + "...")))
+                    .ToList();
+
+                // Parallel deletion of incomplete metadata and orphaned chunks
+                int deletedCount = 0;
+                int deletedMetadata = 0;
+                int deletedChunks = 0;
+
+                await Parallel.ForEachAsync(
+                    blobsToDelete,
+                    new ParallelOptions
+                    {
+                        MaxDegreeOfParallelism = MaxParallelDeletes,
+                        CancellationToken = cancellationToken
+                    },
+                    async (item, ct) =>
+                    {
+                        try
+                        {
+                            await _blobService.DeleteBlobAsync(item.blobName, ct);
+                            if (item.blobName.StartsWith("chunks/"))
+                                Interlocked.Increment(ref deletedChunks);
+                            else
+                                Interlocked.Increment(ref deletedMetadata);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"Failed to delete {item.blobName}: {ex.Message}");
+                        }
+
+                        var count = Interlocked.Increment(ref deletedCount);
+                        if (count % 20 == 0 || count == blobsToDelete.Count)
+                        {
+                            progress?.Report((count, blobsToDelete.Count,
+                                $"Cleaning up: {count}/{blobsToDelete.Count}"));
+                        }
+                    });
+
+                Log($"Cleanup complete: {deletedMetadata} metadata entries deleted, " +
+                    $"{deletedChunks} orphaned chunks deleted");
+            }
+        }
+
+        // Phase 4: Build the index from valid (complete) metadata only
+        // Build all entries in memory first, then batch-insert — avoids per-chunk DB read+write
+        Log($"Building index from {validMetadata.Count} valid metadata entries...");
+        progress?.Report((0, validMetadata.Count, "Building index..."));
+
+        var now = DateTime.UtcNow;
+        var indexEntries = new Dictionary<string, ChunkIndexEntry>(StringComparer.Ordinal);
+        var processed = 0;
+
+        foreach (var (_, file) in validMetadata)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            processed++;
+
+            if (processed % 100 == 0 || processed == validMetadata.Count)
+            {
+                progress?.Report((processed, validMetadata.Count, $"Indexing: {Path.GetFileName(file.LocalPath)}"));
+            }
+
+            foreach (var chunk in file.Chunks)
+            {
+                var size = (long)chunk.Length;
+                var tier = StorageTier.Hot;
+
+                if (chunkInfoCache.TryGetValue(chunk.Hash, out var cached))
+                {
+                    size = cached.sizeBytes;
+                    tier = cached.tier;
+                }
+
+                if (!indexEntries.TryGetValue(chunk.Hash, out var entry))
+                {
+                    entry = new ChunkIndexEntry
+                    {
+                        ChunkHash = chunk.Hash,
+                        FirstUploadedAt = now,
+                        OriginalUploaderPath = file.LocalPath,
+                        CurrentTier = tier,
+                        SizeBytes = size,
+                        LastVerifiedAt = now,
+                        ReferenceCount = 0,
+                        ReferencingFiles = []
+                    };
+                    indexEntries[chunk.Hash] = entry;
+                }
+
+                entry.ReferencingFiles.Add(new ChunkFileReference
+                {
+                    FilePath = file.LocalPath,
+                    ChunkIndex = chunk.Index,
+                    ReferencedAt = now
+                });
+                entry.ReferenceCount = entry.ReferencingFiles.Count;
+            }
+        }
+
+        // Single bulk insert — one DB operation instead of thousands
+        progress?.Report((0, 1, $"Saving {indexEntries.Count} index entries..."));
+        _databaseService.BulkInsertChunkIndexEntries(indexEntries.Values);
+
+        // Populate the reverse (file -> chunk) index in lockstep. Flattening
+        // ReferencingFiles -> ChunkFileRefRow is O(total references) and lets
+        // every subsequent GetChunkEntriesForFile lookup hit the indexed path.
+        var reverseRows = indexEntries.Values
+            .SelectMany(e => e.ReferencingFiles.Select(r => new ChunkFileRefRow
+            {
+                FilePath = r.FilePath,
+                ChunkHash = e.ChunkHash,
+                ChunkIndex = r.ChunkIndex,
+                ReferencedAt = r.ReferencedAt
+            }));
+        _databaseService.BulkInsertChunkFileRefs(reverseRows);
+        _databaseService.SetIndexMetadata("ReverseIndexBuiltAt", now);
+
+        // B46: repopulate the backed-up-file catalog so subsequent
+        // GetBackedUpFile / GetAllBackedUpFiles calls return the same
+        // BackedUpFile graph that the user had before the rebuild.
+        // Only valid (complete) metadata is persisted: incomplete
+        // entries were already deleted from Azure above and must not
+        // resurface in the catalog.
+        progress?.Report((0, 1, $"Saving {validMetadata.Count} file records..."));
+        var rebuiltFiles = validMetadata.Select(m => m.file).ToList();
+        _databaseService.BulkInsertBackedUpFiles(rebuiltFiles);
+
+        _databaseService.SetIndexMetadata("LastFullRebuildAt", now);
+        Log($"Index rebuild complete: {processed} valid files indexed, " +
+            $"{indexEntries.Count} unique chunks, " +
+            $"{rebuiltFiles.Count} files repopulated in catalog, " +
+            $"{missingChunkHashes.Count} missing chunks detected");
+
+        // Backup the newly rebuilt index
+        await BackupIndexToAzureAsync(cancellationToken);
+    }
+
+    private async Task<List<string>> ListAzureChunksAsync(CancellationToken cancellationToken)
+    {
+        // Use the blob service to list all chunks from Azure
+        return await _blobService.ListChunkBlobsAsync(cancellationToken);
+    }
+
+    private async Task<(long size, StorageTier tier)> GetChunkInfoFromAzureAsync(
+        string chunkHash, CancellationToken cancellationToken)
+    {
+        var blobName = $"chunks/{chunkHash}";
+        return await _blobService.GetBlobPropertiesAsync(blobName, cancellationToken);
+    }
+}

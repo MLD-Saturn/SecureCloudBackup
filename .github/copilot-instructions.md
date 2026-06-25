@@ -124,7 +124,7 @@ in lockstep with the code:
 
 Per-commit maintenance protocol (these are non-negotiable):
 
-- Adding/renaming a view file (`src/AzureBackup/Views/*.axaml`) →
+- Adding/renaming a view file (`src/SecureCloudBackup/Views/*.axaml`) →
   update `docs/USER_GUIDE.md` table of contents and the corresponding
   section in the same commit.
 - Adding/renaming a user-visible button, toggle, or setting → update

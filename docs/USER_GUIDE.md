@@ -556,7 +556,7 @@ The backed-up data may be corrupted, or your local metadata is out of sync with 
 
 ### Application closes unexpectedly
 
-The crash log lives in the data directory (`%LOCALAPPDATA%\AzureBackup\` in installed mode, alongside the EXE in portable mode). Common causes:
+The crash log lives in the data directory (`%LOCALAPPDATA%\SecureCloudBackup\` in installed mode, alongside the EXE in portable mode). Common causes:
 
 - Network interruption during a long upload or download
 - Insufficient disk space for the local database / temp chunk buffers

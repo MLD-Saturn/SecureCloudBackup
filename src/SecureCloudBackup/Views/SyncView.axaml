@@ -1,0 +1,504 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:SecureCloudBackup.ViewModels"
+             xmlns:local="using:SecureCloudBackup.Views"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d" d:DesignWidth="1000" d:DesignHeight="700"
+             x:Class="SecureCloudBackup.Views.SyncView"
+             x:DataType="vm:MainWindowViewModel">
+
+    <Panel>
+    <Grid RowDefinitions="Auto,Auto,*,Auto,Auto,Auto">
+        
+        <!-- Phase 1: Status Toolbar -->
+        <Border Classes="card" Margin="0,0,0,8">
+            <Grid RowDefinitions="Auto,Auto">
+                <!-- Row 1: Action buttons -->
+                <Grid ColumnDefinitions="Auto,*,Auto">
+                    <!-- Left: Summary -->
+                    <TextBlock Text="{Binding LocalFilesSummary}" VerticalAlignment="Center" Opacity="0.7"/>
+
+                    <!-- Center: Primary actions -->
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                        <Button Content="Sync Selected" Command="{Binding SyncSelectedCommand}"
+                                IsEnabled="{Binding CanSyncSelected}"
+                                ToolTip.Tip="Backup selected local files AND restore selected Azure files"
+                                Classes="primary"/>
+                        <Button Content="Start Monitoring" Command="{Binding StartBackupCommand}"
+                                IsVisible="{Binding !IsBackupRunning}"
+                                IsEnabled="{Binding IsInitialized}"
+                                ToolTip.Tip="Start watching for file changes"/>
+                        <Button Content="Stop Monitoring" Command="{Binding StopBackupCommand}"
+                                IsVisible="{Binding IsBackupRunning}"
+                                ToolTip.Tip="Stop backup monitoring"/>
+                        <Button Content="Refresh" Command="{Binding RefreshBothPanelsCommand}"
+                                ToolTip.Tip="Refresh both local and Azure file lists"
+                                IsEnabled="{Binding IsInitialized}"/>
+                        <Button Content="{Binding UseTreeView, Converter={StaticResource BoolToViewModeConverter}}"
+                                Command="{Binding ToggleViewModeCommand}"
+                                ToolTip.Tip="Toggle between tree and list view"
+                                Padding="8,4"/>
+                    </StackPanel>
+
+                    <!-- Right: Azure summary -->
+                    <TextBlock Grid.Column="2" Text="{Binding AzureFilesSummary}" VerticalAlignment="Center" Opacity="0.7"/>
+                </Grid>
+                
+                <!-- Row 2: Status indicators -->
+                <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto,Auto,Auto" Margin="0,8,0,0">
+                    <!-- Status indicator -->
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <Ellipse Width="10" Height="10" 
+                                 Fill="{Binding IsBackupRunning, Converter={StaticResource BoolToColorConverter}}"/>
+                        <TextBlock Text="{Binding BackupStatusText}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    
+                    <!-- Spacer -->
+                    <Border Grid.Column="1"/>
+                    
+                    <!-- Statistics -->
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" Margin="16,0">
+                        <TextBlock Text="Backed up:" Opacity="0.7" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding TotalFiles}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="4" Margin="16,0">
+                        <TextBlock Text="Pending:" Opacity="0.7" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding PendingChanges}" FontWeight="SemiBold" VerticalAlignment="Center"
+                                   Foreground="{Binding PendingChanges, Converter={StaticResource PendingToColorConverter}}"/>
+                    </StackPanel>
+                    
+                    <StackPanel Grid.Column="4" Orientation="Horizontal" Spacing="4" Margin="16,0,0,0">
+                        <TextBlock Text="Size:" Opacity="0.7" VerticalAlignment="Center"/>
+                        <TextBlock Text="{Binding TotalSize}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <!-- Phase 2: View Controls -->
+        <Border Grid.Row="1" Classes="card" Margin="0,0,0,8" Padding="8">
+            <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,*,Auto,Auto,Auto">
+                <!-- Tree view buttons -->
+                <Button Content="Expand All" Command="{Binding ExpandAllTreeNodesCommand}"
+                        Padding="8,4" FontSize="11"
+                        IsVisible="{Binding UseTreeView}"
+                        ToolTip.Tip="Expand all folders in tree view"/>
+                <Button Grid.Column="1" Content="Collapse All" Command="{Binding CollapseAllTreeNodesCommand}"
+                        Padding="8,4" Margin="4,0,0,0" FontSize="11"
+                        IsVisible="{Binding UseTreeView}"
+                        ToolTip.Tip="Collapse all folders in tree view"/>
+                
+                <!-- Separator -->
+                <Border Grid.Column="2" Width="1" Background="{DynamicResource SystemControlForegroundBaseMediumBrush}" 
+                        Opacity="0.3" Margin="12,2"/>
+                
+                <!-- Search box -->
+                <Grid Grid.Column="4" ColumnDefinitions="Auto,*,Auto" Margin="0,0,8,0">
+                    <TextBlock Text="Search:" VerticalAlignment="Center" Margin="0,0,4,0" Opacity="0.6"/>
+                    <TextBox Grid.Column="1" Text="{Binding SyncSearchPattern}" 
+                             Watermark="Filter files..." 
+                             MinWidth="200" Padding="4,2"/>
+                    <Button Grid.Column="2" Content="X" Padding="4,2" Margin="2,0,0,0"
+                            Command="{Binding ClearSyncSearchCommand}"
+                            IsVisible="{Binding SyncSearchPattern, Converter={x:Static StringConverters.IsNotNullOrEmpty}}"
+                            ToolTip.Tip="Clear search filter"/>
+                </Grid>
+                
+                <!-- Selection buttons -->
+                <Button Grid.Column="5" Content="Select All" Command="{Binding SelectAllSyncFilesCommand}"
+                        Padding="8,4" FontSize="11"
+                        ToolTip.Tip="Select all files in both panels"/>
+                <Button Grid.Column="6" Content="Deselect All" Command="{Binding DeselectAllSyncFilesCommand}"
+                        Padding="8,4" Margin="4,0,0,0" FontSize="11"
+                        IsEnabled="{Binding HasSelectedFiles}"
+                        ToolTip.Tip="Deselect all files"/>
+                
+                <!-- Selected files info -->
+                <TextBlock Grid.Column="7" Text="{Binding SelectedFilesText}" 
+                           VerticalAlignment="Center" Margin="12,0,0,0"
+                           FontWeight="SemiBold" Foreground="{DynamicResource AppAccentBrush}"/>
+            </Grid>
+        </Border>
+
+        <!-- Phase 3: Enhanced Side-by-side panels -->
+        <Grid Grid.Row="2" ColumnDefinitions="*,8,*">
+            <!-- Left Panel: Local Files -->
+            <Border Grid.Column="0" Classes="card"
+                    x:Name="LocalFilesPanel"
+                    DragDrop.AllowDrop="True"
+                    BorderThickness="{Binding IsDragOverLocalPanel, Converter={x:Static local:DragDropConverters.BoolToBorderThickness}}"
+                    BorderBrush="{Binding IsDragOverLocalPanel, Converter={StaticResource BoolToColorConverter}}">
+                <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+                    <!-- Panel header with folder management buttons -->
+                    <Grid ColumnDefinitions="Auto,Auto,Auto,*,Auto" Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="Local Files" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock Text="(Watched Folders)" FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <!-- Add/Remove folder buttons -->
+                        <Button Grid.Column="1" Content="+" Command="{Binding AddWatchedFolderCommand}"
+                                ToolTip.Tip="Add a folder to watch for backup"
+                                Padding="6,2" FontSize="12" FontWeight="Bold" Margin="8,0,0,0"
+                                IsEnabled="{Binding IsInitialized}"/>
+                        <Button Grid.Column="2" Content="-" Command="{Binding RemoveSelectedLocalFolderCommand}"
+                                ToolTip.Tip="Remove selected folder from watch list"
+                                Padding="8,2" FontSize="12" FontWeight="Bold" Margin="4,0,0,0"
+                                IsEnabled="{Binding CanRemoveSelectedLocalFolder}"/>
+                        <TextBlock Grid.Column="4" Text="Drop Azure files here to restore" FontSize="10" Opacity="0.5" 
+                                   VerticalAlignment="Center" FontStyle="Italic"
+                                   IsVisible="{Binding !IsDragOverLocalPanel}"/>
+                        <Border Grid.Column="4" Background="#2196F3" CornerRadius="4" Padding="8,4"
+                                IsVisible="{Binding IsDragOverLocalPanel}">
+                            <TextBlock Text="Drop to RESTORE from Azure" FontSize="11" FontWeight="SemiBold" 
+                                       Foreground="White"/>
+                        </Border>
+                    </Grid>
+
+                    <!-- Column headers for list view -->
+                    <Grid Grid.Row="1" ColumnDefinitions="32,24,*,80,80" Margin="4,0,4,4"
+                          IsVisible="{Binding ShowFlatList}">
+                        <TextBlock Text="" Width="32"/>
+                        <TextBlock Grid.Column="1" Text="" Width="24"/>
+                        <TextBlock Grid.Column="2" Text="File Path" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                        <TextBlock Grid.Column="3" Text="Size" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                        <TextBlock Grid.Column="4" Text="Status" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                    </Grid>
+
+                    <!-- Local file tree (tree view mode) -->
+                    <TreeView Grid.Row="3" x:Name="LocalFilesTreeView"
+                              ItemsSource="{Binding LocalFileTreeRoots}"
+                              SelectedItem="{Binding SelectedLocalTreeNode, Mode=TwoWay}"
+                              IsVisible="{Binding UseTreeView}">
+                        <TreeView.ItemContainerTheme>
+                            <ControlTheme TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}" x:DataType="vm:LocalFileTreeNodeViewModel">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                            </ControlTheme>
+                        </TreeView.ItemContainerTheme>
+                        <TreeView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Backup Selected" Command="{Binding BackupSelectedLocalFilesCommand}"
+                                          IsEnabled="{Binding HasSelectedLocalFiles}"/>
+                                <MenuItem Header="Force Re-upload Selected"
+                                          Command="{Binding ForceReuploadSelectedLocalFilesCommand}"
+                                          IsEnabled="{Binding HasSelectedLocalFiles}"
+                                          ToolTip.Tip="Bypasses dedup and the metadata-skip fast path. Use after an integrity-check non-repairable failure or to recover suspected remote corruption for files whose local copy is known-good."/>
+                                <MenuItem Header="Mirror Sync to Azure" Command="{Binding MirrorSyncToAzureCommand}"
+                                          IsEnabled="{Binding CanMirrorSyncToAzure}"/>
+                                <Separator/>
+                                <MenuItem Header="Add Watched Folder..." Command="{Binding AddWatchedFolderCommand}"/>
+                                <MenuItem Header="Remove from Watch List" Command="{Binding RemoveSelectedLocalFolderCommand}"
+                                          IsEnabled="{Binding CanRemoveSelectedLocalFolder}"/>
+                                <Separator/>
+                                <MenuItem Header="Select All" Command="{Binding SelectAllSyncFilesCommand}"/>
+                                <MenuItem Header="Deselect All" Command="{Binding DeselectAllSyncFilesCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="Expand All" Command="{Binding ExpandAllLocalTreeNodesCommand}"/>
+                                <MenuItem Header="Collapse All" Command="{Binding CollapseAllLocalTreeNodesCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="Refresh" Command="{Binding RefreshLocalFilesCommand}"/>
+                            </ContextMenu>
+                        </TreeView.ContextMenu>
+                        <TreeView.ItemTemplate>
+                            <TreeDataTemplate ItemsSource="{Binding Children}">
+                                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusIcon}" Margin="0,0,4,0" VerticalAlignment="Center"
+                                               FontSize="14"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding Name}" VerticalAlignment="Center"
+                                               ToolTip.Tip="{Binding FullPath}"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding FileSizeText}" 
+                                               Margin="8,0" Opacity="0.7" VerticalAlignment="Center"
+                                               IsVisible="{Binding IsFile}" FontSize="11"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding StatusText}" 
+                                               FontSize="11" Opacity="0.6" VerticalAlignment="Center"
+                                               Foreground="{Binding StatusColor}"/>
+                                </Grid>
+                            </TreeDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+
+                    <!-- Local file flat list (list view mode) -->
+                    <ListBox Grid.Row="3" x:Name="LocalFilesListBox"
+                             ItemsSource="{Binding FilteredLocalFiles}"
+                             IsVisible="{Binding ShowFlatList}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding StatusIcon}" Margin="0,0,4,0" VerticalAlignment="Center"
+                                               FontSize="14"/>
+                                    <TextBlock Grid.Column="2" Text="{Binding FullPath}" VerticalAlignment="Center"
+                                               ToolTip.Tip="{Binding FullPath}" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock Grid.Column="3" Text="{Binding FileSizeText}" 
+                                               Margin="8,0" Opacity="0.7" VerticalAlignment="Center" FontSize="11"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding StatusText}" 
+                                               FontSize="11" Opacity="0.6" VerticalAlignment="Center"
+                                               Foreground="{Binding StatusColor}"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- Empty state -->
+                    <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsVisible="{Binding !LocalFileTreeRoots.Count}">
+                        <TextBlock Text="No watched folders" FontSize="18" Opacity="0.5" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Add folders in Settings" FontSize="14" Opacity="0.4" HorizontalAlignment="Center"/>
+                    </StackPanel>
+                    
+                    <!-- Panel footer with summary -->
+                    <Border Grid.Row="4" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" 
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding LocalFilesSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Splitter -->
+            <GridSplitter Grid.Column="1" ResizeDirection="Columns" Background="Transparent"/>
+
+            <!-- Right Panel: Azure Backup Files -->
+            <Border Grid.Column="2" Classes="card"
+                    x:Name="AzureFilesPanel"
+                    DragDrop.AllowDrop="True"
+                    BorderThickness="{Binding IsDragOverAzurePanel, Converter={x:Static local:DragDropConverters.BoolToBorderThickness}}"
+                    BorderBrush="{Binding IsDragOverAzurePanel, Converter={StaticResource BoolToColorConverter}}">
+                <Grid RowDefinitions="Auto,Auto,Auto,*,Auto">
+                    <!-- Panel header -->
+                    <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,8">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBlock Text="Azure Backup" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock Text="(Cloud Storage)" FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="2" Text="Drop local files here to backup" FontSize="10" Opacity="0.5" 
+                                   VerticalAlignment="Center" FontStyle="Italic"
+                                   IsVisible="{Binding !IsDragOverAzurePanel}"/>
+                        <Border Grid.Column="2" Background="#4CAF50" CornerRadius="4" Padding="8,4"
+                                IsVisible="{Binding IsDragOverAzurePanel}">
+                            <TextBlock Text="Drop to BACKUP to Azure" FontSize="11" FontWeight="SemiBold" 
+                                       Foreground="White"/>
+                        </Border>
+                    </Grid>
+
+                    <!-- Path Remapping Panel (visible when folder selected in tree view) -->
+                    <Border Grid.Row="1" Classes="card" Margin="0,0,0,8" Padding="8"
+                            IsVisible="{Binding CanSetCustomRestorePath}"
+                            BorderBrush="{DynamicResource AppAccentBrush}" BorderThickness="1">
+                        <Grid RowDefinitions="Auto,Auto" ColumnDefinitions="Auto,*,Auto,Auto,Auto">
+                            <TextBlock Text="Remap path:" FontWeight="SemiBold" VerticalAlignment="Center" FontSize="11"/>
+                            <TextBlock Grid.Column="1" Text="{Binding SelectedTreeNode.FullPath}" 
+                                       TextTrimming="CharacterEllipsis" Margin="8,0,0,0" VerticalAlignment="Center"
+                                       FontFamily="Consolas" Opacity="0.8" FontSize="11"/>
+                            
+                            <TextBlock Grid.Row="1" Text="To:" VerticalAlignment="Center" Margin="0,6,0,0" FontSize="11"/>
+                            <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding CustomRestoreBasePath}" 
+                                     Watermark="Select or enter target folder" Margin="8,6,8,0" FontSize="11"/>
+                            <Button Grid.Row="1" Grid.Column="2" Content="Browse..." 
+                                    Command="{Binding BrowseRemapFolderCommand}" Margin="0,6,4,0" Padding="8,2" FontSize="11"
+                                    ToolTip.Tip="Browse for target folder"/>
+                            <Button Grid.Row="1" Grid.Column="3" Content="Set" 
+                                    Command="{Binding SetCustomRestorePathCommand}" Margin="0,6,4,0" Padding="8,2" FontSize="11"
+                                    ToolTip.Tip="Apply the path manually entered in the text box"/>
+                            <Button Grid.Row="1" Grid.Column="4" Content="Clear" 
+                                    Command="{Binding ClearCustomRestorePathCommand}" Margin="0,6,0,0" Padding="8,2" FontSize="11"/>
+                        </Grid>
+                    </Border>
+
+                    <!-- Column headers for list view -->
+                    <Grid Grid.Row="2" ColumnDefinitions="32,*,80,100" Margin="4,0,4,4"
+                          IsVisible="{Binding ShowFlatList}">
+                        <TextBlock Text="" Width="32"/>
+                        <TextBlock Grid.Column="1" Text="File Path" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                        <TextBlock Grid.Column="2" Text="Size" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                        <TextBlock Grid.Column="3" Text="Modified" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
+                    </Grid>
+
+                    <!-- Azure file tree -->
+                    <TreeView Grid.Row="3" x:Name="AzureFilesTreeView"
+                              ItemsSource="{Binding FileTreeRoots}"
+                              SelectedItem="{Binding SelectedTreeNode, Mode=TwoWay}"
+                              IsVisible="{Binding UseTreeView}">
+                        <TreeView.ItemContainerTheme>
+                            <ControlTheme TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}" x:DataType="vm:FileTreeNodeViewModel">
+                                <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}"/>
+                            </ControlTheme>
+                        </TreeView.ItemContainerTheme>
+                        <TreeView.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Restore Selected" Command="{Binding RestoreSelectedTreeFilesCommand}"
+                                          IsEnabled="{Binding HasSelectedFiles}"/>
+                                <MenuItem Header="Mirror Sync" Command="{Binding MirrorSyncToLocalCommand}"
+                                          IsEnabled="{Binding CanSetCustomRestorePath}"/>
+                                <Separator/>
+                                <MenuItem Header="Delete from Azure" Command="{Binding DeleteSelectedFilesCommand}"
+                                          IsEnabled="{Binding CanDeleteFromAzure}"
+                                          ToolTip.Tip="Delete checked files, or if none checked, delete the right-clicked item"/>
+                                <Separator/>
+                                <MenuItem Header="Select All" Command="{Binding SelectAllSyncFilesCommand}"/>
+                                <MenuItem Header="Deselect All" Command="{Binding DeselectAllSyncFilesCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="Expand All" Command="{Binding ExpandAllTreeNodesCommand}"/>
+                                <MenuItem Header="Collapse All" Command="{Binding CollapseAllTreeNodesCommand}"/>
+                                <Separator/>
+                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromAzureUiCommand}"/>
+                            </ContextMenu>
+                        </TreeView.ContextMenu>
+                        <TreeView.ItemTemplate>
+                            <TreeDataTemplate ItemsSource="{Binding Children}">
+                                <Grid ColumnDefinitions="Auto,Auto,*,Auto,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding Icon}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                        <TextBlock Text="{Binding Name}" VerticalAlignment="Center"
+                                                   ToolTip.Tip="{Binding FullPath}"/>
+                                        <TextBlock Text="to" IsVisible="{Binding HasCustomRestorePath}" 
+                                                   Foreground="{DynamicResource AppAccentBrush}" VerticalAlignment="Center"
+                                                    FontSize="10"/>
+                                         <TextBlock Text="{Binding EffectiveRestorePath}" 
+                                                    IsVisible="{Binding HasCustomRestorePath}"
+                                                    Foreground="{DynamicResource AppAccentBrush}"
+                                                   FontSize="10" Opacity="0.8" VerticalAlignment="Center"
+                                                   TextTrimming="CharacterEllipsis" MaxWidth="150"/>
+                                    </StackPanel>
+                                    <!-- Storage tier badge -->
+                                    <Border Grid.Column="3" Background="{DynamicResource AppAccentLight3Brush}" 
+                                             CornerRadius="3" Padding="4,1" Margin="4,0" VerticalAlignment="Center"
+                                             IsVisible="{Binding HasStorageTier}"
+                                             ToolTip.Tip="Azure Storage Tier">
+                                         <TextBlock Text="{Binding StorageTierText}" FontSize="9" Opacity="0.9"/>
+                                     </Border>
+                                     <TextBlock Grid.Column="4" Text="{Binding File.FileSize, Converter={StaticResource BytesToStringConverter}}"
+                                               Margin="8,0" Opacity="0.7" VerticalAlignment="Center" FontSize="11"
+                                               IsVisible="{Binding IsFile}"/>
+                                </Grid>
+                            </TreeDataTemplate>
+                        </TreeView.ItemTemplate>
+                    </TreeView>
+
+                    <!-- Flat list view -->
+                    <ListBox Grid.Row="3" x:Name="AzureFilesListBox"
+                             ItemsSource="{Binding FilteredRestorableFiles}"
+                             SelectedItem="{Binding SelectedRestoreFile}"
+                             IsVisible="{Binding ShowFlatList}">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto">
+                                    <CheckBox IsChecked="{Binding IsSelected}" Margin="0,0,4,0" VerticalAlignment="Center"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayPath}" Margin="4,0"
+                                               ToolTip.Tip="{Binding LocalPath}" TextTrimming="CharacterEllipsis"/>
+                                    <!-- Storage tier badge -->
+                                    <Border Grid.Column="2" Background="{DynamicResource AppAccentLight3Brush}"
+                                            CornerRadius="3" Padding="4,1" Margin="4,0" VerticalAlignment="Center"
+                                            IsVisible="{Binding HasStorageTier}"
+                                            ToolTip.Tip="Azure Storage Tier">
+                                        <TextBlock Text="{Binding StorageTierText}" FontSize="9" Opacity="0.9"/>
+                                    </Border>
+                                    <TextBlock Grid.Column="3" Text="{Binding FileSizeText}" Opacity="0.7" FontSize="11"
+                                               Margin="8,0"/>
+                                    <TextBlock Grid.Column="4" Text="{Binding LastModified}" Opacity="0.6" FontSize="11"/>
+                                </Grid>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+
+                    <!-- Empty state -->
+                    <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                IsVisible="{Binding ShowAzureEmptyState}">
+                        <TextBlock Text="No files in Azure" FontSize="18" Opacity="0.5" HorizontalAlignment="Center"/>
+                        <TextBlock Text="Start a backup to upload files" FontSize="14" Opacity="0.4" HorizontalAlignment="Center"/>
+                    </StackPanel>
+                    
+                    <!-- Panel footer with summary -->
+                    <Border Grid.Row="4" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" 
+                            CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
+                        <TextBlock Text="{Binding AzureFilesSummary}" FontSize="11" Opacity="0.8"/>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Minimal progress indicator (full progress is on the Progress tab) -->
+        <Border Grid.Row="3" Classes="card" Margin="0,8,0,0" Padding="8,6"
+                IsVisible="{Binding IsTransferInProgress}">
+            <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                <TextBlock Text="⟳" FontSize="14" Opacity="0.6"/>
+                <TextBlock Text="Operation in progress — see Progress tab for details"
+                           FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+            </StackPanel>
+        </Border>
+
+        <!-- Actions panel: Local files (shown when local files are selected) -->
+        <Border Grid.Row="4" Classes="card" Margin="0,8,0,0"
+                IsVisible="{Binding HasSelectedLocalFiles}">
+            <Grid ColumnDefinitions="Auto,*,Auto">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="{Binding SelectedLocalFilesText}" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Backup Selected" Command="{Binding BackupSelectedLocalFilesCommand}"
+                            Classes="primary" ToolTip.Tip="Backup selected local files to Azure"
+                            IsEnabled="{Binding HasSelectedLocalFiles}"/>
+                    <Button Content="Mirror Sync to Azure" Command="{Binding MirrorSyncToAzureCommand}"
+                            ToolTip.Tip="Mirror sync: backup new/modified files from the selected watched folder to Azure and mark deleted files"
+                            IsEnabled="{Binding CanMirrorSyncToAzure}"
+                            Foreground="DodgerBlue"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <!-- Actions panel: Azure files (shown when Azure files are selected) -->
+        <Border Grid.Row="5" Classes="card" Margin="0,8,0,0"
+                IsVisible="{Binding HasSelectedFiles}">
+            <Grid ColumnDefinitions="Auto,*,Auto">
+                <TextBlock Text="{Binding SelectedFilesText}" VerticalAlignment="Center" FontWeight="SemiBold"/>
+
+                <!-- Center: Restore options -->
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                    <CheckBox Content="Restore to original location" 
+                              IsChecked="{Binding RestoreToOriginalLocation}"
+                              VerticalAlignment="Center"
+                              ToolTip.Tip="When checked, files will be restored to their original paths"/>
+                    <TextBlock Text="or" VerticalAlignment="Center" Opacity="0.5" 
+                               IsVisible="{Binding !RestoreToOriginalLocation}"/>
+                    <TextBox Text="{Binding RestoreDirectory}" Watermark="Select restore directory..."
+                             Width="200" IsReadOnly="True"
+                             IsVisible="{Binding !RestoreToOriginalLocation}"/>
+                    <Button Content="Browse..." Command="{Binding BrowseRestoreDirectoryCommand}"
+                            ToolTip.Tip="Browse for restore directory"
+                            IsVisible="{Binding !RestoreToOriginalLocation}"/>
+                </StackPanel>
+
+                <!-- Right: Action buttons -->
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
+                    <Button Content="Mirror Sync to Local" Command="{Binding MirrorSyncToLocalCommand}"
+                            ToolTip.Tip="Sync selected folder to target: restore missing/updated files, delete extra local files"
+                            IsEnabled="{Binding CanSetCustomRestorePath}"
+                            Foreground="DodgerBlue"/>
+                    <Button Content="Restore Selected" Command="{Binding RestoreSelectedTreeFilesCommand}"
+                            Classes="primary" ToolTip.Tip="Restore selected files to the destination"
+                            IsEnabled="{Binding HasSelectedFiles}"/>
+                    <Button Content="Delete from Azure" Command="{Binding DeleteSelectedFilesCommand}"
+                            ToolTip.Tip="Delete selected files from Azure Storage (cannot be undone!)"
+                            Foreground="IndianRed"
+                            IsEnabled="{Binding HasSelectedFiles}"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+
+    <!-- Drag file count badge — positioned near the cursor during drag operations -->
+    <Canvas IsHitTestVisible="False">
+        <Border x:Name="DragBadge" IsVisible="False"
+                Background="#E02196F3" CornerRadius="10" Padding="8,4"
+                BoxShadow="2 2 6 0 #40000000">
+            <StackPanel Orientation="Horizontal" Spacing="4">
+                <TextBlock Text="📄" FontSize="12"/>
+                <TextBlock x:Name="DragBadgeText" Text="" FontSize="12"
+                           FontWeight="Bold" Foreground="White"/>
+            </StackPanel>
+        </Border>
+    </Canvas>
+    </Panel>
+</UserControl>

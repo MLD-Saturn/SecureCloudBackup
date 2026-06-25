@@ -1,0 +1,413 @@
+using System;
+using System.Collections.ObjectModel;
+using System.Linq;
+using SecureCloudBackup.Core;
+using SecureCloudBackup.Core.Models;
+using SecureCloudBackup.Core.Services;
+using Avalonia.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+
+namespace SecureCloudBackup.ViewModels;
+
+/// <summary>
+/// ViewModel for the Progress tab that appears during backup/restore/mirror operations.
+/// Manages overall progress, active file rows, small-file grouping, and completion summary.
+/// All three operation types report through <see cref="OperationProgressReport"/> for unified display.
+/// </summary>
+public partial class ProgressTabViewModel : ViewModelBase
+{
+    private readonly SpeedTracker _speedTracker = new();
+
+    // ── Overall progress ──
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(OverallProgressPercent))]
+    [NotifyPropertyChangedFor(nameof(BytesProgressText))]
+    private long _totalBytesProcessed;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(OverallProgressPercent))]
+    [NotifyPropertyChangedFor(nameof(BytesProgressText))]
+    private long _totalBytes;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FilesProgressText))]
+    private int _completedFilesCount;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(FilesProgressText))]
+    private int _totalFilesCount;
+
+    [ObservableProperty]
+    private string _operationType = string.Empty;
+
+    [ObservableProperty]
+    private string _phaseDescription = string.Empty;
+
+    [ObservableProperty]
+    private string _operationSpeed = string.Empty;
+
+    [ObservableProperty]
+    private string _estimatedTimeRemaining = string.Empty;
+
+    [ObservableProperty]
+    private string _elapsedTimeText = string.Empty;
+
+    // ── State flags ──
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowActiveProgress))]
+    [NotifyPropertyChangedFor(nameof(ShowCompletionSummary))]
+    private bool _isOperationActive;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowActiveProgress))]
+    [NotifyPropertyChangedFor(nameof(ShowCompletionSummary))]
+    private bool _isCompleted;
+
+    /// <summary>True when the operation is running (show progress bars).</summary>
+    public bool ShowActiveProgress => IsOperationActive && !IsCompleted;
+
+    /// <summary>True when the operation finished (show summary + Ok button).</summary>
+    public bool ShowCompletionSummary => IsCompleted;
+
+    // ── Completion summary ──
+
+    [ObservableProperty]
+    private string _completionSummary = string.Empty;
+
+    [ObservableProperty]
+    private string _completionElapsed = string.Empty;
+
+    [ObservableProperty]
+    private string _completionBytes = string.Empty;
+
+    [ObservableProperty]
+    private int _completionSucceeded;
+
+    [ObservableProperty]
+    private int _completionFailed;
+
+    [ObservableProperty]
+    private int _completionCorruptedRecovery;
+
+    [ObservableProperty]
+    private bool _hasFailures;
+
+    // ── Small file group ──
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowSmallFileGroup))]
+    private int _smallFilesTotal;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupPercent))]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupText))]
+    private int _smallFilesCompleted;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupPercent))]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupBytesText))]
+    private long _smallFilesBytesProcessed;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupPercent))]
+    [NotifyPropertyChangedFor(nameof(SmallFileGroupBytesText))]
+    private long _smallFilesTotalBytes;
+
+    public bool ShowSmallFileGroup => SmallFilesTotal > 0;
+
+    public double SmallFileGroupPercent => SmallFilesTotalBytes > 0
+        ? (double)SmallFilesBytesProcessed / SmallFilesTotalBytes * 100
+        : 0;
+
+    public string SmallFileGroupText => SmallFilesTotal > 0
+        ? $"Small files (≤{RestoreService.SmallFileThresholdBytes / (1024 * 1024)} MB)    {SmallFilesCompleted:N0} / {SmallFilesTotal:N0} files"
+        : string.Empty;
+
+    public string SmallFileGroupBytesText => SmallFilesTotalBytes > 0
+        ? $"{FormatHelper.FormatBytes(SmallFilesBytesProcessed)} / {FormatHelper.FormatBytes(SmallFilesTotalBytes)}"
+        : string.Empty;
+
+    // ── Derived properties ──
+
+    public double OverallProgressPercent => TotalBytes > 0
+        ? (double)TotalBytesProcessed / TotalBytes * 100
+        : 0;
+
+    public string BytesProgressText => TotalBytes > 0
+        ? $"{FormatHelper.FormatBytes(TotalBytesProcessed)} / {FormatHelper.FormatBytes(TotalBytes)}"
+        : string.Empty;
+
+    public string FilesProgressText => TotalFilesCount > 0
+        ? $"{CompletedFilesCount:N0} / {TotalFilesCount:N0} files"
+        : string.Empty;
+
+    // ── Active file rows ──
+
+    /// <summary>
+    /// Currently active (in-flight) file rows. Files appear when started,
+    /// disappear on success, persist on failure. Thread-safe via UI thread dispatch.
+    /// </summary>
+    public ObservableCollection<ActiveFileProgressViewModel> ActiveFiles { get; } = [];
+
+    /// <summary>
+    /// Failed file rows persisted after the operation for user review.
+    /// </summary>
+    public ObservableCollection<ActiveFileProgressViewModel> FailedFiles { get; } = [];
+
+    public bool HasActiveFiles => ActiveFiles.Count > 0 || ShowSmallFileGroup;
+
+    // ── Events ──
+
+    /// <summary>Raised when the user clicks Ok on the completion summary.</summary>
+    public event EventHandler? CompletionAcknowledged;
+
+    /// <summary>Raised when the user clicks Cancel.</summary>
+    public event EventHandler? CancelRequested;
+
+    // ── Commands ──
+
+    [RelayCommand]
+    private void AcknowledgeCompletion()
+    {
+        CompletionAcknowledged?.Invoke(this, EventArgs.Empty);
+    }
+
+    [RelayCommand]
+    private void RequestCancel()
+    {
+        CancelRequested?.Invoke(this, EventArgs.Empty);
+    }
+
+    // ── Public API ──
+
+    /// <summary>
+    /// Initializes the progress tab for a new operation.
+    /// </summary>
+    public void StartOperation(string operationType, int totalFiles, long totalBytes, int smallFileCount, long smallFileTotalBytes)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            OperationType = operationType;
+            TotalFilesCount = totalFiles;
+            TotalBytes = totalBytes;
+            TotalBytesProcessed = 0;
+            CompletedFilesCount = 0;
+            PhaseDescription = string.Empty;
+            OperationSpeed = string.Empty;
+            EstimatedTimeRemaining = string.Empty;
+            ElapsedTimeText = string.Empty;
+            CompletionSummary = string.Empty;
+            IsOperationActive = true;
+            IsCompleted = false;
+            HasFailures = false;
+            SmallFilesTotal = smallFileCount;
+            SmallFilesCompleted = 0;
+            SmallFilesBytesProcessed = 0;
+            SmallFilesTotalBytes = smallFileTotalBytes;
+            ActiveFiles.Clear();
+            FailedFiles.Clear();
+
+            OnPropertyChanged(nameof(HasActiveFiles));
+            OnPropertyChanged(nameof(ShowSmallFileGroup));
+        });
+
+        _speedTracker.Start();
+    }
+
+    /// <summary>
+    /// Processes a unified progress report from any operation type.
+    /// Dispatches to the UI thread for ObservableCollection updates.
+    /// </summary>
+    public void ReportProgress(OperationProgressReport report)
+    {
+        Dispatcher.UIThread.Post(() => ApplyReport(report));
+    }
+
+    /// <summary>
+    /// Marks the operation as complete and shows the summary.
+    /// </summary>
+    public void CompleteOperation(int succeeded, int failed, int corruptedRecovery, long totalBytesTransferred)
+    {
+        _speedTracker.Stop();
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            IsOperationActive = false;
+            IsCompleted = true;
+
+            CompletionSucceeded = succeeded;
+            CompletionFailed = failed;
+            CompletionCorruptedRecovery = corruptedRecovery;
+            HasFailures = failed > 0 || corruptedRecovery > 0;
+            CompletionElapsed = _speedTracker.ElapsedText;
+            CompletionBytes = FormatHelper.FormatBytes(totalBytesTransferred);
+
+            var parts = new System.Collections.Generic.List<string> { $"{succeeded:N0} succeeded" };
+            if (corruptedRecovery > 0) parts.Add($"{corruptedRecovery} recovered to __corrupted__");
+            if (failed > 0) parts.Add($"{failed} failed");
+            CompletionSummary = $"{OperationType} complete: {string.Join(", ", parts)}";
+
+            // Persist failed AND recovered-with-loss files for review after the operation.
+            foreach (var active in ActiveFiles.ToList())
+            {
+                if (active.Status is FileOperationStatus.Failed or FileOperationStatus.Recovered)
+                {
+                    FailedFiles.Add(active);
+                }
+            }
+            ActiveFiles.Clear();
+            OnPropertyChanged(nameof(HasActiveFiles));
+        });
+    }
+
+    /// <summary>
+    /// Marks the operation as cancelled and shows a cancellation summary.
+    /// Call from catch(OperationCanceledException) blocks.
+    /// </summary>
+    public void MarkCancelled()
+    {
+        _speedTracker.Stop();
+
+        Dispatcher.UIThread.Post(() =>
+        {
+            IsOperationActive = false;
+            IsCompleted = true;
+
+            CompletionSucceeded = CompletedFilesCount;
+            CompletionFailed = 0;
+            CompletionCorruptedRecovery = 0;
+            HasFailures = false;
+            CompletionElapsed = _speedTracker.ElapsedText;
+            CompletionBytes = FormatHelper.FormatBytes(TotalBytesProcessed);
+            CompletionSummary = $"{OperationType} cancelled after {CompletedFilesCount:N0} file(s)";
+
+            ActiveFiles.Clear();
+            FailedFiles.Clear();
+            OnPropertyChanged(nameof(HasActiveFiles));
+        });
+    }
+
+    // ── Private helpers ──
+
+    private void ApplyReport(OperationProgressReport report)
+    {
+        // Update overall counters (carried on every event)
+        TotalBytesProcessed = report.TotalBytesProcessed;
+        CompletedFilesCount = report.TotalFilesCompleted;
+
+        switch (report.Type)
+        {
+            case OperationProgressType.FileStarted:
+                var newFile = new ActiveFileProgressViewModel
+                {
+                    FileIndex = report.FileIndex,
+                    FileName = report.FileName,
+                    TotalBytes = report.FileSize,
+                    BytesProcessed = 0,
+                    Status = report.FileStatus
+                };
+                ActiveFiles.Add(newFile);
+                OnPropertyChanged(nameof(HasActiveFiles));
+                break;
+
+            case OperationProgressType.FileProgress:
+                var active = FindActiveFile(report.FileIndex);
+                if (active != null)
+                {
+                    active.BytesProcessed = report.FileBytesProcessed;
+                    active.Status = report.FileStatus;
+                }
+                break;
+
+            case OperationProgressType.FileCompleted:
+                var completed = FindActiveFile(report.FileIndex);
+                if (completed != null)
+                {
+                    ActiveFiles.Remove(completed);
+                    OnPropertyChanged(nameof(HasActiveFiles));
+                }
+                break;
+
+            case OperationProgressType.FileFailed:
+                var failed = FindOrAddActiveFile(report);
+                failed.Status = FileOperationStatus.Failed;
+                failed.ErrorMessage = report.ErrorMessage ?? "Unknown error";
+                // Keep in ActiveFiles — failed files persist
+                break;
+
+            case OperationProgressType.FileRecovered:
+                var recovered = FindOrAddActiveFile(report);
+                recovered.BytesProcessed = report.FileBytesProcessed;
+                recovered.Status = FileOperationStatus.Recovered;
+                recovered.ErrorMessage = report.ErrorMessage ?? string.Empty;
+                // Keep in ActiveFiles — recovered-with-loss files persist for review
+                break;
+
+            case OperationProgressType.SmallFileGroupProgress:
+                SmallFilesCompleted = report.SmallFilesCompleted;
+                SmallFilesBytesProcessed = report.SmallFilesBytesProcessed;
+                break;
+
+            case OperationProgressType.PhaseChanged:
+                PhaseDescription = report.PhaseDescription ?? string.Empty;
+                break;
+
+            case OperationProgressType.OperationCompleted:
+                // Handled by CompleteOperation call from the command
+                break;
+        }
+
+        UpdateSpeedAndEta();
+        UpdateElapsedTime();
+    }
+
+    private ActiveFileProgressViewModel? FindActiveFile(int fileIndex)
+    {
+        for (var i = 0; i < ActiveFiles.Count; i++)
+        {
+            if (ActiveFiles[i].FileIndex == fileIndex)
+                return ActiveFiles[i];
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Returns the active row for the report's file, creating one if it does not yet exist.
+    /// Used by the terminal Failed/Recovered cases so a file that was previously aggregated
+    /// (e.g. a small file) is surfaced as its own row when it needs the user's attention.
+    /// </summary>
+    private ActiveFileProgressViewModel FindOrAddActiveFile(OperationProgressReport report)
+    {
+        var existing = FindActiveFile(report.FileIndex);
+        if (existing != null)
+            return existing;
+
+        var added = new ActiveFileProgressViewModel
+        {
+            FileIndex = report.FileIndex,
+            FileName = report.FileName,
+            TotalBytes = report.FileSize,
+            BytesProcessed = report.FileBytesProcessed
+        };
+        ActiveFiles.Add(added);
+        OnPropertyChanged(nameof(HasActiveFiles));
+        return added;
+    }
+
+    private void UpdateSpeedAndEta()
+    {
+        if (!_speedTracker.Update(TotalBytesProcessed, TotalBytes))
+            return;
+
+        OperationSpeed = _speedTracker.Speed;
+        EstimatedTimeRemaining = _speedTracker.EstimatedTimeRemaining;
+    }
+
+    private void UpdateElapsedTime()
+    {
+        ElapsedTimeText = _speedTracker.ElapsedText;
+    }
+}

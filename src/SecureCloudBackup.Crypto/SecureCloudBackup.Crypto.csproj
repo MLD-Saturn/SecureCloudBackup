@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Engine-agnostic cryptography shared by SecureCloudBackup.Core, the migration
+    helper, and the UI. Deliberately references NO SQLite bundle so it can be
+    consumed by BOTH the modern-engine (e_sqlite3) main app AND the legacy
+    SQLCipher migration helper without forcing both native engines into one
+    process (which does not work - see AGENT_CONTEXT). Operates purely on byte[].
+  -->
+  <ItemGroup>
+    <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
+    <PackageReference Include="System.IO.Hashing" Version="10.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SecureCloudBackup.Tests" />
+  </ItemGroup>
+
+</Project>

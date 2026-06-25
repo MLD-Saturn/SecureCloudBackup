@@ -116,4 +116,4 @@ secrets.json
 # B66: BenchmarkDotNet memory-fidelity per-PID samples written by
 # MemoryFidelityCollector to a compile-time path resolved via
 # [CallerFilePath]. Generated at every benchmark run; never committed.
-benchmarks/AzureBackup.Benchmarks/.fidelity-samples/
+benchmarks/SecureCloudBackup.Benchmarks/.fidelity-samples/

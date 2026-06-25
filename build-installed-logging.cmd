@@ -11,9 +11,9 @@ echo Building INSTALLED executable for Windows x64 (with diagnostic logging)...
 echo.
 
 REM Check if the exe is running
-tasklist /FI "IMAGENAME eq AzureBackup.exe" 2>NUL | find /I /N "AzureBackup.exe">NUL
+tasklist /FI "IMAGENAME eq SecureCloudBackup.exe" 2>NUL | find /I /N "SecureCloudBackup.exe">NUL
 if "%ERRORLEVEL%"=="0" (
-    echo ERROR: AzureBackup.exe is currently running.
+    echo ERROR: SecureCloudBackup.exe is currently running.
     echo Please close the application and try again.
     echo.
     pause
@@ -35,7 +35,7 @@ if exist "publish\installed" (
 )
 
 REM Build and publish with diagnostic logging enabled
-dotnet publish src\AzureBackup -c Release -r win-x64 --self-contained true -o publish\installed -p:DefineConstants=DIAGNOSTICLOG
+dotnet publish src\SecureCloudBackup -c Release -r win-x64 --self-contained true -o publish\installed -p:DefineConstants=DIAGNOSTICLOG
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
@@ -57,17 +57,17 @@ echo NOTE: This build includes diagnostic logging.
 echo       Use build-installed.cmd for production builds without logging overhead.
 echo.
 echo Installation:
-echo   Copy AzureBackup.exe to any location (e.g., C:\Program Files\AzureBackup)
+echo   Copy SecureCloudBackup.exe to any location (e.g., C:\Program Files\SecureCloudBackup)
 echo.
 echo Data storage:
 echo   Database and settings will be stored in:
-echo   %%LocalAppData%%\AzureBackup\backup.db
+echo   %%LocalAppData%%\SecureCloudBackup\backup.db
 echo.
 echo Window title will show: "Azure Backup - Encrypted Cloud Backup"
 echo.
 
 REM Show file size
-for %%A in (publish\installed\AzureBackup.exe) do (
+for %%A in (publish\installed\SecureCloudBackup.exe) do (
     set /a size=%%~zA / 1048576
     echo Executable size: approximately !size! MB
 )

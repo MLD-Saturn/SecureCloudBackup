@@ -288,12 +288,12 @@ referenced files alongside each prompt.
 > **Provide:** `throughput-{date}.jsonl`
 >
 > **Code references (already accessible):**
-> - `src/AzureBackup.Core/Services/RestoreService.cs` — `ComputeAdaptiveChunkConcurrency`, `DefaultParallelChunkDownloads`, channel capacity
-> - `src/AzureBackup.Core/Services/BackupOrchestrator.cs` — `MaxParallelChunkUploads`, `MaxParallelFileBackups`
-> - `src/AzureBackup.Core/Services/BackupOrchestrator.Operations.cs` — `BackupFilesCoreAsync` (shared by backup and mirror-to-azure)
-> - `src/AzureBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync` (shared by restore and mirror-to-local)
-> - `src/AzureBackup.Core/Services/MemoryBudget.cs` — acquire/release logic, `StallCount`
-> - `src/AzureBackup.Core/Services/ChunkingService.cs` — CDC min/avg/max chunk size parameters
+> - `src/SecureCloudBackup.Core/Services/RestoreService.cs` — `ComputeAdaptiveChunkConcurrency`, `DefaultParallelChunkDownloads`, channel capacity
+> - `src/SecureCloudBackup.Core/Services/BackupOrchestrator.cs` — `MaxParallelChunkUploads`, `MaxParallelFileBackups`
+> - `src/SecureCloudBackup.Core/Services/BackupOrchestrator.Operations.cs` — `BackupFilesCoreAsync` (shared by backup and mirror-to-azure)
+> - `src/SecureCloudBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync` (shared by restore and mirror-to-local)
+> - `src/SecureCloudBackup.Core/Services/MemoryBudget.cs` — acquire/release logic, `StallCount`
+> - `src/SecureCloudBackup.Core/Services/ChunkingService.cs` — CDC min/avg/max chunk size parameters
 
 ### Prompt 2: Corruption Root-Cause Analysis
 
@@ -319,11 +319,11 @@ referenced files alongside each prompt.
 > - Optionally: the corresponding `.diag` files for human-readable context
 >
 > **Code references (already accessible):**
-> - `src/AzureBackup.Core/Services/EncryptionService.cs` — `Encrypt`, `DecryptInto`, `DecryptBestEffort`, `ValidateCrc`, envelope format
-> - `src/AzureBackup.Core/Services/AzureBlobService.Download.cs` — `DownloadChunkStreamingAsync`, `DownloadChunkBestEffortAsync`
-> - `src/AzureBackup.Core/Services/RestoreService.cs` — `RestoreWithBoundedParallelDownloadsAsync`, `VerifyChunkIntegrity`
-> - `src/AzureBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`, `AttemptCorruptedRecoveryAsync`
-> - `src/AzureBackup.Core/Services/MemoryBudget.cs` — `StallCount`, acquire slow-path
+> - `src/SecureCloudBackup.Core/Services/EncryptionService.cs` — `Encrypt`, `DecryptInto`, `DecryptBestEffort`, `ValidateCrc`, envelope format
+> - `src/SecureCloudBackup.Core/Services/AzureBlobService.Download.cs` — `DownloadChunkStreamingAsync`, `DownloadChunkBestEffortAsync`
+> - `src/SecureCloudBackup.Core/Services/RestoreService.cs` — `RestoreWithBoundedParallelDownloadsAsync`, `VerifyChunkIntegrity`
+> - `src/SecureCloudBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`, `AttemptCorruptedRecoveryAsync`
+> - `src/SecureCloudBackup.Core/Services/MemoryBudget.cs` — `StallCount`, acquire slow-path
 
 ### Prompt 3: CDC Deduplication Tuning
 
@@ -340,7 +340,7 @@ referenced files alongside each prompt.
 > **Provide:** `throughput-{date}.jsonl`
 >
 > **Code references (already accessible):**
-> - `src/AzureBackup.Core/Services/ChunkingService.cs` — CDC parameters, `ChunkAndStreamChangedAsync`
+> - `src/SecureCloudBackup.Core/Services/ChunkingService.cs` — CDC parameters, `ChunkAndStreamChangedAsync`
 
 ### Prompt 4: Memory Budget Tuning
 
@@ -363,9 +363,9 @@ referenced files alongside each prompt.
 > setting: 512 MB / 4 GB / unlimited)
 >
 > **Code references (already accessible):**
-> - `src/AzureBackup.Core/Services/MemoryBudget.cs` — `StallCount`, `IsUnlimited`, acquire/release
-> - `src/AzureBackup.Core/Services/RestoreService.cs` — `ComputeAdaptiveChunkConcurrency`
-> - `src/AzureBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`
+> - `src/SecureCloudBackup.Core/Services/MemoryBudget.cs` — `StallCount`, `IsUnlimited`, acquire/release
+> - `src/SecureCloudBackup.Core/Services/RestoreService.cs` — `ComputeAdaptiveChunkConcurrency`
+> - `src/SecureCloudBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`
 
 ### Prompt 5: Mirror Parity Verification
 
@@ -388,5 +388,5 @@ referenced files alongside each prompt.
 > mirror-to-azure / restore / mirror-to-local)
 >
 > **Code references (already accessible):**
-> - `src/AzureBackup.Core/Services/BackupOrchestrator.Operations.cs` — `BackupFilesCoreAsync`, `MirrorSyncToAzureAsync`
-> - `src/AzureBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`, `MirrorSyncToLocalAsync`
+> - `src/SecureCloudBackup.Core/Services/BackupOrchestrator.Operations.cs` — `BackupFilesCoreAsync`, `MirrorSyncToAzureAsync`
+> - `src/SecureCloudBackup.Core/Services/RestoreService.Batch.cs` — `RestoreFilesBatchCoreAsync`, `MirrorSyncToLocalAsync`

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>securecloudbackup-migrate</AssemblyName>
+    <RootNamespace>SecureCloudBackup.Migration</RootNamespace>
+  </PropertyGroup>
+
+  <!--
+    One-time legacy-database migration helper. Runs as a SEPARATE PROCESS so it
+    can load the legacy SQLCipher native engine WITHOUT the modern e_sqlite3
+    engine in the same process (the two cannot coexist - see AGENT_CONTEXT facts
+    61/62). It references ONLY the SQLCipher bundle and the engine-agnostic
+    SecureCloudBackup.Crypto (NOT SecureCloudBackup.Core, which references the modern bundle).
+    The main app launches this exe automatically at unlock when it detects a
+    legacy SQLCipher catalog; the user never runs it manually.
+  -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.6" />
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlcipher" Version="2.1.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SecureCloudBackup.Crypto\SecureCloudBackup.Crypto.csproj" />
+    <ProjectReference Include="..\SecureCloudBackup.SqliteInterop\SecureCloudBackup.SqliteInterop.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SecureCloudBackup.Tests" />
+  </ItemGroup>
+
+</Project>
