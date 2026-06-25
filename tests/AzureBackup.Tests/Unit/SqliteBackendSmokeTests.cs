@@ -48,33 +48,6 @@ public class SqliteBackendSmokeTests : IDisposable
         try { Directory.Delete(_testDir, recursive: true); } catch { /* best effort */ }
     }
 
-    [Fact(Skip = "SQLCipher-specific: AzureBackup.Core now uses the modern e_sqlite3 engine via InMemorySnapshotBackend, which has NO .salt sidecar (the salt is embedded in the AZDB envelope). Schema-creation coverage for the snapshot backend lives in InMemorySnapshotBackendTests and the rebased SqliteBackend* CRUD tests. W-DB-enc Step 7.")]
-    public void Initialize_NewDatabase_CreatesSchemaAndSaltFile()
-    {
-        // Arrange
-        using var backend = new InMemorySnapshotBackend();
-        const string password = "SmokeTestPassword123!";
-
-        // Act
-        backend.Initialize(_dbPath, password.AsSpan());
-
-        // Assert
-        Assert.True(backend.IsInitialized);
-        Assert.Equal(_dbPath, backend.DatabasePath);
-        Assert.True(File.Exists(_dbPath), "Database file should exist on disk");
-        Assert.True(File.Exists(_dbPath + ".salt"), "Salt file should be created next to the database");
-
-        // SQLite version is reachable -> connection is alive and decrypted.
-        var version = backend.ReadSqliteVersion();
-        Assert.False(string.IsNullOrEmpty(version), "Should be able to read sqlite_version()");
-
-        // Schema was created. We expect every table from CreateSchema().
-        // 10 base tables + 2 added by D1 (integrity_check_runs,
-        // integrity_check_failures) = 12.
-        var tableCount = backend.CountSchemaTables();
-        Assert.Equal(12, tableCount);
-    }
-
     [Fact]
     public void Initialize_ReopenWithSamePassword_Succeeds()
     {
@@ -95,23 +68,6 @@ public class SqliteBackendSmokeTests : IDisposable
         // Assert: schema persisted, no exception, connection works.
         Assert.True(second.IsInitialized);
         Assert.Equal(12, second.CountSchemaTables());
-    }
-
-    [Fact(Skip = "SQLCipher-specific and now inverted: AzureBackup.Core references bundle_e_sqlite3 (CVE-2025-6965 fix), so PRAGMA cipher_version is intentionally empty. SQLCipher is exercised only inside the azurebackup-migrate helper's own single-engine process. W-DB-enc Step 7.")]
-    public void Initialize_NewDatabase_LoadedNativeIsSqlcipher()
-    {
-        // Critical guard: if the wrong native bundle ships, encryption is
-        // silently a no-op and the wrong-password test below would pass
-        // for the wrong reason. PRAGMA cipher_version returns null on a
-        // plain SQLite build and the SQLCipher version string on a
-        // SQLCipher build.
-        using var backend = new InMemorySnapshotBackend();
-        backend.Initialize(_dbPath, "ProveSqlcipherIsLoaded".AsSpan());
-
-        var version = backend.ReadSqlcipherVersion();
-        Assert.False(string.IsNullOrEmpty(version),
-            "PRAGMA cipher_version returned empty - the loaded native library is plain SQLite, not SQLCipher. " +
-            "Encryption would silently be a no-op. Check that SQLitePCLRaw.bundle_e_sqlcipher is referenced.");
     }
 
     [Fact(Skip = "SQLCipher-specific diagnostic (different passwords produce different SQLCipher on-disk bytes). Not meaningful for the AES-256-GCM snapshot format; the snapshot backend's wrong-password behavior is covered by InMemorySnapshotBackendTests.Reopen_WithWrongPassword_Throws. W-DB-enc Step 7.")]
