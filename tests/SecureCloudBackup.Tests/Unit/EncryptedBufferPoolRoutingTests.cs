@@ -12,7 +12,7 @@ namespace SecureCloudBackup.Tests;
 /// <see cref="AzureBlobService.ReturnEncryptedBuffer"/> is pinned at the
 /// helper level so it can be exercised without an Azure connection; the
 /// in-memory blob service's parameter-only support is pinned end-to-end
-/// to prove the new <see cref="IBlobStorageService"/> overloads round-trip
+/// to prove the new <see cref="IObjectStorageService"/> overloads round-trip
 /// data unchanged.
 /// </summary>
 public sealed class EncryptedBufferPoolRoutingTests
@@ -103,12 +103,12 @@ public sealed class EncryptedBufferPoolRoutingTests
         new Random(42).NextBytes(payload);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload));
 
-        var blobName = await blob.UploadChunkAsync(payload, hash, pool, StorageTier.Hot);
-        Assert.Equal($"chunks/{hash}", blobName);
+        var objectKey = await blob.UploadChunkAsync(payload, hash, pool, StorageTier.Hot);
+        Assert.Equal($"chunks/{hash}", objectKey);
 
         // Round-trip via the new 3-pool download overload, also passing the pool.
         var (decrypted, length) = await blob.DownloadChunkStreamingAsync(
-            blobName, plaintextBufferPool: pool, encryptedBufferPool: pool);
+            objectKey, plaintextBufferPool: pool, encryptedBufferPool: pool);
         try
         {
             Assert.Equal(payload.Length, length);
@@ -137,10 +137,10 @@ public sealed class EncryptedBufferPoolRoutingTests
         new Random(7).NextBytes(payload);
         var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(payload));
 
-        var blobName = await blob.UploadChunkDirectAsync(payload, hash, pool, StorageTier.Hot);
-        Assert.Equal($"chunks/{hash}", blobName);
+        var objectKey = await blob.UploadChunkDirectAsync(payload, hash, pool, StorageTier.Hot);
+        Assert.Equal($"chunks/{hash}", objectKey);
 
-        var roundTripped = await blob.DownloadChunkAsync(blobName);
+        var roundTripped = await blob.DownloadChunkAsync(objectKey);
         Assert.Equal(payload.Length, roundTripped.Length);
         Assert.True(payload.AsSpan().SequenceEqual(roundTripped));
     }

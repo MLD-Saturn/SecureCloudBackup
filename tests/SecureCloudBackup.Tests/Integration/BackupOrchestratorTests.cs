@@ -38,7 +38,7 @@ public class BackupOrchestratorTests : IAsyncLifetime
         _databaseService.Initialize(_dbPath, TestPassword);
         _fileWatcherService = new FileWatcherService(_databaseService);
         
-        // Create orchestrator with IBlobStorageService (InMemoryBlobService implements this)
+        // Create orchestrator with IObjectStorageService (InMemoryBlobService implements this)
         _orchestrator = new BackupOrchestrator(
             _databaseService,
             _encryptionService,

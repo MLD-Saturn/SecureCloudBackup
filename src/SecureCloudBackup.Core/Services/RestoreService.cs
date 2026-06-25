@@ -14,7 +14,7 @@ namespace SecureCloudBackup.Core.Services;
 public partial class RestoreService
 {
     private readonly LocalDatabaseService _databaseService;
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly EncryptionService _encryptionService;
     
     // Parallel download settings - increased for better bandwidth utilization
@@ -176,7 +176,7 @@ public partial class RestoreService
 
     public RestoreService(
         LocalDatabaseService databaseService,
-        IBlobStorageService blobService,
+        IObjectStorageService blobService,
         EncryptionService encryptionService)
     {
         ArgumentNullException.ThrowIfNull(databaseService);

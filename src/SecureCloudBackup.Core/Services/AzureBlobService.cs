@@ -20,7 +20,7 @@ namespace SecureCloudBackup.Core.Services;
 /// Uploads encrypted chunks to Cool tier for cost optimization.
 /// Uses parallel transfers to maximize bandwidth utilization.
 /// </summary>
-public partial class AzureBlobService : IBlobStorageService
+public partial class AzureBlobService : IObjectStorageService
 {
     private BlobServiceClient? _serviceClient;
     private BlobContainerClient? _containerClient;
@@ -276,7 +276,7 @@ public partial class AzureBlobService : IBlobStorageService
     /// </summary>
     public long TotalCrcRetries => Interlocked.Read(ref _totalCrcRetries);
 
-    /// <summary>D6: see <see cref="IBlobStorageService.OnChunkUploaded"/>.</summary>
+    /// <summary>D6: see <see cref="IObjectStorageService.OnChunkUploaded"/>.</summary>
     public Action<string, byte[]>? OnChunkUploaded { get; set; }
     
     /// <summary>
@@ -315,14 +315,14 @@ public partial class AzureBlobService : IBlobStorageService
     /// Initializes connection to Azure Blob Storage using a connection string.
     /// Use this for personal Microsoft accounts.
     /// </summary>
-    public async Task ConnectAsync(string connectionString, string containerName)
+    public async Task ConnectAsync(string connectionString, string bucketName)
     {
-        Log($"ConnectAsync: Connecting with connection string to container '{containerName}'");
+        Log($"ConnectAsync: Connecting with connection string to container '{bucketName}'");
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
         _serviceClient = new BlobServiceClient(connectionString, CreateClientOptions());
-        _containerClient = _serviceClient.GetBlobContainerClient(containerName);
+        _containerClient = _serviceClient.GetBlobContainerClient(bucketName);
 
         // Create container if it doesn't exist
         await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
@@ -332,16 +332,16 @@ public partial class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Tests the connection to Azure Blob Storage using a connection string.
     /// </summary>
-    public async Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName)
+    public async Task<(bool success, string message)> TestConnectionAsync(string connectionString, string bucketName)
     {
-        Log($"TestConnectionAsync: Testing connection string to container '{containerName}'");
+        Log($"TestConnectionAsync: Testing connection string to container '{bucketName}'");
         try
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-            ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+            ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
             
             BlobServiceClient testClient = new(connectionString, CreateClientOptions());
-            var testContainer = testClient.GetBlobContainerClient(containerName);
+            var testContainer = testClient.GetBlobContainerClient(bucketName);
             
             // Try to get container properties or create it
             await testContainer.CreateIfNotExistsAsync(PublicAccessType.None);
@@ -375,15 +375,15 @@ public partial class AzureBlobService : IBlobStorageService
     /// Initializes connection to Azure Blob Storage using a token credential
     /// (e.g. an interactive Entra ID sign-in). Use this for organizational/work accounts.
     /// </summary>
-    public async Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
+    public async Task ConnectWithTokenAsync(Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider)
     {
-        Log($"ConnectWithTokenAsync: Connecting with a token credential to {serviceUri}, container '{containerName}'");
+        Log($"ConnectWithTokenAsync: Connecting with a token credential to {serviceUri}, container '{bucketName}'");
         ArgumentNullException.ThrowIfNull(serviceUri);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         ArgumentNullException.ThrowIfNull(tokenProvider);
 
         _serviceClient = new BlobServiceClient(serviceUri, ToTokenCredential(tokenProvider), CreateClientOptions());
-        _containerClient = _serviceClient.GetBlobContainerClient(containerName);
+        _containerClient = _serviceClient.GetBlobContainerClient(bucketName);
 
         // Create container if it doesn't exist
         await _containerClient.CreateIfNotExistsAsync(PublicAccessType.None);
@@ -394,17 +394,17 @@ public partial class AzureBlobService : IBlobStorageService
     /// Tests the connection to Azure Blob Storage using a token credential.
     /// </summary>
     public async Task<(bool success, string message)> TestConnectionWithTokenAsync(
-        Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
+        Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider)
     {
-        Log($"TestConnectionWithTokenAsync: Testing token credential to {serviceUri}, container '{containerName}'");
+        Log($"TestConnectionWithTokenAsync: Testing token credential to {serviceUri}, container '{bucketName}'");
         try
         {
             ArgumentNullException.ThrowIfNull(serviceUri);
-            ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+            ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
             ArgumentNullException.ThrowIfNull(tokenProvider);
 
             BlobServiceClient testClient = new(serviceUri, ToTokenCredential(tokenProvider), CreateClientOptions());
-            var testContainer = testClient.GetBlobContainerClient(containerName);
+            var testContainer = testClient.GetBlobContainerClient(bucketName);
 
             // Try to get container properties or create it
             await testContainer.CreateIfNotExistsAsync(PublicAccessType.None);
@@ -564,8 +564,8 @@ public partial class AzureBlobService : IBlobStorageService
             var encryptedLength = EncryptAndDiagnose(chunkData.Span, rentedBuffer, chunkHash, "UploadChunkAsync");
 
             // Use hash as blob name (content-addressable storage)
-            var blobName = $"chunks/{chunkHash}";
-            var blobClient = _containerClient!.GetBlobClient(blobName);
+            var objectKey = $"chunks/{chunkHash}";
+            var blobClient = _containerClient!.GetBlobClient(objectKey);
 
             // Check if chunk already exists (deduplication)
             if (await blobClient.ExistsAsync(cancellationToken))
@@ -592,7 +592,7 @@ public partial class AzureBlobService : IBlobStorageService
                     // Chunk verified � safe to deduplicate
                     Log($"UploadChunkAsync: Chunk already exists (dedup verified), skipping upload");
                     progress?.Report(encryptedLength);
-                    return blobName;
+                    return objectKey;
                 }
 
                 // Hash collision on the primary blob. Before writing a new collision version,
@@ -608,15 +608,15 @@ public partial class AzureBlobService : IBlobStorageService
                     return dedupedBlobName;
                 }
 
-                blobName = dedupedBlobName;
-                blobClient = _containerClient!.GetBlobClient(blobName);
-                Log($"UploadChunkAsync: Using new collision blob name: {blobName}");
+                objectKey = dedupedBlobName;
+                blobClient = _containerClient!.GetBlobClient(objectKey);
+                Log($"UploadChunkAsync: Using new collision blob name: {objectKey}");
             }
 
             await UploadEncryptedChunkAsync(blobClient, rentedBuffer, encryptedLength,
                 chunkData, chunkHash, storageTier, progress, "UploadChunkAsync", cancellationToken);
 
-            return blobName;
+            return objectKey;
         }
         finally
         {
@@ -654,13 +654,13 @@ public partial class AzureBlobService : IBlobStorageService
         {
             var encryptedLength = EncryptAndDiagnose(chunkData.Span, rentedBuffer, chunkHash, "UploadChunkDirectAsync");
 
-            var blobName = $"chunks/{chunkHash}";
-            var blobClient = _containerClient!.GetBlobClient(blobName);
+            var objectKey = $"chunks/{chunkHash}";
+            var blobClient = _containerClient!.GetBlobClient(objectKey);
 
             await UploadEncryptedChunkAsync(blobClient, rentedBuffer, encryptedLength,
                 chunkData, chunkHash, storageTier, progress, "UploadChunkDirectAsync", cancellationToken);
 
-            return blobName;
+            return objectKey;
         }
         finally
         {
@@ -671,7 +671,7 @@ public partial class AzureBlobService : IBlobStorageService
 
     /// <summary>
     /// Force-overwrites an existing chunk blob with a freshly re-encrypted envelope.
-    /// See <see cref="IBlobStorageService.RepairChunkAsync"/> for the self-heal contract.
+    /// See <see cref="IObjectStorageService.RepairChunkAsync"/> for the self-heal contract.
     /// Preserves the chunk's current storage tier; skips Archive-tier blobs (which cannot
     /// be overwritten without rehydration). Records every step into the ambient
     /// <see cref="FileOperationDiagnostics"/> so the recovery's .diag file captures the repair.
@@ -682,8 +682,8 @@ public partial class AzureBlobService : IBlobStorageService
         EnsureConnected();
         BlobNameValidator.ValidateChunkHash(chunkHash);
 
-        var blobName = $"chunks/{chunkHash}";
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var objectKey = $"chunks/{chunkHash}";
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         var shortHash = chunkHash[..Math.Min(12, chunkHash.Length)];
 
         // Read the existing tier so the repaired blob lands on the same tier.
@@ -705,7 +705,7 @@ public partial class AzureBlobService : IBlobStorageService
         }
         catch (Exception ex)
         {
-            Log($"RepairChunkAsync: Could not read properties for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            Log($"RepairChunkAsync: Could not read properties for {objectKey}: {ex.GetType().Name}: {ex.Message}");
             FileOperationDiagnostics.RecordAmbient(
                 $"[REPAIR] FAILED hash={shortHash}... reason=GetProperties: {ex.GetType().Name}: {ex.Message}");
             return ChunkRepairOutcome.Failed;
@@ -781,9 +781,9 @@ public partial class AzureBlobService : IBlobStorageService
         // This prevents an attacker with storage access from confirming file paths
         // via dictionary attack (plain SHA-256 of a path is guessable).
         var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
-        var blobName = $"metadata/{metadataHash}";
+        var objectKey = $"metadata/{metadataHash}";
         
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
 
         BlobUploadOptions options = new()
         {
@@ -801,13 +801,13 @@ public partial class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Deletes a blob (used for cleanup).
     /// </summary>
-    public async Task DeleteBlobAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task DeleteObjectAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
         
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         await blobClient.DeleteIfExistsAsync(cancellationToken: cancellationToken);
         TotalOperations++;
     }
@@ -817,14 +817,14 @@ public partial class AzureBlobService : IBlobStorageService
     /// Callers MUST encrypt data before calling this method to maintain zero-knowledge.
     /// Currently only used by ChunkIndexService which encrypts before calling.
     /// </summary>
-    public async Task UploadBlobAsync(string blobName, byte[] data, StorageTier storageTier = StorageTier.Hot,
+    public async Task UploadObjectAsync(string objectKey, byte[] data, StorageTier storageTier = StorageTier.Hot,
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
         ArgumentNullException.ThrowIfNull(data);
         
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
 
         BlobUploadOptions options = new()
         {
@@ -836,12 +836,12 @@ public partial class AzureBlobService : IBlobStorageService
         };
 
         await UploadWithIntegrityRetryAsync(blobClient, data, data.Length, options,
-            $"UploadBlobAsync({blobName})",
+            $"UploadObjectAsync({objectKey})",
             reEncrypt: null,
             cancellationToken);
 
         TotalOperations++;
-        Log($"UploadBlobAsync: Uploaded {blobName} ({data.Length} bytes, MD5 verified)");
+        Log($"UploadObjectAsync: Uploaded {objectKey} ({data.Length} bytes, MD5 verified)");
     }
 
     /// <summary>
@@ -849,12 +849,12 @@ public partial class AzureBlobService : IBlobStorageService
     /// Callers MUST decrypt data after calling this method.
     /// Currently only used by ChunkIndexService which decrypts after calling.
     /// </summary>
-    public async Task<byte[]> DownloadBlobAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<byte[]> DownloadObjectAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
 
         var response = await blobClient.DownloadContentAsync(cancellationToken);
 
@@ -865,13 +865,13 @@ public partial class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Gets the properties of a blob including its storage tier and size.
     /// </summary>
-    public async Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(
-        string blobName, CancellationToken cancellationToken = default)
+    public async Task<(long sizeBytes, StorageTier tier)> GetObjectPropertiesAsync(
+        string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         var properties = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
         
         TotalOperations++;
@@ -890,16 +890,16 @@ public partial class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Sets the storage tier for a blob.
     /// </summary>
-    public async Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default)
+    public async Task SetObjectTierAsync(string objectKey, StorageTier tier, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         await blobClient.SetAccessTierAsync(ToAccessTier(tier), cancellationToken: cancellationToken);
         
         TotalOperations++;
-        Log($"SetBlobTierAsync: Set {blobName} to {tier} tier");
+        Log($"SetObjectTierAsync: Set {objectKey} to {tier} tier");
     }
 
     /// <summary>
@@ -912,7 +912,7 @@ public partial class AzureBlobService : IBlobStorageService
     /// <summary>
     /// Lists all chunk blobs in the container.
     /// </summary>
-    public async Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default)
+    public async Task<List<string>> ListChunkKeysAsync(CancellationToken cancellationToken = default)
     {
         EnsureConnected();
 
@@ -940,7 +940,7 @@ public partial class AzureBlobService : IBlobStorageService
     /// Azure's GetBlobsAsync returns ContentLength and AccessTier in the listing response,
     /// eliminating the need for individual GetProperties calls.
     /// </summary>
-    public async Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+    public async Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkKeysWithPropertiesAsync(
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
@@ -953,7 +953,7 @@ public partial class AzureBlobService : IBlobStorageService
         {
             foreach (var blob in page.Values)
             {
-                // Indexed slice � see ListChunkBlobsAsync for rationale.
+                // Indexed slice � see ListChunkKeysAsync for rationale.
                 var hash = blob.Name["chunks/".Length..];
                 var tier = blob.Properties.AccessTier?.ToString() switch
                 {
@@ -967,19 +967,19 @@ public partial class AzureBlobService : IBlobStorageService
         }
 
         TotalOperations++;
-        Log($"ListChunkBlobsWithPropertiesAsync: Listed {result.Count} chunks with properties");
+        Log($"ListChunkKeysWithPropertiesAsync: Listed {result.Count} chunks with properties");
         return result;
     }
 
     /// <summary>
     /// Checks if a blob exists without downloading it.
     /// </summary>
-    public async Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<bool> ObjectExistsAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         var exists = await blobClient.ExistsAsync(cancellationToken);
         
         TotalOperations++;
@@ -996,12 +996,12 @@ public partial class AzureBlobService : IBlobStorageService
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
 
-        var blobName = $"chunks/{chunkHash}";
+        var objectKey = $"chunks/{chunkHash}";
 
         try
         {
             // Download and decrypt the stored chunk
-            var storedData = await DownloadChunkAsync(blobName, cancellationToken);
+            var storedData = await DownloadChunkAsync(objectKey, cancellationToken);
 
             // Compare sizes first (fast rejection)
             if (storedData.Length != expectedData.Length)
@@ -1051,7 +1051,7 @@ public partial class AzureBlobService : IBlobStorageService
     /// linear probe can dominate upload latency.
     /// </para>
     /// </summary>
-    /// <returns>A tuple of (blobName, isNewCollision). When isNewCollision is false,
+    /// <returns>A tuple of (objectKey, isNewCollision). When isNewCollision is false,
     /// the blob already exists and the caller should skip the upload.</returns>
     private async Task<(string BlobName, bool IsNewCollision)> ResolveCollisionBlobNameAsync(
         string chunkHash,
@@ -1079,13 +1079,13 @@ public partial class AzureBlobService : IBlobStorageService
 
         // Verify each existing version against our data, in ascending order.
         // If any match, dedup. If none match, pick the smallest unused suffix (>=2).
-        foreach (var (_, blobName) in existingVersions)
+        foreach (var (_, objectKey) in existingVersions)
         {
             try
             {
-                await VerifyChunkIntegrityAsync(blobName["chunks/".Length..], chunkData, cancellationToken);
-                Log($"ResolveCollisionBlobNameAsync: Existing {blobName} matches, deduping");
-                return (blobName, IsNewCollision: false);
+                await VerifyChunkIntegrityAsync(objectKey["chunks/".Length..], chunkData, cancellationToken);
+                Log($"ResolveCollisionBlobNameAsync: Existing {objectKey} matches, deduping");
+                return (objectKey, IsNewCollision: false);
             }
             catch (HashCollisionException)
             {
@@ -1422,7 +1422,7 @@ public partial class AzureBlobService : IBlobStorageService
     private bool VerifyDownloadIntegrity(
         ReadOnlySpan<byte> encryptedData,
         byte[]? storedContentHash,
-        string blobName,
+        string objectKey,
         string chunkHash,
         string caller)
     {
@@ -1435,12 +1435,12 @@ public partial class AzureBlobService : IBlobStorageService
                 FileOperationDiagnostics.RecordChunkAmbient("MD5Fail", chunkHash,
                     0, encryptedData.Length, md5Valid: false,
                     extra: $"expected={Convert.ToHexString(storedContentHash)}, got={Convert.ToHexString(downloadedHash)}");
-                Log($"{caller}: MD5 MISMATCH for {blobName}");
+                Log($"{caller}: MD5 MISMATCH for {objectKey}");
                 // DownloadIntegrityException (not the base DataIntegrityException) so the
                 // restore pipeline recognises this as a re-downloadable, transient transfer
                 // corruption and retries the chunk before falling back to recovery.
                 throw new DownloadIntegrityException(
-                    $"Download integrity check failed for {blobName} - data corrupted during transfer", blobName);
+                    $"Download integrity check failed for {objectKey} - data corrupted during transfer", objectKey);
             }
         }
 
@@ -1465,7 +1465,7 @@ public partial class AzureBlobService : IBlobStorageService
             FileOperationDiagnostics.RecordAmbient(
                 $"[CRC FAIL] {caller}: {diag}, envVer={envVer}, head17={headHex}, tail20={tailHex}");
             Log($"DIAGNOSTIC: {caller}: CRC INVALID before decrypt! " +
-                $"blob={blobName}, chunk={chunkHash[..Math.Min(16, chunkHash.Length)]}, size={encryptedData.Length}, " +
+                $"blob={objectKey}, chunk={chunkHash[..Math.Min(16, chunkHash.Length)]}, size={encryptedData.Length}, " +
                 $"md5Verified={storedContentHash is { Length: > 0 }}, envVer={envVer}, " +
                 $"head17={headHex}, tail20={tailHex}, {diag}");
         }

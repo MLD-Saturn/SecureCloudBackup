@@ -157,7 +157,7 @@ public sealed class RestoreServiceChunkBufferPoolTests : IAsyncLifetime
         }
     }
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);

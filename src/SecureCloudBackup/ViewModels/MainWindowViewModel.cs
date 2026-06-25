@@ -21,7 +21,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     private readonly LocalDatabaseService _databaseService;
     private readonly EncryptionService _encryptionService;
     private readonly ChunkingService _chunkingService;
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly FileWatcherService _fileWatcherService;
     private readonly BackupOrchestrator _orchestrator;
     private readonly RestoreService _restoreService;

@@ -10,7 +10,7 @@ namespace SecureCloudBackup.Core.Services;
 public partial class ChunkIndexService
 {
     private readonly LocalDatabaseService _databaseService;
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly EncryptionService _encryptionService;
     
     private const string IndexBackupBlobName = "index/chunk-index-backup.enc";
@@ -47,7 +47,7 @@ public partial class ChunkIndexService
         DiagnosticLog?.Invoke(this, $"[{timestamp}] [ChunkIndex] WARNING: {message}");
     }
 
-    public ChunkIndexService(LocalDatabaseService databaseService, IBlobStorageService blobService, EncryptionService encryptionService)
+    public ChunkIndexService(LocalDatabaseService databaseService, IObjectStorageService blobService, EncryptionService encryptionService)
     {
         ArgumentNullException.ThrowIfNull(databaseService);
         ArgumentNullException.ThrowIfNull(blobService);
@@ -168,7 +168,7 @@ public partial class ChunkIndexService
                 Log($"Chunk {entry.ChunkHash[..8]}... has no references, deleting from Azure...");
                 try
                 {
-                    await _blobService.DeleteBlobAsync($"chunks/{entry.ChunkHash}", cancellationToken);
+                    await _blobService.DeleteObjectAsync($"chunks/{entry.ChunkHash}", cancellationToken);
                     _databaseService.DeleteChunkIndexEntry(entry.ChunkHash);
                     // Defensive: ensure no stragglers in the reverse index
                     // for this chunk (e.g. if the graph was inconsistent
@@ -241,7 +241,7 @@ public partial class ChunkIndexService
                 // Delete immediately
                 try
                 {
-                    await _blobService.DeleteBlobAsync($"chunks/{hash}", cancellationToken);
+                    await _blobService.DeleteObjectAsync($"chunks/{hash}", cancellationToken);
                     _databaseService.DeleteChunkIndexEntry(hash);
                     _databaseService.DeleteChunkFileRefsForChunk(hash);
                     Log($"Deleted orphaned chunk {hash[..8]}... (removed from modified file)");
@@ -439,7 +439,7 @@ public partial class ChunkIndexService
                         return;
                     }
 
-                    await _blobService.DeleteBlobAsync($"chunks/{orphan.ChunkHash}", ct);
+                    await _blobService.DeleteObjectAsync($"chunks/{orphan.ChunkHash}", ct);
                     _databaseService.DeleteChunkIndexEntry(orphan.ChunkHash);
 
                     lock (resultLock)

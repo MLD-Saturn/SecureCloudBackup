@@ -50,11 +50,11 @@ public partial class BackupOrchestrator
     /// Tests the connection to Azure storage using the current Entra ID credential.
     /// </summary>
     public async Task<(bool success, string message)> TestAzureConnectionAsync(
-        string storageAccountName, string containerName)
+        string storageAccountName, string bucketName)
     {
-        Log($"TestAzureConnectionAsync: Testing Entra ID connection to {storageAccountName}/{containerName}");
+        Log($"TestAzureConnectionAsync: Testing Entra ID connection to {storageAccountName}/{bucketName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
         if (_tokenProvider == null)
         {
@@ -63,7 +63,7 @@ public partial class BackupOrchestrator
         }
 
         Uri blobServiceUri = new($"https://{storageAccountName}.blob.core.windows.net");
-        var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, containerName, _tokenProvider);
+        var result = await _blobService.TestConnectionWithTokenAsync(blobServiceUri, bucketName, _tokenProvider);
         Log($"TestAzureConnectionAsync: Result success={result.success}");
         return result;
     }
@@ -71,18 +71,18 @@ public partial class BackupOrchestrator
     /// <summary>
     /// Saves the Azure storage account configuration (uses Entra ID, no connection string needed).
     /// </summary>
-    public async Task SaveStorageAccountAsync(string storageAccountName, string containerName)
+    public async Task SaveStorageAccountAsync(string storageAccountName, string bucketName)
     {
-        Log($"SaveStorageAccountAsync: Saving Entra ID config for {storageAccountName}/{containerName}");
+        Log($"SaveStorageAccountAsync: Saving Entra ID config for {storageAccountName}/{bucketName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(storageAccountName);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
         if (_tokenProvider == null)
             throw new InvalidOperationException("Must authenticate with Entra ID first.");
         
         var config = _databaseService.GetConfiguration();
         config.StorageAccountName = storageAccountName;
-        config.ContainerName = containerName;
+        config.ContainerName = bucketName;
         config.IsEntraIdAuthenticated = true;
         config.AuthMethod = AzureAuthMethod.EntraId;
         _databaseService.SaveConfiguration(config);
@@ -91,7 +91,7 @@ public partial class BackupOrchestrator
         // Connect immediately
         await _blobService.ConnectWithTokenAsync(
             config.BlobServiceUri!, 
-            containerName, 
+            bucketName, 
             _tokenProvider);
         Log("SaveStorageAccountAsync: Connected to Azure storage");
     }
@@ -106,13 +106,13 @@ public partial class BackupOrchestrator
     /// Use this for personal Microsoft accounts.
     /// </summary>
     public async Task<(bool success, string message)> TestConnectionStringAsync(
-        string connectionString, string containerName)
+        string connectionString, string bucketName)
     {
-        Log($"TestConnectionStringAsync: Testing connection string to container {containerName}");
+        Log($"TestConnectionStringAsync: Testing connection string to container {bucketName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
-        var result = await _blobService.TestConnectionAsync(connectionString, containerName);
+        var result = await _blobService.TestConnectionAsync(connectionString, bucketName);
         Log($"TestConnectionStringAsync: Result success={result.success}");
         return result;
     }
@@ -121,11 +121,11 @@ public partial class BackupOrchestrator
     /// Saves and connects using a connection string (encrypts it before storing).
     /// Use this for personal Microsoft accounts.
     /// </summary>
-    public async Task SaveConnectionStringAsync(string connectionString, string containerName)
+    public async Task SaveConnectionStringAsync(string connectionString, string bucketName)
     {
-        Log($"SaveConnectionStringAsync: Saving connection string config for container {containerName}");
+        Log($"SaveConnectionStringAsync: Saving connection string config for container {bucketName}");
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
 
         if (!_encryptionService.IsInitialized)
             throw new InvalidOperationException("Encryption service must be initialized before saving connection string.");
@@ -149,14 +149,14 @@ public partial class BackupOrchestrator
 
         var config = _databaseService.GetConfiguration();
         config.EncryptedConnectionString = encrypted;
-        config.ContainerName = containerName;
+        config.ContainerName = bucketName;
         config.AuthMethod = AzureAuthMethod.ConnectionString;
         config.IsEntraIdAuthenticated = false;
         _databaseService.SaveConfiguration(config);
         Log("SaveConnectionStringAsync: Encrypted connection string saved");
 
         // Connect immediately
-        await _blobService.ConnectAsync(connectionString, containerName);
+        await _blobService.ConnectAsync(connectionString, bucketName);
         Log("SaveConnectionStringAsync: Connected to Azure storage");
     }
 }

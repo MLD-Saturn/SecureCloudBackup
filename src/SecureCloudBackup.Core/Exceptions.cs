@@ -187,7 +187,7 @@ public class DatabaseFileCorruptException : Exception
 
 /// <summary>
 /// Base type for provider-neutral object-storage failures surfaced by an
-/// <see cref="SecureCloudBackup.Core.Services.IBlobStorageService"/>
+/// <see cref="SecureCloudBackup.Core.Services.IObjectStorageService"/>
 /// implementation. Provider adapters (Azure today, others later) translate their
 /// cloud SDK's exceptions into this hierarchy at the service boundary so
 /// consumers -- retry classification, error reporting -- never depend on a

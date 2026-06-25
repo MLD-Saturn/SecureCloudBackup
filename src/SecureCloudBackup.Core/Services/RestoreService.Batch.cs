@@ -55,7 +55,7 @@ public partial class RestoreService
 
         // Phase 1: Collect all blob names to delete (chunks + metadata) in one pass.
         // This avoids per-file sequential chunk enumeration during the parallel delete phase.
-        List<(string blobName, int fileIndex)> allBlobs = [];
+        List<(string objectKey, int fileIndex)> allBlobs = [];
         for (var i = 0; i < files.Count; i++)
         {
             var file = files[i];
@@ -86,7 +86,7 @@ public partial class RestoreService
             {
                 try
                 {
-                    await _blobService.DeleteBlobAsync(blob.blobName, ct);
+                    await _blobService.DeleteObjectAsync(blob.objectKey, ct);
 
                     var completed = Interlocked.Increment(ref blobsDeleted);
                     // Report at file-granularity by estimating file completion from blob count
@@ -104,7 +104,7 @@ public partial class RestoreService
                 catch (Exception ex)
                 {
                     failedFileIndices.TryAdd(blob.fileIndex, true);
-                    Log($"DeleteFilesAsync: Failed to delete blob {blob.blobName}: {ex.Message}");
+                    Log($"DeleteFilesAsync: Failed to delete blob {blob.objectKey}: {ex.Message}");
                 }
             });
 

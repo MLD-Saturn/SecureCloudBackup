@@ -56,7 +56,7 @@ internal partial class SqliteBackend
 
     /// <summary>
     /// D6: stamps the expected encrypted-blob MD5 on a chunk_index row.
-    /// Called from <see cref="IBlobStorageService"/> upload paths once the
+    /// Called from <see cref="IObjectStorageService"/> upload paths once the
     /// MD5 is known (we compute it locally rather than relying on Azure's
     /// returned ContentHash so the value is identical for in-memory and
     /// real backends). Pre-D6 chunks remain null until a re-upload OR the

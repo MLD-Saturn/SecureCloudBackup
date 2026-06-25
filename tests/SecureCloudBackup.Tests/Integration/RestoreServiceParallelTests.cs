@@ -275,7 +275,7 @@ public class RestoreServiceParallelTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
@@ -341,7 +341,7 @@ internal class DownloadTrackingBlobService : InMemoryBlobService
         }
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         lock (_concurrencyLock)
         {
@@ -352,7 +352,7 @@ internal class DownloadTrackingBlobService : InMemoryBlobService
 
         try
         {
-            return await base.DownloadChunkAsync(blobName, cancellationToken);
+            return await base.DownloadChunkAsync(objectKey, cancellationToken);
         }
         finally
         {
@@ -557,7 +557,7 @@ public class BoundedParallelDownloadTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
@@ -623,7 +623,7 @@ internal class SlowWriterTrackingBlobService : InMemoryBlobService
         }
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         lock (_concurrencyLock)
         {
@@ -635,7 +635,7 @@ internal class SlowWriterTrackingBlobService : InMemoryBlobService
         {
             // Simulate network latency
             await Task.Delay(_downloadLatencyMs, cancellationToken);
-            return await base.DownloadChunkAsync(blobName, cancellationToken);
+            return await base.DownloadChunkAsync(objectKey, cancellationToken);
         }
         finally
         {
@@ -660,7 +660,7 @@ internal class VariableLatencyBlobService : InMemoryBlobService
     {
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         int count = Interlocked.Increment(ref _downloadCount);
         
@@ -669,7 +669,7 @@ internal class VariableLatencyBlobService : InMemoryBlobService
         int delay = (count % 2 == 0) ? 5 : 50;
         await Task.Delay(delay, cancellationToken);
         
-        return await base.DownloadChunkAsync(blobName, cancellationToken);
+        return await base.DownloadChunkAsync(objectKey, cancellationToken);
     }
 }
 
@@ -690,7 +690,7 @@ internal class FailingBlobService : InMemoryBlobService
 
     public void EnableFailure() => _failureEnabled = true;
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         int count = Interlocked.Increment(ref _downloadCount);
 
@@ -700,7 +700,7 @@ internal class FailingBlobService : InMemoryBlobService
             throw new InvalidOperationException($"Simulated download failure on chunk {_failOnChunkIndex}");
         }
 
-        return await base.DownloadChunkAsync(blobName, cancellationToken);
+        return await base.DownloadChunkAsync(objectKey, cancellationToken);
     }
 }
 
@@ -722,18 +722,18 @@ internal class TransientFailureBlobService : InMemoryBlobService
         _transientFailuresPerChunk = transientFailuresPerChunk;
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
-        var count = _failureCounts.AddOrUpdate(blobName, 1, (_, c) => c + 1);
+        var count = _failureCounts.AddOrUpdate(objectKey, 1, (_, c) => c + 1);
 
         if (count <= _transientFailuresPerChunk)
         {
             Interlocked.Increment(ref _totalRetriedDownloads);
             await Task.Delay(5, cancellationToken);
-            throw new IOException($"Simulated transient I/O failure on {blobName} (attempt {count})");
+            throw new IOException($"Simulated transient I/O failure on {objectKey} (attempt {count})");
         }
 
-        return await base.DownloadChunkAsync(blobName, cancellationToken);
+        return await base.DownloadChunkAsync(objectKey, cancellationToken);
     }
 }
 
@@ -887,7 +887,7 @@ public class RestoreServiceThroughputTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);

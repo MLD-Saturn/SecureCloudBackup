@@ -12,19 +12,19 @@ namespace SecureCloudBackup.Core.Services;
 /// <list type="number">
 ///   <item><b>T1 -- structural HEAD:</b> for each chunk, fetch
 ///     <c>(Exists, ContentLength, ContentHash)</c> via
-///     <see cref="IBlobStorageService.GetChunkPropertiesAsync"/>. Compare
+///     <see cref="IObjectStorageService.GetChunkPropertiesAsync"/>. Compare
 ///     existence and length-vs-expected (chunk plaintext length +
 ///     <see cref="EncryptionService.EncryptionOverhead"/>). Cost:
 ///     ~1 KB / chunk over the wire, no body bytes.</item>
 ///   <item><b>T2 -- full blob:</b> on T1 fail, download the full encrypted
-///     blob via <see cref="IBlobStorageService.DownloadChunkAsync"/>, which
+///     blob via <see cref="IObjectStorageService.DownloadChunkAsync"/>, which
 ///     internally runs envelope CRC + AES-GCM tag check via
 ///     <c>VerifyDownloadIntegrity</c> and emits the X1b
 ///     <c>[CRC FAIL]</c> diag with envelope head/tail/version.</item>
 ///   <item><b>T3 -- byte-for-byte:</b> on T2 success-but-still-suspect (or
 ///     direct caller request), re-read the local file's
 ///     <c>chunkInfo.Length</c> bytes at <c>chunkInfo.Offset</c> and pass
-///     to <see cref="IBlobStorageService.VerifyChunkIntegrityAsync"/>
+///     to <see cref="IObjectStorageService.VerifyChunkIntegrityAsync"/>
 ///     which decrypts the remote chunk and runs constant-time compare.</item>
 /// </list>
 /// <para>
@@ -39,7 +39,7 @@ namespace SecureCloudBackup.Core.Services;
 public sealed class IntegrityCheckService
 {
     private readonly LocalDatabaseService _databaseService;
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly EncryptionService _encryptionService;
 
     /// <summary>
@@ -132,7 +132,7 @@ public sealed class IntegrityCheckService
 
     public IntegrityCheckService(
         LocalDatabaseService databaseService,
-        IBlobStorageService blobService,
+        IObjectStorageService blobService,
         EncryptionService encryptionService)
     {
         ArgumentNullException.ThrowIfNull(databaseService);
@@ -376,7 +376,7 @@ public sealed class IntegrityCheckService
     /// D10: one-shot backfill scan that promotes pre-D6 chunks. For
     /// every chunk whose <c>expected_encrypted_md5</c> is null, runs a
     /// T2 download + envelope verify (CRC32 + AES-GCM tag via
-    /// <see cref="IBlobStorageService.DownloadChunkAsync"/>); only if
+    /// <see cref="IObjectStorageService.DownloadChunkAsync"/>); only if
     /// the download succeeds AND the live Azure ContentHash matches
     /// what we just MD5-hashed locally do we stamp the MD5. This
     /// closes the TOFU window vulnerability where a chunk corrupt at
@@ -429,17 +429,17 @@ public sealed class IntegrityCheckService
                 await t2Sem.WaitAsync(ct);
                 try
                 {
-                    var blobName = $"chunks/{chunkHash}";
+                    var objectKey = $"chunks/{chunkHash}";
                     // Download (verifies envelope CRC + Azure MD5 internally
                     // via VerifyDownloadIntegrity). If this throws, the
                     // chunk is corrupt -- leave its expected MD5 null so
                     // a future integrity check still flags it.
-                    var decrypted = await _blobService.DownloadChunkAsync(blobName, ct);
+                    var decrypted = await _blobService.DownloadChunkAsync(objectKey, ct);
 
                     // Re-fetch the live ContentHash; this is what the
                     // integrity-check engine will compare against in the
                     // future, so we capture exactly that value.
-                    var (exists, _, azureMd5) = await _blobService.GetChunkPropertiesAsync(blobName, ct);
+                    var (exists, _, azureMd5) = await _blobService.GetChunkPropertiesAsync(objectKey, ct);
                     if (!exists || azureMd5 == null || azureMd5.Length != 16)
                     {
                         Interlocked.Increment(ref failed);
@@ -785,7 +785,7 @@ public sealed class IntegrityCheckService
         bool deepVerify,
         CancellationToken cancellationToken)
     {
-        var blobName = $"chunks/{chunk.Hash}";
+        var objectKey = $"chunks/{chunk.Hash}";
         // D7 review fix 1.11: defensive bounds check on chunk.Length so
         // a malformed DB row does not later trip ArrayPool.Rent or read
         // a non-sense byte range from the local file. Negative or
@@ -813,7 +813,7 @@ public sealed class IntegrityCheckService
         await t1Sem.WaitAsync(cancellationToken);
         try
         {
-            (exists, contentLength, azureMd5) = await _blobService.GetChunkPropertiesAsync(blobName, cancellationToken);
+            (exists, contentLength, azureMd5) = await _blobService.GetChunkPropertiesAsync(objectKey, cancellationToken);
         }
         finally
         {
@@ -930,7 +930,7 @@ public sealed class IntegrityCheckService
             {
                 // DownloadChunkAsync runs VerifyDownloadIntegrity (X1b/X2) and
                 // emits the [CRC FAIL] diag itself if the envelope CRC fails.
-                decrypted = await _blobService.DownloadChunkAsync(blobName, cancellationToken);
+                decrypted = await _blobService.DownloadChunkAsync(objectKey, cancellationToken);
             }
             catch (DataIntegrityException ex)
             {

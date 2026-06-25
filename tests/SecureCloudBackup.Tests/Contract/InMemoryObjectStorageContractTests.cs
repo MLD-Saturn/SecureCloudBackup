@@ -11,7 +11,7 @@ namespace SecureCloudBackup.Tests;
 /// </summary>
 public sealed class InMemoryObjectStorageContractTests : ObjectStorageContractTests
 {
-    protected override async Task<IBlobStorageService> CreateConnectedServiceAsync(EncryptionService encryption)
+    protected override async Task<IObjectStorageService> CreateConnectedServiceAsync(EncryptionService encryption)
     {
         var service = new InMemoryBlobService(encryption);
         await service.ConnectAsync("contract-connection-string", "contract-container");

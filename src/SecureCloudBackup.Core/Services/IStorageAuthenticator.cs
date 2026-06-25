@@ -14,7 +14,7 @@ public sealed record StorageAuthenticationResult(bool Success, string Message, I
 /// Provider-neutral interactive authenticator. A provider adapter performs its
 /// own sign-in (e.g. an Azure Entra ID browser flow) and returns a neutral
 /// <see cref="IStorageTokenProvider"/> the orchestrator can hand to
-/// <see cref="IBlobStorageService.ConnectWithTokenAsync"/> -- without the
+/// <see cref="IObjectStorageService.ConnectWithTokenAsync"/> -- without the
 /// orchestrator knowing how the sign-in was performed. This is the seam that
 /// keeps the interactive auth flow (and its cloud SDK dependency) out of
 /// <see cref="BackupOrchestrator"/>.

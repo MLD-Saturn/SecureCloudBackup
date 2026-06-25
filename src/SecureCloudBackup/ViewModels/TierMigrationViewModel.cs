@@ -21,7 +21,7 @@ namespace SecureCloudBackup.ViewModels;
 /// </summary>
 public partial class TierMigrationViewModel : ViewModelBase
 {
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly ChunkIndexService _chunkIndexService;
     private readonly Action<string> _log;
     private CancellationTokenSource? _operationCts;
@@ -78,7 +78,7 @@ public partial class TierMigrationViewModel : ViewModelBase
     #endregion
 
     public TierMigrationViewModel(
-        IBlobStorageService blobService,
+        IObjectStorageService blobService,
         ChunkIndexService chunkIndexService,
         Action<string> log)
     {
@@ -239,7 +239,7 @@ public partial class TierMigrationViewModel : ViewModelBase
                 var fileFailed = false;
                 try
                 {
-                    // Parallel per-chunk tier changes. SetBlobTierAsync is
+                    // Parallel per-chunk tier changes. SetObjectTierAsync is
                     // idempotent so a re-run after partial failure converges.
                     await Parallel.ForEachAsync(
                         fileVm.Model.Chunks,
@@ -250,10 +250,10 @@ public partial class TierMigrationViewModel : ViewModelBase
                         },
                         async (chunk, chunkCt) =>
                         {
-                            var blobName = string.IsNullOrEmpty(chunk.BlobName)
+                            var objectKey = string.IsNullOrEmpty(chunk.BlobName)
                                 ? $"chunks/{chunk.Hash}"
                                 : chunk.BlobName;
-                            await _blobService.SetBlobTierAsync(blobName, targetTier, chunkCt);
+                            await _blobService.SetObjectTierAsync(objectKey, targetTier, chunkCt);
                         });
 
                     // Re-upload metadata at the new tier ONLY after every

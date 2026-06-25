@@ -6,7 +6,7 @@ using SecureCloudBackup.Core.Services;
 namespace SecureCloudBackup.Tests;
 
 /// <summary>
-/// Unit tests for InMemoryBlobService (and by extension, IBlobStorageService contract).
+/// Unit tests for InMemoryBlobService (and by extension, IObjectStorageService contract).
 /// Tests validation, deduplication, and storage behavior.
 /// </summary>
 public class BlobServiceTests : IAsyncLifetime
@@ -112,11 +112,11 @@ public class BlobServiceTests : IAsyncLifetime
         var hash = ComputeHash(data);
 
         // Act
-        var blobName = await _blobService.UploadChunkAsync(data, hash);
+        var objectKey = await _blobService.UploadChunkAsync(data, hash);
 
         // Assert
-        Assert.StartsWith("chunks/", blobName);
-        Assert.Contains(hash, blobName);
+        Assert.StartsWith("chunks/", objectKey);
+        Assert.Contains(hash, objectKey);
     }
 
     [Fact]
@@ -124,8 +124,8 @@ public class BlobServiceTests : IAsyncLifetime
     {
         // Empty data is valid — represents a 0-byte file chunk
         var hash = HashHelper.ComputeHash(ReadOnlySpan<byte>.Empty);
-        var blobName = await _blobService.UploadChunkAsync(ReadOnlyMemory<byte>.Empty, hash);
-        Assert.StartsWith("chunks/", blobName);
+        var objectKey = await _blobService.UploadChunkAsync(ReadOnlyMemory<byte>.Empty, hash);
+        Assert.StartsWith("chunks/", objectKey);
     }
 
     [Fact]
@@ -234,11 +234,11 @@ public class BlobServiceTests : IAsyncLifetime
         var hash = ComputeHash(data);
 
         // Act
-        var blobName = await _blobService.UploadChunkDirectAsync(data, hash);
+        var objectKey = await _blobService.UploadChunkDirectAsync(data, hash);
 
         // Assert
-        Assert.StartsWith("chunks/", blobName);
-        Assert.Contains(hash, blobName);
+        Assert.StartsWith("chunks/", objectKey);
+        Assert.Contains(hash, objectKey);
     }
 
     [Fact]
@@ -246,8 +246,8 @@ public class BlobServiceTests : IAsyncLifetime
     {
         // Empty data is valid — represents a 0-byte file chunk
         var hash = HashHelper.ComputeHash(ReadOnlySpan<byte>.Empty);
-        var blobName = await _blobService.UploadChunkDirectAsync(ReadOnlyMemory<byte>.Empty, hash);
-        Assert.StartsWith("chunks/", blobName);
+        var objectKey = await _blobService.UploadChunkDirectAsync(ReadOnlyMemory<byte>.Empty, hash);
+        Assert.StartsWith("chunks/", objectKey);
     }
 
     [Fact]
@@ -312,8 +312,8 @@ public class BlobServiceTests : IAsyncLifetime
         var hash = ComputeHash(originalData);
 
         // Act
-        var blobName = await _blobService.UploadChunkDirectAsync(originalData, hash);
-        var downloadedData = await _blobService.DownloadChunkAsync(blobName);
+        var objectKey = await _blobService.UploadChunkDirectAsync(originalData, hash);
+        var downloadedData = await _blobService.DownloadChunkAsync(objectKey);
 
         // Assert
         Assert.Equal(originalData, downloadedData);
@@ -374,10 +374,10 @@ public class BlobServiceTests : IAsyncLifetime
         // Arrange
         var originalData = CreateRandomContent(1024);
         var hash = ComputeHash(originalData);
-        var blobName = await _blobService.UploadChunkAsync(originalData, hash);
+        var objectKey = await _blobService.UploadChunkAsync(originalData, hash);
 
         // Act
-        var downloadedData = await _blobService.DownloadChunkAsync(blobName);
+        var downloadedData = await _blobService.DownloadChunkAsync(objectKey);
 
         // Assert
         Assert.Equal(originalData, downloadedData);
@@ -442,7 +442,7 @@ public class BlobServiceTests : IAsyncLifetime
         await _blobService.UploadFileMetadataAsync(file);
 
         // Assert
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync();
+        var metadataBlobs = await _blobService.ListMetadataKeysAsync();
         Assert.Single(metadataBlobs);
     }
 
@@ -461,11 +461,11 @@ public class BlobServiceTests : IAsyncLifetime
         var originalFile = CreateBackedUpFile(@"C:\test.txt", 1024);
         await _blobService.UploadFileMetadataAsync(originalFile);
         
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync();
-        var blobName = metadataBlobs.First();
+        var metadataBlobs = await _blobService.ListMetadataKeysAsync();
+        var objectKey = metadataBlobs.First();
 
         // Act
-        var downloadedFile = await _blobService.DownloadFileMetadataAsync(blobName);
+        var downloadedFile = await _blobService.DownloadFileMetadataAsync(objectKey);
 
         // Assert
         Assert.NotNull(downloadedFile);
@@ -474,7 +474,7 @@ public class BlobServiceTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ListMetadataBlobsAsync_MultipleFiles_ReturnsAll()
+    public async Task ListMetadataKeysAsync_MultipleFiles_ReturnsAll()
     {
         // Arrange
         var files = new[]
@@ -490,7 +490,7 @@ public class BlobServiceTests : IAsyncLifetime
         }
 
         // Act
-        var blobs = await _blobService.ListMetadataBlobsAsync();
+        var blobs = await _blobService.ListMetadataKeysAsync();
 
         // Assert
         Assert.Equal(3, blobs.Count);
@@ -501,25 +501,25 @@ public class BlobServiceTests : IAsyncLifetime
     #region Delete Tests
 
     [Fact]
-    public async Task DeleteBlobAsync_ExistingBlob_RemovesBlob()
+    public async Task DeleteObjectAsync_ExistingBlob_RemovesBlob()
     {
         // Arrange
         var data = CreateRandomContent(1024);
         var hash = ComputeHash(data);
-        var blobName = await _blobService.UploadChunkAsync(data, hash);
+        var objectKey = await _blobService.UploadChunkAsync(data, hash);
 
         // Act
-        await _blobService.DeleteBlobAsync(blobName);
+        await _blobService.DeleteObjectAsync(objectKey);
 
         // Assert
-        Assert.DoesNotContain(blobName, _blobService.StoredBlobNames);
+        Assert.DoesNotContain(objectKey, _blobService.StoredBlobNames);
     }
 
     [Fact]
-    public async Task DeleteBlobAsync_NonExistentBlob_DoesNotThrow()
+    public async Task DeleteObjectAsync_NonExistentBlob_DoesNotThrow()
     {
         // Act - Should not throw
-        await _blobService.DeleteBlobAsync("chunks/nonexistent");
+        await _blobService.DeleteObjectAsync("chunks/nonexistent");
     }
 
     #endregion
@@ -538,8 +538,8 @@ public class BlobServiceTests : IAsyncLifetime
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         // Act
-        var blobName = await blobService.UploadChunkAsync(data, hash);
-        var downloaded = await blobService.DownloadChunkAsync(blobName);
+        var objectKey = await blobService.UploadChunkAsync(data, hash);
+        var downloaded = await blobService.DownloadChunkAsync(objectKey);
 
         stopwatch.Stop();
 
@@ -603,12 +603,12 @@ public class BlobServiceTests : IAsyncLifetime
         string hash = ComputeHash(data);
 
         // Act
-        string blobName = await blobService.UploadChunkAsync(data, hash);
+        string objectKey = await blobService.UploadChunkAsync(data, hash);
 
-        // Assert: index visible to BlobExistsAsync, but raw bytes were discarded.
-        Assert.Equal($"chunks/{hash}", blobName);
-        Assert.True(await blobService.BlobExistsAsync(blobName));
-        byte[]? raw = blobService.GetRawBlob(blobName);
+        // Assert: index visible to ObjectExistsAsync, but raw bytes were discarded.
+        Assert.Equal($"chunks/{hash}", objectKey);
+        Assert.True(await blobService.ObjectExistsAsync(objectKey));
+        byte[]? raw = blobService.GetRawBlob(objectKey);
         Assert.NotNull(raw);
         Assert.Empty(raw);
     }
@@ -665,12 +665,12 @@ public class BlobServiceTests : IAsyncLifetime
         string hash = ComputeHash(data);
 
         // Act
-        string blobName = await blobService.UploadChunkDirectAsync(data, hash);
+        string objectKey = await blobService.UploadChunkDirectAsync(data, hash);
 
         // Assert
-        Assert.Equal($"chunks/{hash}", blobName);
-        Assert.True(await blobService.BlobExistsAsync(blobName));
-        Assert.Empty(blobService.GetRawBlob(blobName)!);
+        Assert.Equal($"chunks/{hash}", objectKey);
+        Assert.True(await blobService.ObjectExistsAsync(objectKey));
+        Assert.Empty(blobService.GetRawBlob(objectKey)!);
     }
 
     [Fact]

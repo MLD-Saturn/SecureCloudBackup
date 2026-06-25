@@ -3,7 +3,7 @@ using SecureCloudBackup.Core.Models;
 namespace SecureCloudBackup.Core.Services;
 
 /// <summary>
-/// Result of an in-place chunk repair (see <see cref="IBlobStorageService.RepairChunkAsync"/>).
+/// Result of an in-place chunk repair (see <see cref="IObjectStorageService.RepairChunkAsync"/>).
 /// </summary>
 public enum ChunkRepairOutcome
 {
@@ -18,10 +18,10 @@ public enum ChunkRepairOutcome
 }
 
 /// <summary>
-/// Interface for blob storage operations, enabling testing without Azure.
+/// Interface for object storage operations, enabling testing without Azure.
 /// Supports both Entra ID and Connection String authentication.
 /// </summary>
-public interface IBlobStorageService : IAsyncDisposable
+public interface IObjectStorageService : IAsyncDisposable
 {
     /// <summary>
     /// Gets whether the service is connected to storage.
@@ -57,38 +57,38 @@ public interface IBlobStorageService : IAsyncDisposable
     #region Connection Methods
 
     /// <summary>
-    /// Initializes connection to blob storage using a connection string.
+    /// Initializes connection to object storage using a connection string.
     /// Use this for personal Microsoft accounts.
     /// </summary>
     /// <param name="connectionString">The Azure Storage connection string</param>
-    /// <param name="containerName">The container name to use for backups</param>
-    Task ConnectAsync(string connectionString, string containerName);
+    /// <param name="bucketName">The bucket name to use for backups</param>
+    Task ConnectAsync(string connectionString, string bucketName);
 
     /// <summary>
-    /// Tests the connection to blob storage using a connection string.
+    /// Tests the connection to object storage using a connection string.
     /// </summary>
-    Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName);
+    Task<(bool success, string message)> TestConnectionAsync(string connectionString, string bucketName);
 
     /// <summary>
     /// Initializes connection to object storage using a token credential
     /// (e.g. an interactive sign-in). Use this for organizational/work accounts.
     /// </summary>
     /// <param name="serviceUri">The storage service URI (e.g., https://account.blob.core.windows.net)</param>
-    /// <param name="containerName">The container/bucket name to use for backups</param>
+    /// <param name="bucketName">The bucket name to use for backups</param>
     /// <param name="tokenProvider">The provider-neutral source of bearer tokens.</param>
-    Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider);
+    Task ConnectWithTokenAsync(Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider);
 
     /// <summary>
     /// Tests the connection to object storage using a token credential.
     /// </summary>
-    Task<(bool success, string message)> TestConnectionWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider);
+    Task<(bool success, string message)> TestConnectionWithTokenAsync(Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider);
 
     #endregion
 
     #region Blob Operations
 
     /// <summary>
-    /// Uploads an encrypted chunk to blob storage.
+    /// Uploads an encrypted chunk to object storage.
     /// Checks if chunk already exists for deduplication (use for modified files).
     /// </summary>
     /// <param name="chunkData">The chunk data to upload</param>
@@ -145,7 +145,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// Used by corrupted-recovery self-heal: when a stored chunk's CRC32 envelope is
     /// damaged but its AES-GCM tag still authenticates (so the decrypted plaintext is
     /// provably the original bytes), the recovered plaintext is re-encrypted and written
-    /// back over the same content-addressed blob name, repairing the at-rest corruption
+    /// back over the same content-addressed object key, repairing the at-rest corruption
     /// for every file that references the chunk.
     /// <para>
     /// The repair preserves the chunk's existing storage tier. Archive-tier blobs cannot
@@ -154,7 +154,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// </para>
     /// </summary>
     /// <param name="chunkData">The recovered plaintext chunk bytes to re-encrypt and store.</param>
-    /// <param name="chunkHash">The chunk hash (content address / blob name) to overwrite.</param>
+    /// <param name="chunkHash">The chunk hash (content address / object key) to overwrite.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>The outcome describing whether the chunk was repaired, skipped, or failed.</returns>
     Task<ChunkRepairOutcome> RepairChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
@@ -170,26 +170,26 @@ public interface IBlobStorageService : IAsyncDisposable
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Uploads a generic blob (not encrypted, for system data like index backups).
+    /// Uploads a generic object (not encrypted, for system data like index backups).
     /// </summary>
-    /// <param name="blobName">The full blob name/path</param>
+    /// <param name="objectKey">The full object key/path</param>
     /// <param name="data">The data to upload</param>
     /// <param name="storageTier">The storage tier</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task UploadBlobAsync(string blobName, byte[] data, StorageTier storageTier = StorageTier.Hot,
+    Task UploadObjectAsync(string objectKey, byte[] data, StorageTier storageTier = StorageTier.Hot,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Downloads a generic blob (not encrypted).
+    /// Downloads a generic object (not encrypted).
     /// </summary>
-    /// <param name="blobName">The full blob name/path</param>
+    /// <param name="objectKey">The full object key/path</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task<byte[]> DownloadBlobAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<byte[]> DownloadObjectAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Downloads and decrypts a chunk.
     /// </summary>
-    Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// B77 (W5 hot-path migration follow-up to B71/B73) overload that lets a
@@ -202,7 +202,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <see cref="System.Buffers.ArrayPool{T}.Shared"/> for non-hot-path
     /// callers (best-effort recovery, metadata, tests).
     /// </summary>
-    Task<byte[]> DownloadChunkAsync(string blobName, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default);
+    Task<byte[]> DownloadChunkAsync(string objectKey, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Downloads and decrypts a chunk using streaming download with pooled buffers.
@@ -221,7 +221,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// Preferred over <see cref="DownloadChunkAsync"/> for large-scale restore
     /// operations.
     /// </summary>
-    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// B71 (W5 Phase 3 Commit 3) overload that lets a restore-scope caller
@@ -229,7 +229,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// See <see cref="DownloadChunkStreamingAsync(string, CancellationToken)"/>
     /// for the return-ownership contract.
     /// </summary>
-    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default);
+    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// B73 (W5 Phase 4 Commit 2) overload that additionally lets the caller supply
@@ -242,7 +242,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>). The
     /// <paramref name="plaintextBufferPool"/> contract is unchanged from B71.
     /// </summary>
-    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+    Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey,
         ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
         CancellationToken cancellationToken = default);
 
@@ -251,7 +251,7 @@ public interface IBlobStorageService : IAsyncDisposable
     /// Returns null for chunks that are completely unrecoverable (AES-GCM tag mismatch).
     /// Used for corrupted file recovery.
     /// </summary>
-    Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<byte[]?> DownloadChunkBestEffortAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Cheap structural check on a chunk blob: returns the encrypted blob's
@@ -266,68 +266,68 @@ public interface IBlobStorageService : IAsyncDisposable
     /// <c>Exists</c> is false the other fields are zero/null.
     /// </returns>
     Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
-        string blobName, CancellationToken cancellationToken = default);
+        string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Lists all backed up files by retrieving metadata blobs.
     /// </summary>
-    Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default);
+    Task<List<string>> ListMetadataKeysAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Downloads and decrypts file metadata.
     /// </summary>
-    Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<BackedUpFile?> DownloadFileMetadataAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Deletes a blob (used for cleanup).
     /// </summary>
-    Task DeleteBlobAsync(string blobName, CancellationToken cancellationToken = default);
+    Task DeleteObjectAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Gets the properties of a blob including its storage tier and size.
     /// </summary>
-    /// <param name="blobName">The blob name (e.g., "chunks/abc123")</param>
+    /// <param name="objectKey">The object key (e.g., "chunks/abc123")</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Tuple of size in bytes and storage tier</returns>
-    Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<(long sizeBytes, StorageTier tier)> GetObjectPropertiesAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Sets the storage tier for a blob.
     /// </summary>
-    /// <param name="blobName">The blob name</param>
+    /// <param name="objectKey">The object key</param>
     /// <param name="tier">The target storage tier</param>
     /// <param name="cancellationToken">Cancellation token</param>
-    Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default);
+    Task SetObjectTierAsync(string objectKey, StorageTier tier, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Lists all chunk blobs in the container.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>List of chunk hashes (without the "chunks/" prefix)</returns>
-    Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default);
+    Task<List<string>> ListChunkKeysAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Lists all chunk blobs with their properties (size and tier) in a single listing call.
-    /// More efficient than calling GetBlobPropertiesAsync per chunk.
+    /// More efficient than calling GetObjectPropertiesAsync per chunk.
     /// </summary>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>Dictionary mapping chunk hash to (size, tier)</returns>
-    Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+    Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkKeysWithPropertiesAsync(
         CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Checks if a blob exists without downloading it.
     /// </summary>
-    /// <param name="blobName">The blob name</param>
+    /// <param name="objectKey">The object key</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if the blob exists</returns>
-    Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default);
+    Task<bool> ObjectExistsAsync(string objectKey, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Verifies that a chunk's content matches the expected data by downloading and comparing.
     /// Used for defense-in-depth verification when deduplication detects a hash match.
     /// </summary>
-    /// <param name="chunkHash">The chunk hash (used as blob name)</param>
+    /// <param name="chunkHash">The chunk hash (used as object key)</param>
     /// <param name="expectedData">The expected plaintext data to compare against</param>
     /// <param name="cancellationToken">Cancellation token</param>
     /// <returns>True if the stored chunk matches the expected data exactly</returns>

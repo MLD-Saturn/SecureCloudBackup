@@ -121,7 +121,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // Tampering: backup a file then delete one of its chunks server-side.
         var f = await SeedOneFileAsync("missing.bin", RandomBytes(4096));
         var firstChunkBlob = $"chunks/{f.Chunks[0].Hash}";
-        await _blobService.DeleteBlobAsync(firstChunkBlob);
+        await _blobService.DeleteObjectAsync(firstChunkBlob);
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -147,9 +147,9 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // OR the envelope CRC).
         var f = await SeedOneFileAsync("wrong-size.bin", RandomBytes(4096));
         var firstChunkBlob = $"chunks/{f.Chunks[0].Hash}";
-        await _blobService.DeleteBlobAsync(firstChunkBlob);
+        await _blobService.DeleteObjectAsync(firstChunkBlob);
         // Inject a too-short blob at the same name.
-        await _blobService.UploadBlobAsync(firstChunkBlob, new byte[] { 1, 2, 3 });
+        await _blobService.UploadObjectAsync(firstChunkBlob, new byte[] { 1, 2, 3 });
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -171,7 +171,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // writes a bundle ZIP and stamps its path on the run row. The
         // bundle is the artefact a tester attaches to a bug report.
         var f = await SeedOneFileAsync("auto-bundle.bin", RandomBytes(2048));
-        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{f.Chunks[0].Hash}");
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -192,7 +192,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // Verifies the per-options opt-out: when AutoExportBundleOnFailure
         // is false, no bundle is produced even on failure.
         var f = await SeedOneFileAsync("no-bundle.bin", RandomBytes(2048));
-        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{f.Chunks[0].Hash}");
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -215,10 +215,10 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // escalates to T2/T3 for full envelope evidence.
         // Pre-D6 this test was the limitation pin (FilesPassed == 1).
         var f = await SeedOneFileAsync("envelope-crc.bin", RandomBytes(4096));
-        var blobName = $"chunks/{f.Chunks[0].Hash}";
+        var objectKey = $"chunks/{f.Chunks[0].Hash}";
         // Flip a byte deep inside the encrypted payload (past the 17-byte
         // envelope header and inside the AES-GCM ciphertext region).
-        _blobService.TestOnlyCorruptByte(blobName, byteIndex: 25);
+        _blobService.TestOnlyCorruptByte(objectKey, byteIndex: 25);
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -242,11 +242,11 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // engine maps to reason="decrypt-failed". T1 still trips first
         // via md5-mismatch (D6) and escalates to T2 for evidence.
         var f = await SeedOneFileAsync("gcm-tag.bin", RandomBytes(4096));
-        var blobName = $"chunks/{f.Chunks[0].Hash}";
+        var objectKey = $"chunks/{f.Chunks[0].Hash}";
         // Get current size and flip a byte in the GCM tag region (last
         // 16 bytes of the envelope = last 16 bytes of the stored blob).
-        var (_, contentLength, _) = await _blobService.GetChunkPropertiesAsync(blobName);
-        _blobService.TestOnlyCorruptByte(blobName, byteIndex: (int)contentLength - 5);
+        var (_, contentLength, _) = await _blobService.GetChunkPropertiesAsync(objectKey);
+        _blobService.TestOnlyCorruptByte(objectKey, byteIndex: (int)contentLength - 5);
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -273,7 +273,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // comparing on the SECOND check. This test simulates the legacy
         // state by clearing the persisted MD5 between seed and check.
         var f = await SeedOneFileAsync("legacy.bin", RandomBytes(2048));
-        var blobName = $"chunks/{f.Chunks[0].Hash}";
+        var objectKey = $"chunks/{f.Chunks[0].Hash}";
         // Simulate "uploaded before D6" by erasing what the upload
         // callback persisted. We test directly via the database service
         // because there is no public unwind API.
@@ -394,7 +394,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         ClearExpectedMd5(clean2.Chunks[0].Hash);
         ClearExpectedMd5(clean3.Chunks[0].Hash);
         ClearExpectedMd5(corrupt.Chunks[0].Hash);
-        await _blobService.DeleteBlobAsync($"chunks/{corrupt.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{corrupt.Chunks[0].Hash}");
 
         var beforeCount = _databaseService.CountChunksWithNullExpectedMd5();
         Assert.Equal(4, beforeCount);
@@ -481,7 +481,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
             // Corrupt every other file at T1 (delete blob).
             for (var i = 0; i < total; i += 2)
             {
-                await _blobService.DeleteBlobAsync($"chunks/{files[i].Chunks[0].Hash}");
+                await _blobService.DeleteObjectAsync($"chunks/{files[i].Chunks[0].Hash}");
             }
 
             var result = await _integrityService.RunAsync(new IntegrityCheckOptions
@@ -521,7 +521,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
             // Corrupt every file so any worker that lands produces a failure.
             foreach (var f in files)
             {
-                await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+                await _blobService.DeleteObjectAsync($"chunks/{f.Chunks[0].Hash}");
             }
 
             using var cts = new CancellationTokenSource();
@@ -598,13 +598,13 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // file segment -- they don't match because the substituted
         // plaintext is not what the local file holds.
         var f = await SeedOneFileAsync("t3-byte.bin", RandomBytes(4096));
-        var blobName = $"chunks/{f.Chunks[0].Hash}";
+        var objectKey = $"chunks/{f.Chunks[0].Hash}";
 
         // Encrypt a different-length plaintext and replace the blob.
         var differentPlaintext = RandomBytes(1024);
         var differentEnvelope = _encryptionService.Encrypt(differentPlaintext);
-        await _blobService.DeleteBlobAsync(blobName);
-        await _blobService.UploadBlobAsync(blobName, differentEnvelope);
+        await _blobService.DeleteObjectAsync(objectKey);
+        await _blobService.UploadObjectAsync(objectKey, differentEnvelope);
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -629,7 +629,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // FileIds back into a new run, with ParentRunId stamped so the
         // History expander can show the relationship.
         var bad = await SeedOneFileAsync("relineage.bin", RandomBytes(2048));
-        await _blobService.DeleteBlobAsync($"chunks/{bad.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{bad.Chunks[0].Hash}");
 
         var parent = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -639,7 +639,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         });
 
         // Restore the chunk so the re-check can pass.
-        await _blobService.UploadBlobAsync($"chunks/{bad.Chunks[0].Hash}",
+        await _blobService.UploadObjectAsync($"chunks/{bad.Chunks[0].Hash}",
             _encryptionService.Encrypt(RandomBytes(bad.Chunks[0].Length)));
 
         var child = await _integrityService.RunAsync(new IntegrityCheckOptions
@@ -662,7 +662,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
     {
         // Two consecutive runs: the second must wipe the first's failures.
         var bad = await SeedOneFileAsync("bad.bin", RandomBytes(2048));
-        await _blobService.DeleteBlobAsync($"chunks/{bad.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{bad.Chunks[0].Hash}");
 
         var run1 = await _integrityService.RunAsync(new IntegrityCheckOptions
         {
@@ -782,7 +782,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // run summary shows FilesAutoRepaired = 1.
         var f = await SeedOneFileAsync("repair-missing.bin", RandomBytes(4096));
         var firstChunkBlob = $"chunks/{f.Chunks[0].Hash}";
-        await _blobService.DeleteBlobAsync(firstChunkBlob);
+        await _blobService.DeleteObjectAsync(firstChunkBlob);
 
         var repairCalls = 0;
         _integrityService.RepairCallback = async (path, ct) =>
@@ -821,7 +821,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // even when a callback is wired. Verifies the option actually
         // gates the repair attempt.
         var f = await SeedOneFileAsync("repair-disabled.bin", RandomBytes(4096));
-        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{f.Chunks[0].Hash}");
 
         var repairCalls = 0;
         _integrityService.RepairCallback = (path, ct) =>
@@ -851,7 +851,7 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // NOT suppress the original integrity failure -- the user has to
         // see it. Also the .diag is written so audit evidence exists.
         var f = await SeedOneFileAsync("repair-cb-fail.bin", RandomBytes(4096));
-        await _blobService.DeleteBlobAsync($"chunks/{f.Chunks[0].Hash}");
+        await _blobService.DeleteObjectAsync($"chunks/{f.Chunks[0].Hash}");
 
         _integrityService.RepairCallback = (path, ct) => Task.FromResult(false);
 
@@ -883,13 +883,13 @@ public class IntegrityCheckServiceTests : IAsyncLifetime
         // run and (b) leaves its expected MD5 still null so it is re-checked.
         var f = await SeedOneFileAsync("deep-tofu.bin", RandomBytes(4096));
         var hash = f.Chunks[0].Hash;
-        var blobName = $"chunks/{hash}";
+        var objectKey = $"chunks/{hash}";
 
         // Simulate the legacy "never captured a baseline" state.
         ClearExpectedMd5(hash);
         // Corrupt the body in place (size preserved, so T1 structural is
         // clean and only a body download can detect it).
-        _blobService.TestOnlyCorruptByte(blobName, byteIndex: 25);
+        _blobService.TestOnlyCorruptByte(objectKey, byteIndex: 25);
 
         var result = await _integrityService.RunAsync(new IntegrityCheckOptions
         {

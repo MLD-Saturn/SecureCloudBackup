@@ -99,8 +99,8 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
         var stopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         // Act
-        var blobName = await blobService.UploadChunkAsync(data, hash);
-        var downloaded = await blobService.DownloadChunkAsync(blobName);
+        var objectKey = await blobService.UploadChunkAsync(data, hash);
+        var downloaded = await blobService.DownloadChunkAsync(objectKey);
 
         stopwatch.Stop();
 
@@ -309,16 +309,16 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
         var hash = ComputeHash(data);
         
         // Act - Try multiple times, expecting some failures but eventual success
-        string? blobName = null;
+        string? objectKey = null;
         int attempts = 0;
         const int maxAttempts = 10;
         
-        while (attempts < maxAttempts && blobName == null)
+        while (attempts < maxAttempts && objectKey == null)
         {
             attempts++;
             try
             {
-                blobName = await blobService.UploadChunkAsync(data, hash);
+                objectKey = await blobService.UploadChunkAsync(data, hash);
             }
             catch (InvalidOperationException)
             {
@@ -327,7 +327,7 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
         }
 
         // Assert - Should eventually succeed within 10 attempts
-        Assert.NotNull(blobName);
+        Assert.NotNull(objectKey);
         Assert.True(attempts <= maxAttempts);
     }
 
@@ -355,7 +355,7 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
         
         var data = CreateRandomContent(1024);
         var hash = ComputeHash(data);
-        var blobName = await reliableService.UploadChunkAsync(data, hash);
+        var objectKey = await reliableService.UploadChunkAsync(data, hash);
         
         // Create a flaky service that shares the same internal state
         // For testing, we'll verify download behavior with failures
@@ -371,7 +371,7 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
             attempts++;
             try
             {
-                downloaded = await flakyService.DownloadChunkAsync(blobName);
+                downloaded = await flakyService.DownloadChunkAsync(objectKey);
             }
             catch (InvalidOperationException)
             {
@@ -415,7 +415,7 @@ public class BackupRestoreResilienceTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
@@ -477,10 +477,10 @@ internal class FlakyBlobServiceWrapper
         _failureRate = Math.Clamp(failureRate, 0.0, 1.0);
     }
 
-    public async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         MaybeThrowFailure();
-        return await _inner.DownloadChunkAsync(blobName, cancellationToken);
+        return await _inner.DownloadChunkAsync(objectKey, cancellationToken);
     }
 
     private void MaybeThrowFailure()

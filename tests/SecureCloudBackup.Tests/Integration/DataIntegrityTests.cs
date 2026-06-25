@@ -196,8 +196,8 @@ public class DataIntegrityTests : IAsyncLifetime
         var hash = ComputeHash(originalData);
 
         // Act - Upload (encrypts) and download (decrypts)
-        var blobName = await blobService.UploadChunkAsync(originalData, hash);
-        var decryptedData = await blobService.DownloadChunkAsync(blobName);
+        var objectKey = await blobService.UploadChunkAsync(originalData, hash);
+        var decryptedData = await blobService.DownloadChunkAsync(objectKey);
 
         // Assert
         Assert.Equal(originalData, decryptedData);
@@ -363,7 +363,7 @@ public class DataIntegrityTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);
@@ -421,9 +421,9 @@ internal class CorruptingBlobService : InMemoryBlobService
     {
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
-        var data = await base.DownloadChunkAsync(blobName, cancellationToken);
+        var data = await base.DownloadChunkAsync(objectKey, cancellationToken);
         
         if (CorruptDownloads && data.Length > 0)
         {
@@ -449,9 +449,9 @@ internal class TruncatingBlobService : InMemoryBlobService
     {
     }
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
-        var data = await base.DownloadChunkAsync(blobName, cancellationToken);
+        var data = await base.DownloadChunkAsync(objectKey, cancellationToken);
         
         if (TruncateDownloads && data.Length > 10)
         {

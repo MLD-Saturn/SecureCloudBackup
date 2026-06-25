@@ -4,7 +4,7 @@ namespace SecureCloudBackup.Core;
 
 /// <summary>
 /// Validates blob names and hashes to prevent path traversal attacks.
-/// Shared by all IBlobStorageService implementations.
+/// Shared by all IObjectStorageService implementations.
 /// </summary>
 public static partial class BlobNameValidator
 {

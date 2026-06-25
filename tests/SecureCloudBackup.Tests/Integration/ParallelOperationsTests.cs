@@ -153,13 +153,13 @@ public class ParallelOperationsTests : IAsyncLifetime
         {
             var data = CreateRandomContent(64 * 1024);
             var hash = ComputeHash(data);
-            var blobName = await _blobService.UploadChunkAsync(data, hash);
-            originalChunks[blobName] = data;
+            var objectKey = await _blobService.UploadChunkAsync(data, hash);
+            originalChunks[objectKey] = data;
         }
 
         // Act - Download all chunks concurrently
-        var downloadTasks = originalChunks.Keys.Select(blobName =>
-            _blobService.DownloadChunkAsync(blobName));
+        var downloadTasks = originalChunks.Keys.Select(objectKey =>
+            _blobService.DownloadChunkAsync(objectKey));
         
         var downloadedChunks = await Task.WhenAll(downloadTasks);
 
@@ -179,11 +179,11 @@ public class ParallelOperationsTests : IAsyncLifetime
         // Arrange - Upload a single chunk
         var originalData = CreateRandomContent(128 * 1024);
         var hash = ComputeHash(originalData);
-        var blobName = await _blobService.UploadChunkAsync(originalData, hash);
+        var objectKey = await _blobService.UploadChunkAsync(originalData, hash);
 
         // Act - Download the same chunk 10 times concurrently
         var downloadTasks = Enumerable.Range(0, 10)
-            .Select(_ => _blobService.DownloadChunkAsync(blobName));
+            .Select(_ => _blobService.DownloadChunkAsync(objectKey));
         
         var results = await Task.WhenAll(downloadTasks);
 
@@ -204,8 +204,8 @@ public class ParallelOperationsTests : IAsyncLifetime
         {
             var data = CreateRandomContent(32 * 1024);
             var hash = ComputeHash(data);
-            var blobName = await _blobService.UploadChunkAsync(data, hash);
-            existingChunks[blobName] = data;
+            var objectKey = await _blobService.UploadChunkAsync(data, hash);
+            existingChunks[objectKey] = data;
         }
 
         // Create new chunks to upload
@@ -217,12 +217,12 @@ public class ParallelOperationsTests : IAsyncLifetime
         List<Task> tasks = new();
         
         // Download existing chunks
-        foreach (var blobName in existingChunks.Keys)
+        foreach (var objectKey in existingChunks.Keys)
         {
             tasks.Add(Task.Run(async () =>
             {
-                var downloaded = await _blobService.DownloadChunkAsync(blobName);
-                Assert.Equal(existingChunks[blobName], downloaded);
+                var downloaded = await _blobService.DownloadChunkAsync(objectKey);
+                Assert.Equal(existingChunks[objectKey], downloaded);
             }));
         }
         

@@ -19,7 +19,7 @@ public readonly record struct StorageAccessToken(string Token, DateTimeOffset Ex
 /// <para>
 /// This covers the interactive / federated token shape; the static-secret
 /// connection shape is handled separately by
-/// <see cref="IBlobStorageService.ConnectAsync(string, string)"/>.
+/// <see cref="IObjectStorageService.ConnectAsync(string, string)"/>.
 /// </para>
 /// </summary>
 public interface IStorageTokenProvider

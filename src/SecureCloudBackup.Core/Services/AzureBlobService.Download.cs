@@ -17,8 +17,8 @@ public partial class AzureBlobService
     /// Downloads and decrypts a chunk. Uses a single API call to retrieve both
     /// content and Content-MD5 hash for transport integrity verification.
     /// </summary>
-    public Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
-        => DownloadChunkAsync(blobName, encryptedBufferPool: null, cancellationToken);
+    public Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
+        => DownloadChunkAsync(objectKey, encryptedBufferPool: null, cancellationToken);
 
     /// <summary>
     /// B77 (W5 hot-path migration follow-up to B71/B73) overload: rent the
@@ -32,17 +32,17 @@ public partial class AzureBlobService
     /// the plaintext and streaming-download encrypted buffers there. Passing
     /// <see langword="null"/> preserves the pre-B77 behaviour.
     /// </summary>
-    public async Task<byte[]> DownloadChunkAsync(string blobName, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default)
+    public async Task<byte[]> DownloadChunkAsync(string objectKey, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
         // Validate blob name format
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
-        var chunkHash = blobName["chunks/".Length..];
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
+        var chunkHash = objectKey["chunks/".Length..];
 
         try
         {
@@ -73,24 +73,24 @@ public partial class AzureBlobService
                 var bytesRead = contentMemory.Length;
 
                 VerifyDownloadIntegrity(rentedEncrypted.AsSpan(0, bytesRead),
-                    storedContentHash, blobName, chunkHash, "DownloadChunkAsync");
+                    storedContentHash, objectKey, chunkHash, "DownloadChunkAsync");
 
                 Log(bytesRead > 0
-                    ? $"DownloadChunkAsync: Downloaded {blobName} ({bytesRead:N0} bytes encrypted), decrypting..."
-                    : $"DownloadChunkAsync: Downloaded {blobName} (Empty file? no bytes found), decrypting...");
+                    ? $"DownloadChunkAsync: Downloaded {objectKey} ({bytesRead:N0} bytes encrypted), decrypting..."
+                    : $"DownloadChunkAsync: Downloaded {objectKey} (Empty file? no bytes found), decrypting...");
 
                 try
                 {
                     var decrypted = _encryptionService.Decrypt(rentedEncrypted.AsSpan(0, bytesRead));
                     if (bytesRead > 0)
                     {
-                        Log($"DownloadChunkAsync: Decrypted {blobName}: {bytesRead:N0} -> {decrypted.Length:N0} bytes.");
+                        Log($"DownloadChunkAsync: Decrypted {objectKey}: {bytesRead:N0} -> {decrypted.Length:N0} bytes.");
                     }
                     return decrypted;
                 }
                 catch (Exception ex)
                 {
-                    Log($"DownloadChunkAsync: DECRYPT FAILED for {blobName} " +
+                    Log($"DownloadChunkAsync: DECRYPT FAILED for {objectKey} " +
                         $"(encryptedSize={bytesRead:N0}): {ex.GetType().Name}: {ex.Message}");
                     throw;
                 }
@@ -102,12 +102,12 @@ public partial class AzureBlobService
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
-            Log($"DownloadChunkAsync: Chunk not found (404): {blobName}");
-            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName, ex);
+            Log($"DownloadChunkAsync: Chunk not found (404): {objectKey}");
+            throw new DataIntegrityException($"Chunk not found: {objectKey}", objectKey, ex);
         }
         catch (RequestFailedException ex)
         {
-            Log($"DownloadChunkAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            Log($"DownloadChunkAsync: Azure request failed for {objectKey}: HTTP {ex.Status} - {ex.Message}");
             // Surface transient failures as the provider-neutral type so the restore
             // retry classifier stays free of any Azure SDK dependency; permanent
             // failures keep their original stack via a bare rethrow.
@@ -117,7 +117,7 @@ public partial class AzureBlobService
         }
         catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
         {
-            Log($"DownloadChunkAsync: EXCEPTION for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            Log($"DownloadChunkAsync: EXCEPTION for {objectKey}: {ex.GetType().Name}: {ex.Message}");
             throw;
         }
     }
@@ -127,16 +127,16 @@ public partial class AzureBlobService
     /// Returns null for chunks that are completely unrecoverable.
     /// Used for corrupted file recovery to __corrupted__ subfolder.
     /// </summary>
-    public async Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<byte[]?> DownloadChunkBestEffortAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
-        var chunkHash = blobName["chunks/".Length..];
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
+        var chunkHash = objectKey["chunks/".Length..];
 
         try
         {
@@ -161,14 +161,14 @@ public partial class AzureBlobService
                     FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
                         decrypted.Length, bytesRead, crcValid: crcValid,
                         extra: "aesGcm=OK");
-                    Log($"DownloadChunkBestEffortAsync: Recovered {blobName} ({bytesRead:N0} -> {decrypted.Length:N0} bytes)");
+                    Log($"DownloadChunkBestEffortAsync: Recovered {objectKey} ({bytesRead:N0} -> {decrypted.Length:N0} bytes)");
                 }
                 else
                 {
                     FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
                         0, bytesRead, crcValid: crcValid,
                         extra: "aesGcm=FAIL (unrecoverable)");
-                    Log($"DownloadChunkBestEffortAsync: {blobName} is unrecoverable (AES-GCM tag mismatch)");
+                    Log($"DownloadChunkBestEffortAsync: {objectKey} is unrecoverable (AES-GCM tag mismatch)");
                 }
                 return decrypted;
             }
@@ -181,14 +181,14 @@ public partial class AzureBlobService
         {
             FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
                 0, extra: "blob=404 (not found)");
-            Log($"DownloadChunkBestEffortAsync: Chunk not found: {blobName}");
+            Log($"DownloadChunkBestEffortAsync: Chunk not found: {objectKey}");
             return null;
         }
         catch (Exception ex)
         {
             FileOperationDiagnostics.RecordChunkAmbient("BestEffortDecrypt", chunkHash,
                 0, extra: $"error={ex.GetType().Name}: {ex.Message}");
-            Log($"DownloadChunkBestEffortAsync: Failed for {blobName}: {ex.Message}");
+            Log($"DownloadChunkBestEffortAsync: Failed for {objectKey}: {ex.Message}");
             return null;
         }
     }
@@ -201,15 +201,15 @@ public partial class AzureBlobService
     /// the T1 check uses to flag chunk-index-vs-storage drift.
     /// </summary>
     public async Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
         try
         {
             var response = await blobClient.GetPropertiesAsync(cancellationToken: cancellationToken);
@@ -234,8 +234,8 @@ public partial class AzureBlobService
     /// The caller SHOULD return the plaintext buffer via <c>ArrayPool&lt;byte&gt;.Shared.Return</c>
     /// after writing to disk; non-pooled arrays are accepted harmlessly by Return.
     /// </summary>
-    public Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
-        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool: null, cancellationToken);
+    public Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(objectKey, plaintextBufferPool: null, cancellationToken);
 
     /// <summary>
     /// B71 (W5 Phase 3 Commit 3) overload: rent the plaintext output from the
@@ -246,8 +246,8 @@ public partial class AzureBlobService
     /// method exits) and the per-core tier-cache retention that the recycler
     /// avoids only matters for buffers whose lifetime spans the channel.
     /// </summary>
-    public Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
-        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
+    public Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(objectKey, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
 
     /// <summary>
     /// B73 (W5 Phase 4 Commit 2) overload: in addition to the B71
@@ -262,18 +262,18 @@ public partial class AzureBlobService
     /// <see langword="null"/> for <paramref name="encryptedBufferPool"/>
     /// preserves the pre-B73 behaviour.
     /// </summary>
-    public async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+    public async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey,
         ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
-        var blobClient = _containerClient!.GetBlobClient(blobName);
-        var chunkHash = blobName["chunks/".Length..];
+        var blobClient = _containerClient!.GetBlobClient(objectKey);
+        var chunkHash = objectKey["chunks/".Length..];
 
         try
         {
@@ -316,16 +316,16 @@ public partial class AzureBlobService
                     FileOperationDiagnostics.RecordChunkAmbient("ShortRead", chunkHash,
                         0, bytesRead,
                         extra: $"expectedLen={contentLength}, gotLen={bytesRead} (parallel-range assembly incomplete)");
-                    Log($"DownloadChunkStreamingAsync: SHORT/OVER READ for {blobName} -- " +
+                    Log($"DownloadChunkStreamingAsync: SHORT/OVER READ for {objectKey} -- " +
                         $"expected {contentLength:N0} bytes, assembled {bytesRead:N0}; retrying as transient");
                     throw new DownloadIntegrityException(
-                        $"Download incomplete for {blobName} - assembled {bytesRead:N0} of {contentLength:N0} bytes", blobName);
+                        $"Download incomplete for {objectKey} - assembled {bytesRead:N0} of {contentLength:N0} bytes", objectKey);
                 }
 
                 VerifyDownloadIntegrity(rentedEncrypted.AsSpan(0, bytesRead),
-                    storedContentHash, blobName, chunkHash, "DownloadChunkStreamingAsync");
+                    storedContentHash, objectKey, chunkHash, "DownloadChunkStreamingAsync");
 
-                Log($"DownloadChunkStreamingAsync: Downloaded {blobName} ({bytesRead:N0} bytes encrypted), decrypting...");
+                Log($"DownloadChunkStreamingAsync: Downloaded {objectKey} ({bytesRead:N0} bytes encrypted), decrypting...");
 
                 // Decrypt into a rented plaintext buffer — eliminates the LOH allocation
                 // that Decrypt() would make internally. The caller returns this buffer
@@ -339,7 +339,7 @@ public partial class AzureBlobService
                     var decryptedLength = _encryptionService.DecryptInto(
                         rentedEncrypted.AsSpan(0, bytesRead), rentedPlaintext);
 
-                    Log($"DownloadChunkStreamingAsync: Decrypted {blobName}: {bytesRead:N0} -> {decryptedLength:N0} bytes");
+                    Log($"DownloadChunkStreamingAsync: Decrypted {objectKey}: {bytesRead:N0} -> {decryptedLength:N0} bytes");
                     return (rentedPlaintext, decryptedLength);
                 }
                 catch
@@ -359,12 +359,12 @@ public partial class AzureBlobService
         }
         catch (RequestFailedException ex) when (ex.Status == 404)
         {
-            Log($"DownloadChunkStreamingAsync: Chunk not found (404): {blobName}");
-            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName, ex);
+            Log($"DownloadChunkStreamingAsync: Chunk not found (404): {objectKey}");
+            throw new DataIntegrityException($"Chunk not found: {objectKey}", objectKey, ex);
         }
         catch (RequestFailedException ex)
         {
-            Log($"DownloadChunkStreamingAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            Log($"DownloadChunkStreamingAsync: Azure request failed for {objectKey}: HTTP {ex.Status} - {ex.Message}");
             // See DownloadChunkAsync: translate transient failures to the neutral
             // type for the retry classifier; rethrow permanent failures unchanged.
             if (TryTranslateTransient(ex) is { } transient)
@@ -373,7 +373,7 @@ public partial class AzureBlobService
         }
         catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
         {
-            Log($"DownloadChunkStreamingAsync: EXCEPTION for {blobName}: {ex.GetType().Name}: {ex.Message}");
+            Log($"DownloadChunkStreamingAsync: EXCEPTION for {objectKey}: {ex.GetType().Name}: {ex.Message}");
             throw;
         }
     }
@@ -381,7 +381,7 @@ public partial class AzureBlobService
     /// <summary>
     /// Lists all backed up files by retrieving metadata blobs.
     /// </summary>
-    public async Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default)
+    public async Task<List<string>> ListMetadataKeysAsync(CancellationToken cancellationToken = default)
     {
         EnsureConnected();
 
@@ -404,14 +404,14 @@ public partial class AzureBlobService
     /// <summary>
     /// Downloads and decrypts file metadata.
     /// </summary>
-    public async Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<BackedUpFile?> DownloadFileMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
         try
         {
-            var blobClient = _containerClient!.GetBlobClient(blobName);
+            var blobClient = _containerClient!.GetBlobClient(objectKey);
 
             // Single API call to get content (faster than GetProperties + DownloadTo)
             var response = await blobClient.DownloadContentAsync(cancellationToken);
@@ -425,7 +425,7 @@ public partial class AzureBlobService
             // long-lived plaintext artefact; the buffer itself is zeroed-on-return.
             var plaintextMax = encryptedMemory.Length - EncryptionService.EncryptionOverhead;
             if (plaintextMax <= 0)
-                throw new DataIntegrityException($"Metadata blob too short to decrypt: {blobName}", blobName);
+                throw new DataIntegrityException($"Metadata blob too short to decrypt: {objectKey}", objectKey);
 
             var rentedPlaintext = ArrayPool<byte>.Shared.Rent(plaintextMax);
             string json;
@@ -444,7 +444,7 @@ public partial class AzureBlobService
 
             var metadata = JsonSerializer.Deserialize<MetadataDto>(json);
             if (metadata == null)
-                throw new DataIntegrityException($"Failed to deserialize metadata for {blobName}", blobName);
+                throw new DataIntegrityException($"Failed to deserialize metadata for {objectKey}", objectKey);
 
             // Validate chunk sequence
             var sortedChunks = metadata.Chunks.OrderBy(c => c.Index).ToList();
@@ -452,8 +452,8 @@ public partial class AzureBlobService
             {
                 if (sortedChunks[i].Index != i)
                     throw new DataIntegrityException(
-                        $"Invalid chunk sequence in {blobName}: expected index {i}, found {sortedChunks[i].Index}", 
-                        blobName);
+                        $"Invalid chunk sequence in {objectKey}: expected index {i}, found {sortedChunks[i].Index}", 
+                        objectKey);
             }
 
             // Storage tier is not retrieved in single-call mode (would require separate GetProperties)
@@ -489,7 +489,7 @@ public partial class AzureBlobService
         }
         catch (JsonException ex)
         {
-            throw new DataIntegrityException($"Metadata corrupted for {blobName}", blobName, ex);
+            throw new DataIntegrityException($"Metadata corrupted for {objectKey}", objectKey, ex);
         }
     }
 }

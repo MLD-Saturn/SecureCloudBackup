@@ -7,7 +7,7 @@ namespace SecureCloudBackup.Tests;
 /// <summary>
 /// Pins the provider-neutral token-credential abstraction introduced when
 /// <see cref="Azure.Core.TokenCredential"/> was removed from
-/// <see cref="IBlobStorageService"/>: <see cref="AzureTokenCredentialProvider"/>
+/// <see cref="IObjectStorageService"/>: <see cref="AzureTokenCredentialProvider"/>
 /// presents an Azure credential as the neutral <see cref="IStorageTokenProvider"/>,
 /// and <see cref="AzureBlobService.ToTokenCredential"/> unwraps it directly (no
 /// round-trip) while adapting any other neutral provider for the Azure SDK.

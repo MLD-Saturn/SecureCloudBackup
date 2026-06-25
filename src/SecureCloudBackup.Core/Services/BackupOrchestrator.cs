@@ -17,7 +17,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     private readonly LocalDatabaseService _databaseService;
     private readonly EncryptionService _encryptionService;
     private readonly ChunkingService _chunkingService;
-    private readonly IBlobStorageService _blobService;
+    private readonly IObjectStorageService _blobService;
     private readonly FileWatcherService _fileWatcherService;
     private ChunkIndexService? _chunkIndexService;
 
@@ -423,7 +423,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         LocalDatabaseService databaseService,
         EncryptionService encryptionService,
         ChunkingService chunkingService,
-        IBlobStorageService blobService,
+        IObjectStorageService blobService,
         FileWatcherService fileWatcherService,
         IStorageAuthenticator? authenticator = null)
     {
@@ -685,8 +685,8 @@ public partial class BackupOrchestrator : IAsyncDisposable
     private async Task ConnectToAzureAsync(BackupConfiguration config)
     {
         AzureConnectionError = null;
-        var containerName = config.ContainerName ?? "backup";
-        Log($"ConnectToAzureAsync: AuthMethod={config.AuthMethod}, Container={containerName}");
+        var bucketName = config.ContainerName ?? "backup";
+        Log($"ConnectToAzureAsync: AuthMethod={config.AuthMethod}, Container={bucketName}");
         
         if (config.AuthMethod == AzureAuthMethod.EntraId)
         {
@@ -696,7 +696,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 Log($"ConnectToAzureAsync: Connecting with Entra ID to {config.BlobServiceUri}");
                 await _blobService.ConnectWithTokenAsync(
                     config.BlobServiceUri, 
-                    containerName, 
+                    bucketName, 
                     _tokenProvider);
                 Log("ConnectToAzureAsync: Entra ID connection established");
             }
@@ -715,7 +715,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
                 try
                 {
                     var connectionString = System.Text.Encoding.UTF8.GetString(decrypted);
-                    await _blobService.ConnectAsync(connectionString, containerName);
+                    await _blobService.ConnectAsync(connectionString, bucketName);
                     Log("ConnectToAzureAsync: Connection string connection established");
                 }
                 finally
@@ -845,7 +845,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// with. The same password becomes the new fresh-catalog password.</param>
     /// <param name="connectionString">Azure storage account connection string.
     /// Re-encrypted into the fresh catalog with the recovered key.</param>
-    /// <param name="containerName">Azure blob container that holds the backed-up
+    /// <param name="bucketName">Azure blob container that holds the backed-up
     /// chunks and metadata. Re-saved into the fresh catalog.</param>
     /// <param name="freshDatabasePath">Where to write the fresh catalog.
     /// Typically <c>AppMode.DatabasePath</c>.</param>
@@ -866,14 +866,14 @@ public partial class BackupOrchestrator : IAsyncDisposable
         string quarantinedDatabasePath,
         ReadOnlyMemory<char> password,
         string connectionString,
-        string containerName,
+        string bucketName,
         string freshDatabasePath,
         IProgress<(int processed, int total, string currentFile)>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(quarantinedDatabasePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         ArgumentException.ThrowIfNullOrWhiteSpace(freshDatabasePath);
         if (password.IsEmpty)
             throw new ArgumentException("Password cannot be empty", nameof(password));
@@ -972,7 +972,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         // the live blob connection. SaveConnectionStringAsync handles
         // both halves of that work.
         StatusChanged?.Invoke(this, "Connecting to Azure storage...");
-        await SaveConnectionStringAsync(connectionString, containerName);
+        await SaveConnectionStringAsync(connectionString, bucketName);
 
         // Phase 7: rebuild the catalog from Azure metadata. This wipes
         // the placeholder rows the fresh Initialize created and walks

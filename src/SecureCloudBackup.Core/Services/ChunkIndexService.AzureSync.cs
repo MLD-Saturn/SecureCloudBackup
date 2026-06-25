@@ -37,12 +37,12 @@ public partial class ChunkIndexService
         var plaintext = System.Text.Encoding.UTF8.GetBytes(json);
         var data = _encryptionService.Encrypt(plaintext);
 
-        await _blobService.UploadBlobAsync(IndexBackupBlobName, data, StorageTier.Cool, cancellationToken);
+        await _blobService.UploadObjectAsync(IndexBackupBlobName, data, StorageTier.Cool, cancellationToken);
 
         // Delete legacy unencrypted backup if it exists
         try
         {
-            await _blobService.DeleteBlobAsync("index/chunk-index-backup.json", cancellationToken);
+            await _blobService.DeleteObjectAsync("index/chunk-index-backup.json", cancellationToken);
         }
         catch { /* Ignore if legacy blob doesn't exist */ }
 
@@ -63,7 +63,7 @@ public partial class ChunkIndexService
 
         try
         {
-            var data = await _blobService.DownloadBlobAsync(IndexBackupBlobName, cancellationToken);
+            var data = await _blobService.DownloadObjectAsync(IndexBackupBlobName, cancellationToken);
 
             // Decrypt into a pooled buffer so the plaintext index backup (which can
             // be tens of megabytes at 1M+ chunks) does not land on the large-object
@@ -179,18 +179,18 @@ public partial class ChunkIndexService
         _databaseService.ClearChunkIndex();
 
         // Get all metadata blobs
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync(cancellationToken);
+        var metadataBlobs = await _blobService.ListMetadataKeysAsync(cancellationToken);
         var total = metadataBlobs.Count;
         Log($"Found {total} metadata blobs to process");
 
         // Phase 1 & 2: Download metadata and list chunk blobs concurrently.
         // These query different prefixes (metadata/ vs chunks/) so they don't contend.
         const int maxParallelMetadataDownloads = 64;
-        var allMetadata = new System.Collections.Concurrent.ConcurrentBag<(string blobName, BackedUpFile file)>();
+        var allMetadata = new System.Collections.Concurrent.ConcurrentBag<(string objectKey, BackedUpFile file)>();
         int downloaded = 0;
 
         // Start chunk listing immediately — it doesn't depend on metadata results
-        var chunkListingTask = _blobService.ListChunkBlobsWithPropertiesAsync(cancellationToken);
+        var chunkListingTask = _blobService.ListChunkKeysWithPropertiesAsync(cancellationToken);
 
         await Parallel.ForEachAsync(
             metadataBlobs,
@@ -199,19 +199,19 @@ public partial class ChunkIndexService
                 MaxDegreeOfParallelism = maxParallelMetadataDownloads,
                 CancellationToken = cancellationToken
             },
-            async (blobName, ct) =>
+            async (objectKey, ct) =>
             {
                 try
                 {
-                    var metadata = await _blobService.DownloadFileMetadataAsync(blobName, ct);
+                    var metadata = await _blobService.DownloadFileMetadataAsync(objectKey, ct);
                     if (metadata != null)
                     {
-                        allMetadata.Add((blobName, metadata));
+                        allMetadata.Add((objectKey, metadata));
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"Error downloading metadata {blobName}: {ex.Message}");
+                    Log($"Error downloading metadata {objectKey}: {ex.Message}");
                 }
 
                 var count = Interlocked.Increment(ref downloaded);
@@ -255,8 +255,8 @@ public partial class ChunkIndexService
 
                 // Collect chunk hashes referenced by valid (complete) metadata
                 var incompleteSet = new HashSet<string>(
-                    incompleteEntries.Select(e => e.blobName), StringComparer.Ordinal);
-                validMetadata = allMetadata.Where(e => !incompleteSet.Contains(e.blobName)).ToList();
+                    incompleteEntries.Select(e => e.objectKey), StringComparer.Ordinal);
+                validMetadata = allMetadata.Where(e => !incompleteSet.Contains(e.objectKey)).ToList();
 
                 var validChunkHashes = new HashSet<string>(
                     validMetadata.SelectMany(e => e.file.Chunks.Select(c => c.Hash)),
@@ -271,8 +271,8 @@ public partial class ChunkIndexService
 
                 // Build full list of blobs to delete (metadata + orphaned chunks)
                 var blobsToDelete = incompleteEntries
-                    .Select(e => (blobName: e.blobName, label: Path.GetFileName(e.file.LocalPath)))
-                    .Concat(orphanedChunkHashes.Select(h => (blobName: $"chunks/{h}", label: h[..8] + "...")))
+                    .Select(e => (objectKey: e.objectKey, label: Path.GetFileName(e.file.LocalPath)))
+                    .Concat(orphanedChunkHashes.Select(h => (objectKey: $"chunks/{h}", label: h[..8] + "...")))
                     .ToList();
 
                 // Parallel deletion of incomplete metadata and orphaned chunks
@@ -291,15 +291,15 @@ public partial class ChunkIndexService
                     {
                         try
                         {
-                            await _blobService.DeleteBlobAsync(item.blobName, ct);
-                            if (item.blobName.StartsWith("chunks/"))
+                            await _blobService.DeleteObjectAsync(item.objectKey, ct);
+                            if (item.objectKey.StartsWith("chunks/"))
                                 Interlocked.Increment(ref deletedChunks);
                             else
                                 Interlocked.Increment(ref deletedMetadata);
                         }
                         catch (Exception ex)
                         {
-                            Log($"Failed to delete {item.blobName}: {ex.Message}");
+                            Log($"Failed to delete {item.objectKey}: {ex.Message}");
                         }
 
                         var count = Interlocked.Increment(ref deletedCount);
@@ -412,13 +412,13 @@ public partial class ChunkIndexService
     private async Task<List<string>> ListAzureChunksAsync(CancellationToken cancellationToken)
     {
         // Use the blob service to list all chunks from Azure
-        return await _blobService.ListChunkBlobsAsync(cancellationToken);
+        return await _blobService.ListChunkKeysAsync(cancellationToken);
     }
 
     private async Task<(long size, StorageTier tier)> GetChunkInfoFromAzureAsync(
         string chunkHash, CancellationToken cancellationToken)
     {
-        var blobName = $"chunks/{chunkHash}";
-        return await _blobService.GetBlobPropertiesAsync(blobName, cancellationToken);
+        var objectKey = $"chunks/{chunkHash}";
+        return await _blobService.GetObjectPropertiesAsync(objectKey, cancellationToken);
     }
 }

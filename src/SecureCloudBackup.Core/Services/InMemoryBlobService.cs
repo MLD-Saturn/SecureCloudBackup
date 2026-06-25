@@ -7,7 +7,7 @@ using SecureCloudBackup.Core.Models;
 namespace SecureCloudBackup.Core.Services;
 
 /// <summary>
-/// In-memory implementation of IBlobStorageService for testing without Azure.
+/// In-memory implementation of IObjectStorageService for testing without Azure.
 /// Simulates blob storage behavior including deduplication, metadata storage,
 /// and security validation matching AzureBlobService behavior.
 /// Supports both connection string and Entra ID authentication (simulated).
@@ -15,7 +15,7 @@ namespace SecureCloudBackup.Core.Services;
 /// <para>
 /// <b>Discard mode (B27).</b> When the optional constructor parameter
 /// <c>retainPayloads</c> is <c>false</c>, chunk uploads still record the
-/// blob name and tier in the index (so dedup, BlobExistsAsync, listings
+/// blob name and tier in the index (so dedup, ObjectExistsAsync, listings
 /// and tier inspection continue to work) but the encrypted byte payload
 /// is replaced with <see cref="Array.Empty{T}()"/> before being stored.
 /// This breaks the RAM ceiling that the default retain-mode imposes on
@@ -33,7 +33,7 @@ namespace SecureCloudBackup.Core.Services;
 /// discard-mode store; restore-style benchmarks must not opt in.
 /// </para>
 /// </summary>
-public class InMemoryBlobService : IBlobStorageService
+public class InMemoryBlobService : IObjectStorageService
 {
     private readonly EncryptionService _encryptionService;
     private readonly ConcurrentDictionary<string, byte[]> _blobs = new();
@@ -90,7 +90,7 @@ public class InMemoryBlobService : IBlobStorageService
         ? _blobs.Values.Sum(b => (long)b.Length)
         : Interlocked.Read(ref _discardModeStorageBytes);
 
-    /// <summary>D6: see <see cref="IBlobStorageService.OnChunkUploaded"/>.</summary>
+    /// <summary>D6: see <see cref="IObjectStorageService.OnChunkUploaded"/>.</summary>
     public Action<string, byte[]>? OnChunkUploaded { get; set; }
 
     public InMemoryBlobService(
@@ -116,21 +116,21 @@ public class InMemoryBlobService : IBlobStorageService
 
     #region Connection String Authentication
 
-    public Task ConnectAsync(string connectionString, string containerName)
+    public Task ConnectAsync(string connectionString, string bucketName)
     {
         // For in-memory, we just validate inputs and mark as connected
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         
         _isConnected = true;
         return Task.CompletedTask;
     }
 
-    public Task<(bool success, string message)> TestConnectionAsync(string connectionString, string containerName)
+    public Task<(bool success, string message)> TestConnectionAsync(string connectionString, string bucketName)
     {
         if (string.IsNullOrWhiteSpace(connectionString))
             return Task.FromResult((false, "Connection string is required"));
-        if (string.IsNullOrWhiteSpace(containerName))
+        if (string.IsNullOrWhiteSpace(bucketName))
             return Task.FromResult((false, "Container name is required"));
             
         return Task.FromResult((true, "In-memory connection successful"));
@@ -140,11 +140,11 @@ public class InMemoryBlobService : IBlobStorageService
 
     #region Token Authentication
 
-    public Task ConnectWithTokenAsync(Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
+    public Task ConnectWithTokenAsync(Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider)
     {
         // For in-memory, we just validate inputs and mark as connected
         ArgumentNullException.ThrowIfNull(serviceUri);
-        ArgumentException.ThrowIfNullOrWhiteSpace(containerName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(bucketName);
         ArgumentNullException.ThrowIfNull(tokenProvider);
 
         _isConnected = true;
@@ -152,11 +152,11 @@ public class InMemoryBlobService : IBlobStorageService
     }
 
     public Task<(bool success, string message)> TestConnectionWithTokenAsync(
-        Uri serviceUri, string containerName, IStorageTokenProvider tokenProvider)
+        Uri serviceUri, string bucketName, IStorageTokenProvider tokenProvider)
     {
         if (serviceUri == null)
             return Task.FromResult((false, "Service URI is required"));
-        if (string.IsNullOrWhiteSpace(containerName))
+        if (string.IsNullOrWhiteSpace(bucketName))
             return Task.FromResult((false, "Container name is required"));
         if (tokenProvider == null)
             return Task.FromResult((false, "Token provider is required"));
@@ -175,7 +175,7 @@ public class InMemoryBlobService : IBlobStorageService
     /// allocate the stored payload directly so the buffer's lifetime IS the blob's
     /// lifetime), so the supplied <paramref name="encryptedBufferPool"/> is
     /// ignored. The overload exists so test surfaces and the
-    /// <see cref="IBlobStorageService"/> contract remain symmetric with
+    /// <see cref="IObjectStorageService"/> contract remain symmetric with
     /// <see cref="AzureBlobService"/>.
     /// </summary>
     public virtual Task<string> UploadChunkAsync(ReadOnlyMemory<byte> chunkData, string chunkHash,
@@ -194,10 +194,10 @@ public class InMemoryBlobService : IBlobStorageService
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk");
 
-        var blobName = $"chunks/{chunkHash}";
+        var objectKey = $"chunks/{chunkHash}";
 
         // Check for deduplication
-        if (_blobs.ContainsKey(blobName))
+        if (_blobs.ContainsKey(objectKey))
         {
             // B27: discard-mode short-circuit. The original bytes are no
             // longer present to compare against, so we cannot run the
@@ -206,7 +206,7 @@ public class InMemoryBlobService : IBlobStorageService
             if (!_retainPayloads)
             {
                 progress?.Report(chunkData.Length);
-                return blobName;
+                return objectKey;
             }
 
             // Defense-in-depth: Verify the stored chunk actually matches our data
@@ -225,7 +225,7 @@ public class InMemoryBlobService : IBlobStorageService
             {
                 // Chunk verified - safe to deduplicate
                 progress?.Report(chunkData.Length);
-                return blobName;
+                return objectKey;
             }
 
             // Hash collision on primary slot - find or create the appropriate _vN blob.
@@ -237,12 +237,12 @@ public class InMemoryBlobService : IBlobStorageService
                 return resolvedName;
             }
 
-            blobName = resolvedName;
+            objectKey = resolvedName;
         }
 
         // Encrypt and store
         var encryptedData = _encryptionService.Encrypt(chunkData.Span);
-        StoreChunkBlob(blobName, encryptedData, storageTier);
+        StoreChunkBlob(objectKey, encryptedData, storageTier);
 
         Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
         Interlocked.Increment(ref _totalOperations);
@@ -265,7 +265,7 @@ public class InMemoryBlobService : IBlobStorageService
             catch { /* upload already succeeded; never roll back on callback failure */ }
         }
 
-        return blobName;
+        return objectKey;
     }
 
     /// <summary>
@@ -293,11 +293,11 @@ public class InMemoryBlobService : IBlobStorageService
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Upload chunk direct");
 
-        var blobName = $"chunks/{chunkHash}";
+        var objectKey = $"chunks/{chunkHash}";
 
         // Direct upload - no deduplication check (for new files)
         var encryptedData = _encryptionService.Encrypt(chunkData.Span);
-        StoreChunkBlob(blobName, encryptedData, storageTier);
+        StoreChunkBlob(objectKey, encryptedData, storageTier);
 
         Interlocked.Add(ref _totalBytesUploaded, encryptedData.Length);
         Interlocked.Increment(ref _totalOperations);
@@ -320,7 +320,7 @@ public class InMemoryBlobService : IBlobStorageService
             catch { /* upload already succeeded */ }
         }
 
-        return blobName;
+        return objectKey;
     }
 
     public async Task UploadFileMetadataAsync(BackedUpFile fileInfo, StorageTier storageTier = StorageTier.Hot, 
@@ -345,27 +345,27 @@ public class InMemoryBlobService : IBlobStorageService
         var encryptedMetadata = _encryptionService.Encrypt(System.Text.Encoding.UTF8.GetBytes(metadata));
 
         var metadataHash = _encryptionService.ComputeHmacHex(fileInfo.LocalPath);
-        var blobName = $"metadata/{metadataHash}";
+        var objectKey = $"metadata/{metadataHash}";
         
-        _blobs[blobName] = encryptedMetadata;
+        _blobs[objectKey] = encryptedMetadata;
         Interlocked.Increment(ref _totalOperations);
     }
 
-    public virtual async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public virtual async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
         // Validate blob name format - must start with "chunks/" (same as AzureBlobService)
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
         await SimulateLatencyAsync(cancellationToken);
         SimulateFailure("Download chunk");
 
-        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        if (!_blobs.TryGetValue(objectKey, out var encryptedData))
         {
-            throw new DataIntegrityException($"Chunk not found: {blobName}", blobName);
+            throw new DataIntegrityException($"Chunk not found: {objectKey}", objectKey);
         }
 
         Interlocked.Increment(ref _totalOperations);
@@ -383,16 +383,16 @@ public class InMemoryBlobService : IBlobStorageService
     /// here so tests that rent through the in-memory backend exercise the
     /// same dispatch shape as production.
     /// </summary>
-    public virtual Task<byte[]> DownloadChunkAsync(string blobName, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default)
-        => DownloadChunkAsync(blobName, cancellationToken);
+    public virtual Task<byte[]> DownloadChunkAsync(string objectKey, ChunkBufferPool? encryptedBufferPool, CancellationToken cancellationToken = default)
+        => DownloadChunkAsync(objectKey, cancellationToken);
 
     /// <summary>
     /// Streaming download variant — in-memory implementation delegates to <see cref="DownloadChunkAsync"/>
     /// since there is no actual I/O stream to optimize.
     /// Copies into a rented buffer so the consumer can safely call Return.
     /// </summary>
-    public virtual Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, CancellationToken cancellationToken = default)
-        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool: null, cancellationToken);
+    public virtual Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(objectKey, plaintextBufferPool: null, cancellationToken);
 
     /// <summary>
     /// B71 (W5 Phase 3 Commit 3) overload: rent the plaintext output from the
@@ -400,8 +400,8 @@ public class InMemoryBlobService : IBlobStorageService
     /// from <see cref="ArrayPool{T}.Shared"/>. Mirrors
     /// <see cref="AzureBlobService.DownloadChunkStreamingAsync(string, ChunkBufferPool?, CancellationToken)"/>.
     /// </summary>
-    public virtual Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
-        => DownloadChunkStreamingAsync(blobName, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
+    public virtual Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey, ChunkBufferPool? plaintextBufferPool, CancellationToken cancellationToken = default)
+        => DownloadChunkStreamingAsync(objectKey, plaintextBufferPool, encryptedBufferPool: null, cancellationToken);
 
     /// <summary>
     /// B73 (W5 Phase 4 Commit 2) overload: the in-memory service does not maintain a
@@ -410,11 +410,11 @@ public class InMemoryBlobService : IBlobStorageService
     /// for interface symmetry and ignored. The
     /// <paramref name="plaintextBufferPool"/> contract is unchanged from B71.
     /// </summary>
-    public virtual async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string blobName,
+    public virtual async Task<(byte[] Buffer, int Length)> DownloadChunkStreamingAsync(string objectKey,
         ChunkBufferPool? plaintextBufferPool, ChunkBufferPool? encryptedBufferPool,
         CancellationToken cancellationToken = default)
     {
-        var data = await DownloadChunkAsync(blobName, cancellationToken);
+        var data = await DownloadChunkAsync(objectKey, cancellationToken);
         byte[] rented = plaintextBufferPool is null
             ? ArrayPool<byte>.Shared.Rent(data.Length)
             : plaintextBufferPool.Rent(data.Length).Buffer;
@@ -426,17 +426,17 @@ public class InMemoryBlobService : IBlobStorageService
     /// Downloads a chunk with best-effort decryption (skips CRC32 check).
     /// Returns null for unrecoverable chunks.
     /// </summary>
-    public virtual async Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    public virtual async Task<byte[]?> DownloadChunkBestEffortAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!blobName.StartsWith("chunks/"))
+        if (!objectKey.StartsWith("chunks/"))
             throw new SecurityPolicyException("Invalid chunk blob name", SecurityPolicyType.InvalidBlobName);
 
         await SimulateLatencyAsync(cancellationToken);
 
-        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        if (!_blobs.TryGetValue(objectKey, out var encryptedData))
             return null;
 
         Interlocked.Increment(ref _totalOperations);
@@ -456,12 +456,12 @@ public class InMemoryBlobService : IBlobStorageService
 
         await SimulateLatencyAsync(cancellationToken);
 
-        var blobName = $"chunks/{chunkHash}";
+        var objectKey = $"chunks/{chunkHash}";
         var shortHash = chunkHash[..Math.Min(12, chunkHash.Length)];
 
         // Preserve the existing tier; Archive-tier blobs cannot be overwritten
         // without rehydration, so they are skipped.
-        var tier = _blobTiers.TryGetValue(blobName, out var existingTier) ? existingTier : StorageTier.Hot;
+        var tier = _blobTiers.TryGetValue(objectKey, out var existingTier) ? existingTier : StorageTier.Hot;
         if (tier == StorageTier.Archive)
         {
             FileOperationDiagnostics.RecordAmbient(
@@ -474,7 +474,7 @@ public class InMemoryBlobService : IBlobStorageService
             // Re-encrypt the recovered plaintext into a fresh, valid envelope and
             // overwrite the corrupted blob under the same content-addressed name.
             var encryptedData = _encryptionService.Encrypt(chunkData.Span);
-            StoreChunkBlob(blobName, encryptedData, tier);
+            StoreChunkBlob(objectKey, encryptedData, tier);
             Interlocked.Increment(ref _totalOperations);
 
             FileOperationDiagnostics.RecordAmbient(
@@ -493,7 +493,7 @@ public class InMemoryBlobService : IBlobStorageService
         }
     }
 
-    public Task<List<string>> ListMetadataBlobsAsync(CancellationToken cancellationToken = default)
+    public Task<List<string>> ListMetadataKeysAsync(CancellationToken cancellationToken = default)
     {
         EnsureConnected();
 
@@ -511,11 +511,11 @@ public class InMemoryBlobService : IBlobStorageService
     /// integrity-check engine sees the same shape against both backends.
     /// </summary>
     public Task<(bool Exists, long ContentLength, byte[]? ContentHash)> GetChunkPropertiesAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
-        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
+        if (!_blobs.TryGetValue(objectKey, out var encryptedData))
         {
             return Task.FromResult<(bool, long, byte[]?)>((false, 0, null));
         }
@@ -524,14 +524,14 @@ public class InMemoryBlobService : IBlobStorageService
         return Task.FromResult<(bool, long, byte[]?)>((true, encryptedData.Length, hash));
     }
 
-    public async Task<BackedUpFile?> DownloadFileMetadataAsync(string blobName, CancellationToken cancellationToken = default)
+    public async Task<BackedUpFile?> DownloadFileMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
         
         await SimulateLatencyAsync(cancellationToken);
 
-        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        if (!_blobs.TryGetValue(objectKey, out var encryptedData))
         {
             return null;
         }
@@ -568,17 +568,17 @@ public class InMemoryBlobService : IBlobStorageService
         }
         catch (Exception ex) when (ex is not DataIntegrityException)
         {
-            throw new DataIntegrityException($"Failed to read metadata: {blobName}", blobName, ex);
+            throw new DataIntegrityException($"Failed to read metadata: {objectKey}", objectKey, ex);
         }
     }
 
-    public Task DeleteBlobAsync(string blobName, CancellationToken cancellationToken = default)
+    public Task DeleteObjectAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        _blobs.TryRemove(blobName, out _);
-        _blobTiers.TryRemove(blobName, out _);
+        _blobs.TryRemove(objectKey, out _);
+        _blobTiers.TryRemove(objectKey, out _);
         Interlocked.Increment(ref _totalOperations);
 
         return Task.CompletedTask;
@@ -595,17 +595,17 @@ public class InMemoryBlobService : IBlobStorageService
     /// surfaces as the in-envelope CRC32 fault (the production CRC bug
     /// signature).
     /// </summary>
-    public void TestOnlyCorruptByte(string blobName, int byteIndex, bool keepMd5InSync = false)
+    public void TestOnlyCorruptByte(string objectKey, int byteIndex, bool keepMd5InSync = false)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
-        if (!_blobs.TryGetValue(blobName, out var existing))
-            throw new InvalidOperationException($"Blob not found: {blobName}");
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
+        if (!_blobs.TryGetValue(objectKey, out var existing))
+            throw new InvalidOperationException($"Blob not found: {objectKey}");
         if (byteIndex < 0 || byteIndex >= existing.Length)
             throw new ArgumentOutOfRangeException(nameof(byteIndex));
         var copy = new byte[existing.Length];
         existing.CopyTo(copy, 0);
         copy[byteIndex] ^= 0xFF;
-        _blobs[blobName] = copy;
+        _blobs[objectKey] = copy;
         // keepMd5InSync is unused by InMemoryBlobService because we don't
         // track Azure ContentHash separately -- GetChunkPropertiesAsync
         // recomputes MD5 every call from the current bytes. Real Azure
@@ -614,69 +614,69 @@ public class InMemoryBlobService : IBlobStorageService
         _ = keepMd5InSync;
     }
 
-    public Task UploadBlobAsync(string blobName, byte[] data, StorageTier storageTier = StorageTier.Hot,
+    public Task UploadObjectAsync(string objectKey, byte[] data, StorageTier storageTier = StorageTier.Hot,
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
         ArgumentNullException.ThrowIfNull(data);
 
         // Store raw data (not encrypted) for generic blobs
-        _blobs[blobName] = data;
-        _blobTiers[blobName] = storageTier;
+        _blobs[objectKey] = data;
+        _blobTiers[objectKey] = storageTier;
         Interlocked.Increment(ref _totalOperations);
         
         return Task.CompletedTask;
     }
 
-    public Task<byte[]> DownloadBlobAsync(string blobName, CancellationToken cancellationToken = default)
+    public Task<byte[]> DownloadObjectAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
         
-        if (!_blobs.TryGetValue(blobName, out var data))
+        if (!_blobs.TryGetValue(objectKey, out var data))
         {
-            throw new InvalidOperationException($"Blob not found: {blobName}");
+            throw new InvalidOperationException($"Blob not found: {objectKey}");
         }
         
         Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(data);
     }
 
-    public Task<(long sizeBytes, StorageTier tier)> GetBlobPropertiesAsync(
-        string blobName, CancellationToken cancellationToken = default)
+    public Task<(long sizeBytes, StorageTier tier)> GetObjectPropertiesAsync(
+        string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!_blobs.TryGetValue(blobName, out var data))
+        if (!_blobs.TryGetValue(objectKey, out var data))
         {
-            throw new InvalidOperationException($"Blob not found: {blobName}");
+            throw new InvalidOperationException($"Blob not found: {objectKey}");
         }
 
         // Get tier from our tracking dictionary, default to Cool
-        var tier = _blobTiers.GetValueOrDefault(blobName, StorageTier.Hot);
+        var tier = _blobTiers.GetValueOrDefault(objectKey, StorageTier.Hot);
         
         Interlocked.Increment(ref _totalOperations);
         return Task.FromResult(((long)data.Length, tier));
     }
 
-    public Task SetBlobTierAsync(string blobName, StorageTier tier, CancellationToken cancellationToken = default)
+    public Task SetObjectTierAsync(string objectKey, StorageTier tier, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
-        if (!_blobs.ContainsKey(blobName))
+        if (!_blobs.ContainsKey(objectKey))
         {
-            throw new InvalidOperationException($"Blob not found: {blobName}");
+            throw new InvalidOperationException($"Blob not found: {objectKey}");
         }
 
-        _blobTiers[blobName] = tier;
+        _blobTiers[objectKey] = tier;
         Interlocked.Increment(ref _totalOperations);
         return Task.CompletedTask;
     }
 
-    public Task<List<string>> ListChunkBlobsAsync(CancellationToken cancellationToken = default)
+    public Task<List<string>> ListChunkKeysAsync(CancellationToken cancellationToken = default)
     {
         EnsureConnected();
 
@@ -692,7 +692,7 @@ public class InMemoryBlobService : IBlobStorageService
     /// <summary>
     /// Lists all chunk blobs with their properties (size and tier).
     /// </summary>
-    public Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkBlobsWithPropertiesAsync(
+    public Task<Dictionary<string, (long sizeBytes, StorageTier tier)>> ListChunkKeysWithPropertiesAsync(
         CancellationToken cancellationToken = default)
     {
         EnsureConnected();
@@ -712,13 +712,13 @@ public class InMemoryBlobService : IBlobStorageService
         return Task.FromResult(result);
     }
 
-    public Task<bool> BlobExistsAsync(string blobName, CancellationToken cancellationToken = default)
+    public Task<bool> ObjectExistsAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         EnsureConnected();
-        ArgumentException.ThrowIfNullOrWhiteSpace(blobName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
 
         Interlocked.Increment(ref _totalOperations);
-        return Task.FromResult(_blobs.ContainsKey(blobName));
+        return Task.FromResult(_blobs.ContainsKey(objectKey));
     }
 
     /// <summary>
@@ -731,9 +731,9 @@ public class InMemoryBlobService : IBlobStorageService
         EnsureConnected();
         ArgumentException.ThrowIfNullOrWhiteSpace(chunkHash);
 
-        var blobName = $"chunks/{chunkHash}";
+        var objectKey = $"chunks/{chunkHash}";
 
-        if (!_blobs.TryGetValue(blobName, out var encryptedData))
+        if (!_blobs.TryGetValue(objectKey, out var encryptedData))
         {
             throw new InvalidOperationException($"Chunk not found: {chunkHash}");
         }
@@ -871,9 +871,9 @@ public class InMemoryBlobService : IBlobStorageService
     /// <summary>
     /// Gets raw encrypted blob data (for test verification).
     /// </summary>
-    public byte[]? GetRawBlob(string blobName)
+    public byte[]? GetRawBlob(string objectKey)
     {
-        _blobs.TryGetValue(blobName, out var data);
+        _blobs.TryGetValue(objectKey, out var data);
         return data;
     }
 
@@ -891,19 +891,19 @@ public class InMemoryBlobService : IBlobStorageService
     /// cost is recorded in <see cref="_discardModeStorageBytes"/> so
     /// <see cref="TotalStorageUsed"/> remains a meaningful diagnostic.
     /// </summary>
-    private void StoreChunkBlob(string blobName, byte[] encryptedData, StorageTier storageTier)
+    private void StoreChunkBlob(string objectKey, byte[] encryptedData, StorageTier storageTier)
     {
         if (_retainPayloads)
         {
-            _blobs[blobName] = encryptedData;
+            _blobs[objectKey] = encryptedData;
         }
         else
         {
-            _blobs[blobName] = Array.Empty<byte>();
+            _blobs[objectKey] = Array.Empty<byte>();
             Interlocked.Add(ref _discardModeStorageBytes, encryptedData.Length);
         }
 
-        _blobTiers[blobName] = storageTier;
+        _blobTiers[objectKey] = storageTier;
     }
 
     private async Task SimulateLatencyAsync(CancellationToken cancellationToken)

@@ -99,7 +99,7 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         Assert.Equal(0, result.FailedDeletions);
         
         // Verify chunk is actually deleted
-        var exists = await _blobService.BlobExistsAsync($"chunks/{orphanHash}");
+        var exists = await _blobService.ObjectExistsAsync($"chunks/{orphanHash}");
         Assert.False(exists);
     }
 
@@ -142,7 +142,7 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         Assert.Equal(1, result.SkippedStillReferenced);
         Assert.Equal(0, result.BytesFreed);
 
-        var exists = await _blobService.BlobExistsAsync($"chunks/{hash}");
+        var exists = await _blobService.ObjectExistsAsync($"chunks/{hash}");
         Assert.True(exists, "Re-referenced chunk must survive cleanup");
     }
 
@@ -171,8 +171,8 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         await _indexService.RemoveFileReferencesAsync(filePath);
         
         // Verify chunks were deleted automatically (since ref count = 0)
-        var exists1 = await _blobService.BlobExistsAsync($"chunks/{hash1}");
-        var exists2 = await _blobService.BlobExistsAsync($"chunks/{hash2}");
+        var exists1 = await _blobService.ObjectExistsAsync($"chunks/{hash1}");
+        var exists2 = await _blobService.ObjectExistsAsync($"chunks/{hash2}");
         Assert.False(exists1);
         Assert.False(exists2);
         
@@ -206,7 +206,7 @@ public class OrphanDetectionIntegrationTests : IAsyncLifetime
         Assert.NotNull(entry);
         Assert.Equal(1, entry.ReferenceCount);
         
-        var exists = await _blobService.BlobExistsAsync($"chunks/{sharedHash}");
+        var exists = await _blobService.ObjectExistsAsync($"chunks/{sharedHash}");
         Assert.True(exists);
     }
 

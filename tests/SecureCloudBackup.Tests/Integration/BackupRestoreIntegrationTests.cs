@@ -211,7 +211,7 @@ public class BackupRestoreIntegrationTests : IAsyncLifetime
         await _blobService.UploadFileMetadataAsync(backedUp);
 
         // Assert
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync();
+        var metadataBlobs = await _blobService.ListMetadataKeysAsync();
         Assert.Single(metadataBlobs);
         
         var retrieved = await _blobService.DownloadFileMetadataAsync(metadataBlobs[0]);
@@ -231,7 +231,7 @@ public class BackupRestoreIntegrationTests : IAsyncLifetime
         var backedUp = await BackupFileAsync(sourceFile);
         await _blobService.UploadFileMetadataAsync(backedUp);
         
-        var metadataBlobs = await _blobService.ListMetadataBlobsAsync();
+        var metadataBlobs = await _blobService.ListMetadataKeysAsync();
         var retrieved = await _blobService.DownloadFileMetadataAsync(metadataBlobs[0]);
 
         // Assert
@@ -304,7 +304,7 @@ public class BackupRestoreIntegrationTests : IAsyncLifetime
         var backedUp = await BackupFileAsync(sourceFile);
         
         // Delete a chunk from blob storage
-        await _blobService.DeleteBlobAsync(backedUp.Chunks[0].BlobName);
+        await _blobService.DeleteObjectAsync(backedUp.Chunks[0].BlobName);
 
         // Act & Assert
         var restorePath = Path.Combine(_restoreDirectory, "missing_chunk.txt");

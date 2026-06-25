@@ -115,12 +115,12 @@ public class CancellationTests : IAsyncLifetime
         var hash = ComputeHash(data);
         
         // Upload through the slow service first
-        var blobName = await blobService.UploadChunkAsync(data, hash);
+        var objectKey = await blobService.UploadChunkAsync(data, hash);
         
         CancellationTokenSource cts = new();
 
         // Act - Start download and cancel during the delay
-        var downloadTask = blobService.DownloadChunkAsync(blobName, cts.Token);
+        var downloadTask = blobService.DownloadChunkAsync(objectKey, cts.Token);
         
         await Task.Delay(50);
         cts.Cancel();
@@ -138,14 +138,14 @@ public class CancellationTests : IAsyncLifetime
         
         var data = CreateRandomContent(1024);
         var hash = ComputeHash(data);
-        var blobName = await blobService.UploadChunkAsync(data, hash);
+        var objectKey = await blobService.UploadChunkAsync(data, hash);
         
         CancellationTokenSource cts = new();
         cts.Cancel(); // Pre-cancel
 
         // Act & Assert
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            blobService.DownloadChunkAsync(blobName, cts.Token));
+            blobService.DownloadChunkAsync(objectKey, cts.Token));
     }
 
     #endregion
@@ -356,7 +356,7 @@ public class CancellationTests : IAsyncLifetime
 
     #region Helper Methods
 
-    private async Task<BackedUpFile> BackupFileAsync(IBlobStorageService blobService, string filePath)
+    private async Task<BackedUpFile> BackupFileAsync(IObjectStorageService blobService, string filePath)
     {
         FileInfo fileInfo = new(filePath);
         var (chunks, _) = await _chunkingService.ChunkFileForTestAsync(filePath);

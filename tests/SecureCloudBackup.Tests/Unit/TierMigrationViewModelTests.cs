@@ -7,8 +7,8 @@ namespace SecureCloudBackup.Tests;
 /// <summary>
 /// Tests for the blob tier migration operations used by the Migration tab.
 /// These exercise the same Core service calls that TierMigrationViewModel.MigrateSelectedAsync
-/// orchestrates: SetBlobTierAsync on each chunk, UploadFileMetadataAsync at the new tier,
-/// and GetBlobPropertiesAsync to verify the result.
+/// orchestrates: SetObjectTierAsync on each chunk, UploadFileMetadataAsync at the new tier,
+/// and GetObjectPropertiesAsync to verify the result.
 /// </summary>
 public class TierMigrationOperationsTests : IAsyncLifetime
 {
@@ -79,53 +79,53 @@ public class TierMigrationOperationsTests : IAsyncLifetime
         };
     }
 
-    #region SetBlobTierAsync — Single Chunk
+    #region SetObjectTierAsync — Single Chunk
 
     [Fact]
-    public async Task SetBlobTierAsync_ChangesChunkFromHotToCool()
+    public async Task SetObjectTierAsync_ChangesChunkFromHotToCool()
     {
         // Arrange
         await UploadChunkAsync(ChunkHash1, 1024, StorageTier.Hot);
 
         // Act
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
 
         // Assert
-        var (_, tier) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
         Assert.Equal(StorageTier.Cool, tier);
     }
 
     [Fact]
-    public async Task SetBlobTierAsync_ChangesChunkFromHotToCold()
+    public async Task SetObjectTierAsync_ChangesChunkFromHotToCold()
     {
         // Arrange
         await UploadChunkAsync(ChunkHash1, 1024, StorageTier.Hot);
 
         // Act
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Cold);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Cold);
 
         // Assert
-        var (_, tier) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
         Assert.Equal(StorageTier.Cold, tier);
     }
 
     [Fact]
-    public async Task SetBlobTierAsync_ChangesChunkFromHotToArchive()
+    public async Task SetObjectTierAsync_ChangesChunkFromHotToArchive()
     {
         // Arrange
         await UploadChunkAsync(ChunkHash1, 1024, StorageTier.Hot);
 
         // Act
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Archive);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Archive);
 
         // Assert
-        var (_, tier) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
         Assert.Equal(StorageTier.Archive, tier);
     }
 
     #endregion
 
-    #region SetBlobTierAsync — Multiple Chunks (Migration Workflow)
+    #region SetObjectTierAsync — Multiple Chunks (Migration Workflow)
 
     [Fact]
     public async Task MigrationWorkflow_ChangesAllChunkTiers()
@@ -141,14 +141,14 @@ public class TierMigrationOperationsTests : IAsyncLifetime
         // Act — same loop as MigrateSelectedAsync
         foreach (var chunk in file.Chunks)
         {
-            var blobName = string.IsNullOrEmpty(chunk.BlobName) ? $"chunks/{chunk.Hash}" : chunk.BlobName;
-            await _blobService.SetBlobTierAsync(blobName, StorageTier.Cold);
+            var objectKey = string.IsNullOrEmpty(chunk.BlobName) ? $"chunks/{chunk.Hash}" : chunk.BlobName;
+            await _blobService.SetObjectTierAsync(objectKey, StorageTier.Cold);
         }
 
         // Assert — all chunks moved to Cold
-        var (_, tier1) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
-        var (_, tier2) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash2}");
-        var (_, tier3) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash3}");
+        var (_, tier1) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier2) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash2}");
+        var (_, tier3) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash3}");
         Assert.Equal(StorageTier.Cold, tier1);
         Assert.Equal(StorageTier.Cold, tier2);
         Assert.Equal(StorageTier.Cold, tier3);
@@ -167,13 +167,13 @@ public class TierMigrationOperationsTests : IAsyncLifetime
         // Act — migrate only the selected file's chunks
         foreach (var chunk in selectedFile.Chunks)
         {
-            var blobName = string.IsNullOrEmpty(chunk.BlobName) ? $"chunks/{chunk.Hash}" : chunk.BlobName;
-            await _blobService.SetBlobTierAsync(blobName, StorageTier.Cool);
+            var objectKey = string.IsNullOrEmpty(chunk.BlobName) ? $"chunks/{chunk.Hash}" : chunk.BlobName;
+            await _blobService.SetObjectTierAsync(objectKey, StorageTier.Cool);
         }
 
         // Assert — only selected file's chunk changed
-        var (_, tier1) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
-        var (_, tier2) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash2}");
+        var (_, tier1) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier2) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash2}");
         Assert.Equal(StorageTier.Cool, tier1);
         Assert.Equal(StorageTier.Hot, tier2);
     }
@@ -193,7 +193,7 @@ public class TierMigrationOperationsTests : IAsyncLifetime
         var opsBeforeMigration = _blobService.TotalOperations;
 
         // Act — change chunk tier then re-upload metadata (same as MigrateSelectedAsync)
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
         await _blobService.UploadFileMetadataAsync(file, StorageTier.Cool);
         file.CurrentStorageTier = StorageTier.Cool;
 
@@ -215,7 +215,7 @@ public class TierMigrationOperationsTests : IAsyncLifetime
         await _blobService.UploadFileMetadataAsync(file, StorageTier.Cool);
 
         // Assert — metadata still downloadable
-        var blobs = await _blobService.ListMetadataBlobsAsync();
+        var blobs = await _blobService.ListMetadataKeysAsync();
         Assert.NotEmpty(blobs);
 
         var downloaded = await _blobService.DownloadFileMetadataAsync(blobs[0]);
@@ -229,40 +229,40 @@ public class TierMigrationOperationsTests : IAsyncLifetime
     #region Edge Cases
 
     [Fact]
-    public async Task SetBlobTierAsync_NonexistentBlob_Throws()
+    public async Task SetObjectTierAsync_NonexistentBlob_Throws()
     {
         // Act & Assert — setting tier on a blob that doesn't exist should fail
         await Assert.ThrowsAsync<InvalidOperationException>(
-            () => _blobService.SetBlobTierAsync("chunks/nonexistent", StorageTier.Cool));
+            () => _blobService.SetObjectTierAsync("chunks/nonexistent", StorageTier.Cool));
     }
 
     [Fact]
-    public async Task SetBlobTierAsync_SameTier_Succeeds()
+    public async Task SetObjectTierAsync_SameTier_Succeeds()
     {
         // Arrange — upload at Hot
         await UploadChunkAsync(ChunkHash1, 1024, StorageTier.Hot);
 
         // Act — set to same tier (no-op but should not throw)
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Hot);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Hot);
 
         // Assert
-        var (_, tier) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
         Assert.Equal(StorageTier.Hot, tier);
     }
 
     [Fact]
-    public async Task SetBlobTierAsync_SequentialTierChanges_AppliesLastTier()
+    public async Task SetObjectTierAsync_SequentialTierChanges_AppliesLastTier()
     {
         // Arrange
         await UploadChunkAsync(ChunkHash1, 1024, StorageTier.Hot);
 
         // Act — chain of tier changes (Hot → Cool → Cold → Archive)
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Cold);
-        await _blobService.SetBlobTierAsync($"chunks/{ChunkHash1}", StorageTier.Archive);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Cool);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Cold);
+        await _blobService.SetObjectTierAsync($"chunks/{ChunkHash1}", StorageTier.Archive);
 
         // Assert — final tier wins
-        var (_, tier) = await _blobService.GetBlobPropertiesAsync($"chunks/{ChunkHash1}");
+        var (_, tier) = await _blobService.GetObjectPropertiesAsync($"chunks/{ChunkHash1}");
         Assert.Equal(StorageTier.Archive, tier);
     }
 

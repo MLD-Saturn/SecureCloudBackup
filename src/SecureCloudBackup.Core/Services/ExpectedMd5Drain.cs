@@ -4,7 +4,7 @@ namespace SecureCloudBackup.Core.Services;
 
 /// <summary>
 /// I6 (post-D7 audit): drains
-/// <see cref="IBlobStorageService.OnChunkUploaded"/> callbacks off the
+/// <see cref="IObjectStorageService.OnChunkUploaded"/> callbacks off the
 /// upload thread so a slow <see cref="LocalDatabaseService.SetChunkExpectedMd5"/>
 /// (large WAL flush, contended write lock) cannot back-pressure the
 /// upload pipeline. The callback enqueues to an unbounded

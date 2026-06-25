@@ -7,7 +7,7 @@ namespace SecureCloudBackup.Core.Services;
 /// provider-neutral <see cref="IStorageTokenProvider"/>. This is the bridge that
 /// lets the Azure interactive sign-in flow (an Azure.Identity
 /// <see cref="TokenCredential"/>) pass through the neutral
-/// <see cref="IBlobStorageService"/> contract without the interface naming any
+/// <see cref="IObjectStorageService"/> contract without the interface naming any
 /// Azure type. <see cref="AzureBlobService"/> unwraps the original credential
 /// directly when it recognises this type, so no token round-trips through the
 /// neutral surface on the Azure path.

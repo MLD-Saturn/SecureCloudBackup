@@ -500,7 +500,7 @@ public class CorruptedRecoveryTests : IAsyncLifetime
     }
 
     private async Task<BackedUpFile> CreateAndBackupFile(
-        IBlobStorageService blobService, string relativePath, int size)
+        IObjectStorageService blobService, string relativePath, int size)
     {
         var fullPath = Path.Combine(_sourceDirectory, relativePath);
         var directory = Path.GetDirectoryName(fullPath);
@@ -596,9 +596,9 @@ internal class CorruptOnDownloadBlobService : InMemoryBlobService
         : base(encryptionService) { }
 
     public override async Task<byte[]> DownloadChunkAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
-        var data = await base.DownloadChunkAsync(blobName, cancellationToken);
+        var data = await base.DownloadChunkAsync(objectKey, cancellationToken);
 
         if (CorruptDownloads && data.Length > 0)
         {
@@ -644,9 +644,9 @@ internal class AllChunksUnrecoverableBlobService : InMemoryBlobService
         : base(encryptionService) { }
 
     public override async Task<byte[]> DownloadChunkAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
-        var data = await base.DownloadChunkAsync(blobName, cancellationToken);
+        var data = await base.DownloadChunkAsync(objectKey, cancellationToken);
 
         if (CorruptNormalDownloads && data.Length > 0)
         {
@@ -659,12 +659,12 @@ internal class AllChunksUnrecoverableBlobService : InMemoryBlobService
     }
 
     public override Task<byte[]?> DownloadChunkBestEffortAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
         if (FailBestEffort)
             return Task.FromResult<byte[]?>(null);
 
-        return base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+        return base.DownloadChunkBestEffortAsync(objectKey, cancellationToken);
     }
 
     public override Task<ChunkRepairOutcome> RepairChunkAsync(
@@ -690,9 +690,9 @@ internal class PartialRecoveryBlobService : InMemoryBlobService
         : base(encryptionService) { }
 
     public override async Task<byte[]> DownloadChunkAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
-        var data = await base.DownloadChunkAsync(blobName, cancellationToken);
+        var data = await base.DownloadChunkAsync(objectKey, cancellationToken);
 
         if (CorruptNormalDownloads && data.Length > 0)
         {
@@ -705,14 +705,14 @@ internal class PartialRecoveryBlobService : InMemoryBlobService
     }
 
     public override async Task<byte[]?> DownloadChunkBestEffortAsync(
-        string blobName, CancellationToken cancellationToken = default)
+        string objectKey, CancellationToken cancellationToken = default)
     {
         var index = _bestEffortCallCount++;
 
         if (UnrecoverableChunkIndices.Contains(index))
             return null;
 
-        return await base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+        return await base.DownloadChunkBestEffortAsync(objectKey, cancellationToken);
     }
 }
 
@@ -739,20 +739,20 @@ internal sealed class Md5RetryBlobService : InMemoryBlobService
     public int BestEffortCalls => Volatile.Read(ref _bestEffortCalls);
 
     /// <summary>Total normal-download attempts recorded for a given chunk blob.</summary>
-    public int AttemptsFor(string blobName) => _attempts.TryGetValue(blobName, out var n) ? n : 0;
+    public int AttemptsFor(string objectKey) => _attempts.TryGetValue(objectKey, out var n) ? n : 0;
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
-        var attempt = _attempts.AddOrUpdate(blobName, 1, (_, n) => n + 1);
+        var attempt = _attempts.AddOrUpdate(objectKey, 1, (_, n) => n + 1);
         if (FailuresEnabled && attempt <= _throwsPerBlob)
-            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {blobName}", blobName);
-        return await base.DownloadChunkAsync(blobName, cancellationToken);
+            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {objectKey}", objectKey);
+        return await base.DownloadChunkAsync(objectKey, cancellationToken);
     }
 
-    public override Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    public override Task<byte[]?> DownloadChunkBestEffortAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref _bestEffortCalls);
-        return base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+        return base.DownloadChunkBestEffortAsync(objectKey, cancellationToken);
     }
 }
 
@@ -781,19 +781,19 @@ internal sealed class SingleChunkMd5RetryBlobService : InMemoryBlobService
 
     public int BestEffortCalls => Volatile.Read(ref _bestEffortCalls);
 
-    public int AttemptsFor(string blobName) => _attempts.TryGetValue(blobName, out var n) ? n : 0;
+    public int AttemptsFor(string objectKey) => _attempts.TryGetValue(objectKey, out var n) ? n : 0;
 
-    public override async Task<byte[]> DownloadChunkAsync(string blobName, CancellationToken cancellationToken = default)
+    public override async Task<byte[]> DownloadChunkAsync(string objectKey, CancellationToken cancellationToken = default)
     {
-        var attempt = _attempts.AddOrUpdate(blobName, 1, (_, n) => n + 1);
-        if (FailuresEnabled && blobName == TargetBlobName && attempt <= ThrowsForTarget)
-            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {blobName}", blobName);
-        return await base.DownloadChunkAsync(blobName, cancellationToken);
+        var attempt = _attempts.AddOrUpdate(objectKey, 1, (_, n) => n + 1);
+        if (FailuresEnabled && objectKey == TargetBlobName && attempt <= ThrowsForTarget)
+            throw new DownloadIntegrityException($"Simulated Content-MD5 mismatch for {objectKey}", objectKey);
+        return await base.DownloadChunkAsync(objectKey, cancellationToken);
     }
 
-    public override Task<byte[]?> DownloadChunkBestEffortAsync(string blobName, CancellationToken cancellationToken = default)
+    public override Task<byte[]?> DownloadChunkBestEffortAsync(string objectKey, CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref _bestEffortCalls);
-        return base.DownloadChunkBestEffortAsync(blobName, cancellationToken);
+        return base.DownloadChunkBestEffortAsync(objectKey, cancellationToken);
     }
 }

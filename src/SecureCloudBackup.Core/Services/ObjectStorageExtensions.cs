@@ -4,11 +4,11 @@ using SecureCloudBackup.Core.Models;
 namespace SecureCloudBackup.Core.Services;
 
 /// <summary>
-/// Extension methods for <see cref="IBlobStorageService"/> providing shared high-level operations.
+/// Extension methods for <see cref="IObjectStorageService"/> providing shared high-level operations.
 /// Consolidates the parallel metadata-loading pattern used by Restore, Sync, Tier Migration,
 /// and Backup Preview into a single implementation.
 /// </summary>
-public static class BlobStorageExtensions
+public static class ObjectStorageExtensions
 {
     /// <summary>
     /// Default concurrency for metadata downloads. Each download is a small HTTP GET
@@ -28,12 +28,12 @@ public static class BlobStorageExtensions
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns>List of all backed-up file metadata entries.</returns>
     public static async Task<List<BackedUpFile>> LoadAllFileMetadataAsync(
-        this IBlobStorageService blobService,
+        this IObjectStorageService blobService,
         IProgress<(int completed, int total)>? progress = null,
         int concurrency = DefaultMetadataDownloadConcurrency,
         CancellationToken cancellationToken = default)
     {
-        var metadataBlobs = await blobService.ListMetadataBlobsAsync(cancellationToken);
+        var metadataBlobs = await blobService.ListMetadataKeysAsync(cancellationToken);
         var total = metadataBlobs.Count;
 
         if (total == 0)
@@ -51,9 +51,9 @@ public static class BlobStorageExtensions
                 MaxDegreeOfParallelism = concurrency,
                 CancellationToken = cancellationToken
             },
-            async (blobName, ct) =>
+            async (objectKey, ct) =>
             {
-                var file = await blobService.DownloadFileMetadataAsync(blobName, ct);
+                var file = await blobService.DownloadFileMetadataAsync(objectKey, ct);
                 if (file != null)
                 {
                     files.Add(file);

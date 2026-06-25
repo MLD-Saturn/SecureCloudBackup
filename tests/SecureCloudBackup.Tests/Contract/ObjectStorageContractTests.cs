@@ -8,13 +8,13 @@ using Xunit;
 namespace SecureCloudBackup.Tests;
 
 /// <summary>
-/// Provider-agnostic behavioral contract for <see cref="IBlobStorageService"/>.
+/// Provider-agnostic behavioral contract for <see cref="IObjectStorageService"/>.
 /// Every storage backend -- the in-memory test double today, a real cloud
 /// provider in the future -- must satisfy these assertions.
 /// <para>
 /// A concrete derived class supplies a CONNECTED service via
 /// <see cref="CreateConnectedServiceAsync"/>; the test bodies here touch ONLY
-/// the <see cref="IBlobStorageService"/> surface (never an implementation-
+/// the <see cref="IObjectStorageService"/> surface (never an implementation-
 /// specific member such as <c>InMemoryBlobService.StoredBlobNames</c>) so they
 /// transfer unchanged to any implementation. This abstract class carries the
 /// [Fact] methods and xUnit runs them once per concrete subclass; xUnit does
@@ -34,14 +34,14 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     protected EncryptionService Encryption { get; private set; } = null!;
 
     /// <summary>The connected service under test, exposed only through its interface.</summary>
-    protected IBlobStorageService Service { get; private set; } = null!;
+    protected IObjectStorageService Service { get; private set; } = null!;
 
     /// <summary>
     /// Creates a CONNECTED storage service bound to <paramref name="encryption"/>.
     /// Implementations connect to whatever backing store they represent so the
     /// contract bodies can assume a ready-to-use service.
     /// </summary>
-    protected abstract Task<IBlobStorageService> CreateConnectedServiceAsync(EncryptionService encryption);
+    protected abstract Task<IObjectStorageService> CreateConnectedServiceAsync(EncryptionService encryption);
 
     public async Task InitializeAsync()
     {
@@ -120,7 +120,7 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
         var second = await Service.UploadChunkAsync(data, hash);
 
         Assert.Equal(first, second);
-        Assert.True(await Service.BlobExistsAsync(first));
+        Assert.True(await Service.ObjectExistsAsync(first));
     }
 
     [Fact]
@@ -286,7 +286,7 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     {
         var file = CreateBackedUpFile(@"C:\contract\test.txt", 1024);
         await Service.UploadFileMetadataAsync(file);
-        var blobs = await Service.ListMetadataBlobsAsync();
+        var blobs = await Service.ListMetadataKeysAsync();
         var key = blobs.First();
 
         var downloaded = await Service.DownloadFileMetadataAsync(key);
@@ -297,13 +297,13 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task ListMetadataBlobsAsync_MultipleFiles_ReturnsAll()
+    public async Task ListMetadataKeysAsync_MultipleFiles_ReturnsAll()
     {
         await Service.UploadFileMetadataAsync(CreateBackedUpFile(@"C:\contract\f1.txt", 1024));
         await Service.UploadFileMetadataAsync(CreateBackedUpFile(@"C:\contract\f2.txt", 2048));
         await Service.UploadFileMetadataAsync(CreateBackedUpFile(@"C:\contract\f3.txt", 4096));
 
-        var blobs = await Service.ListMetadataBlobsAsync();
+        var blobs = await Service.ListMetadataKeysAsync();
 
         Assert.Equal(3, blobs.Count);
     }
@@ -318,8 +318,8 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
         var payload = CreateRandomContent(256);
         const string name = "system/index-backup";
 
-        await Service.UploadBlobAsync(name, payload);
-        var downloaded = await Service.DownloadBlobAsync(name);
+        await Service.UploadObjectAsync(name, payload);
+        var downloaded = await Service.DownloadObjectAsync(name);
 
         Assert.Equal(payload, downloaded);
     }
@@ -329,35 +329,35 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     #region Existence / deletion
 
     [Fact]
-    public async Task BlobExistsAsync_AfterUpload_IsTrue()
+    public async Task ObjectExistsAsync_AfterUpload_IsTrue()
     {
         var data = CreateRandomContent(512);
         var objectKey = await Service.UploadChunkAsync(data, ComputeHash(data));
 
-        Assert.True(await Service.BlobExistsAsync(objectKey));
+        Assert.True(await Service.ObjectExistsAsync(objectKey));
     }
 
     [Fact]
-    public async Task BlobExistsAsync_UnknownName_IsFalse()
+    public async Task ObjectExistsAsync_UnknownName_IsFalse()
     {
-        Assert.False(await Service.BlobExistsAsync("chunks/does-not-exist"));
+        Assert.False(await Service.ObjectExistsAsync("chunks/does-not-exist"));
     }
 
     [Fact]
-    public async Task DeleteBlobAsync_ExistingChunk_RemovesIt()
+    public async Task DeleteObjectAsync_ExistingChunk_RemovesIt()
     {
         var data = CreateRandomContent(512);
         var objectKey = await Service.UploadChunkAsync(data, ComputeHash(data));
 
-        await Service.DeleteBlobAsync(objectKey);
+        await Service.DeleteObjectAsync(objectKey);
 
-        Assert.False(await Service.BlobExistsAsync(objectKey));
+        Assert.False(await Service.ObjectExistsAsync(objectKey));
     }
 
     [Fact]
-    public async Task DeleteBlobAsync_NonExistent_DoesNotThrow()
+    public async Task DeleteObjectAsync_NonExistent_DoesNotThrow()
     {
-        await Service.DeleteBlobAsync("chunks/nonexistent");
+        await Service.DeleteObjectAsync("chunks/nonexistent");
     }
 
     #endregion
@@ -365,26 +365,26 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     #region Tiering
 
     [Fact]
-    public async Task GetBlobPropertiesAsync_ReflectsUploadTier()
+    public async Task GetObjectPropertiesAsync_ReflectsUploadTier()
     {
         var data = CreateRandomContent(1024);
         var objectKey = await Service.UploadChunkAsync(data, ComputeHash(data), StorageTier.Cool);
 
-        var (sizeBytes, tier) = await Service.GetBlobPropertiesAsync(objectKey);
+        var (sizeBytes, tier) = await Service.GetObjectPropertiesAsync(objectKey);
 
         Assert.True(sizeBytes > 0);
         Assert.Equal(StorageTier.Cool, tier);
     }
 
     [Fact]
-    public async Task SetBlobTierAsync_ChangesReportedTier()
+    public async Task SetObjectTierAsync_ChangesReportedTier()
     {
         var data = CreateRandomContent(1024);
         var objectKey = await Service.UploadChunkAsync(data, ComputeHash(data), StorageTier.Hot);
 
-        await Service.SetBlobTierAsync(objectKey, StorageTier.Cool);
+        await Service.SetObjectTierAsync(objectKey, StorageTier.Cool);
 
-        var (_, tier) = await Service.GetBlobPropertiesAsync(objectKey);
+        var (_, tier) = await Service.GetObjectPropertiesAsync(objectKey);
         Assert.Equal(StorageTier.Cool, tier);
     }
 
@@ -393,26 +393,26 @@ public abstract class ObjectStorageContractTests : IAsyncLifetime
     #region Listing
 
     [Fact]
-    public async Task ListChunkBlobsAsync_ReturnsHashWithoutPrefix()
+    public async Task ListChunkKeysAsync_ReturnsHashWithoutPrefix()
     {
         var data = CreateRandomContent(1024);
         var hash = ComputeHash(data);
         await Service.UploadChunkAsync(data, hash);
 
-        var chunks = await Service.ListChunkBlobsAsync();
+        var chunks = await Service.ListChunkKeysAsync();
 
         Assert.Contains(hash, chunks);
         Assert.DoesNotContain($"chunks/{hash}", chunks);
     }
 
     [Fact]
-    public async Task ListChunkBlobsWithPropertiesAsync_ReturnsHashSizeAndTier()
+    public async Task ListChunkKeysWithPropertiesAsync_ReturnsHashSizeAndTier()
     {
         var data = CreateRandomContent(1024);
         var hash = ComputeHash(data);
         await Service.UploadChunkAsync(data, hash, StorageTier.Cool);
 
-        var map = await Service.ListChunkBlobsWithPropertiesAsync();
+        var map = await Service.ListChunkKeysWithPropertiesAsync();
 
         Assert.True(map.ContainsKey(hash));
         Assert.True(map[hash].sizeBytes > 0);
