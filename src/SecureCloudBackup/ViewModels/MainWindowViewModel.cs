@@ -283,12 +283,21 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
                                     !string.IsNullOrEmpty(PasswordConfirm) && 
                                     Password != PasswordConfirm;
 
+    // Storage provider selection. Only Azure Blob is wired today, so the
+    // picker is single-option; it exists so adding a provider is a new enum
+    // member + factory arm, with the UI already in place. The selected value
+    // is persisted via BackupConfiguration.Provider (config schema v4).
+    public IReadOnlyList<StorageProvider> AvailableProviders { get; } =
+        new[] { StorageProvider.AzureBlob };
+
+    [ObservableProperty]
+    private StorageProvider _selectedProvider = StorageProvider.AzureBlob;
+
     // Authentication method selection
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(UseEntraId))]
     [NotifyPropertyChangedFor(nameof(UseConnectionString))]
     private bool _useEntraIdAuth = false;
-    
     /// <summary>
     /// True when using Entra ID authentication (for work/school accounts).
     /// </summary>
@@ -1017,7 +1026,10 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         
         AddLog("Loading configuration...");
         var config = _databaseService.GetConfiguration();
-        
+
+        // Load the selected storage provider (config schema v4).
+        SelectedProvider = config.Provider;
+
         // Load authentication method
         UseEntraIdAuth = config.AuthMethod == SecureCloudBackup.Core.Models.StorageAuthMethod.EntraId;
         

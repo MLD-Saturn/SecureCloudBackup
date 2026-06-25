@@ -239,6 +239,7 @@ public partial class MainWindowViewModel
         try
         {
             var config = _databaseService.GetConfiguration();
+            config.Provider = SelectedProvider;
             config.ContainerName = ContainerName;
             config.StorageAccountName = StorageAccountName;
             config.WatchedFolders = WatchedFolders.Select(f => f.ToModel()).ToList();
@@ -364,6 +365,7 @@ public partial class MainWindowViewModel
             {
                 // Save watched folders
                 var config = _databaseService.GetConfiguration();
+                config.Provider = SelectedProvider;
                 config.WatchedFolders = WatchedFolders.Select(f => f.ToModel()).ToList();
                 _databaseService.SaveConfiguration(config);
 

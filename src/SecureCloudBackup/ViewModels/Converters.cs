@@ -160,3 +160,26 @@ public class NameToBrushConverter : IValueConverter
     }
 }
 
+/// <summary>
+/// Maps a <see cref="SecureCloudBackup.Core.Models.StorageProvider"/> to a
+/// human-friendly display name for the Settings provider picker.
+/// </summary>
+public class StorageProviderNameConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        return value is SecureCloudBackup.Core.Models.StorageProvider provider
+            ? provider switch
+            {
+                SecureCloudBackup.Core.Models.StorageProvider.AzureBlob => "Azure Blob Storage",
+                _ => provider.ToString()
+            }
+            : value?.ToString();
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        throw new NotImplementedException();
+    }
+}
+

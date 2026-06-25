@@ -31,6 +31,7 @@
         <vm:BoolToViewModeConverter x:Key="BoolToViewModeConverter"/>
         <vm:BytesToStringConverter x:Key="BytesToStringConverter"/>
         <vm:PendingToColorConverter x:Key="PendingToColorConverter"/>
+        <vm:StorageProviderNameConverter x:Key="StorageProviderNameConverter"/>
     </Application.Resources>
 
     <TrayIcon.Icons>

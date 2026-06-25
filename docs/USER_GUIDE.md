@@ -32,14 +32,18 @@ Last verified against code at commit time of this file. If you find a discrepanc
 
 When you first launch the app the **Settings** view opens with status "Not Configured".
 
-### Step 1 — Choose an authentication method
+### Step 1 — Choose a storage provider
+
+In the **Storage Provider** card, pick the cloud provider for your backups. **Azure Blob Storage** is currently the only option (additional providers may be added in a future release), so you can leave it selected.
+
+### Step 2 — Choose an authentication method
 
 In the **Authentication Method** card, pick one:
 
 - **Connection String (Personal Accounts)** — paste a connection string from the Azure Portal.
 - **Microsoft Entra ID (Work/School)** — click **Sign in with Microsoft** to do a browser-based interactive sign-in (you have 2 minutes to complete it). Then enter your **Storage Account Name** (just the name, not the full URL).
 
-### Step 2 — Configure Azure storage
+### Step 3 — Configure Azure storage
 
 If using a connection string:
 
@@ -53,14 +57,14 @@ If using Entra ID:
 2. Enter a **Container Name**.
 3. Click **Test Connection** to verify. Your account must hold the **Storage Blob Data Contributor** role on the storage account.
 
-### Step 3 — Set your encryption password
+### Step 4 — Set your encryption password
 
 1. Enter a strong password.
 2. Confirm it by typing it again. A red "Passwords do not match!" warning appears if they differ.
 
 The password derives the AES-256 key that encrypts every byte before upload. **There is no recovery path.** If you forget it, the backed-up data is unrecoverable by design.
 
-### Step 4 — Initialize and connect
+### Step 5 — Initialize and connect
 
 Click **Initialize & Connect**. The app will:
 
@@ -70,7 +74,7 @@ Click **Initialize & Connect**. The app will:
 
 You should see a green **Unlocked and Connected** indicator. The app then auto-loads any pre-existing watched folders and Azure files.
 
-### Step 5 — Add folders to watch
+### Step 6 — Add folders to watch
 
 Watched folders are added from the **Sync** view, not from Settings:
 
@@ -364,6 +368,10 @@ This behaviour can be useful to confirm explicitly: delete a chunk via Storage E
 ## Settings
 
 The Settings view contains all configuration. The page is divided into **cards**:
+
+### Storage Provider
+
+Select the cloud storage provider for your backups. **Azure Blob Storage** is currently the only wired provider; the picker is here so additional providers can be added in a future release. Your choice is saved with the rest of your settings.
 
 ### Authentication Method
 
