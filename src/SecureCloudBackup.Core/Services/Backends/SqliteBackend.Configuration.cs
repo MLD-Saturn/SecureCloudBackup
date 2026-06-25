@@ -44,7 +44,7 @@ internal partial class SqliteBackend
                 using var reader = cmd.ExecuteReader();
                 if (reader.Read())
                 {
-                    config.AuthMethod = (AzureAuthMethod)reader.GetInt32(0);
+                    config.AuthMethod = (StorageAuthMethod)reader.GetInt32(0);
                     config.StorageAccountName = reader.IsDBNull(1) ? null : reader.GetString(1);
                     config.EncryptedConnectionString = reader.IsDBNull(2)
                         ? null

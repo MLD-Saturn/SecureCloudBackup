@@ -81,7 +81,7 @@ public class SqliteBackendConfigurationTests : IDisposable
         var fixedTime = new DateTime(2026, 4, 17, 21, 30, 45, DateTimeKind.Utc);
         var saved = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.EntraId,
+            AuthMethod = StorageAuthMethod.EntraId,
             StorageAccountName = "mystorageaccount",
             EncryptedConnectionString = [0x01, 0x02, 0x03, 0x04],
             ContainerName = "custom-container",

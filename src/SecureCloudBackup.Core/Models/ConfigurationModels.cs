@@ -32,9 +32,21 @@ public enum StorageTier
 }
 
 /// <summary>
-/// Authentication method for Azure Storage.
+/// Identifies which cloud storage provider a backup is configured against -- the
+/// discriminator the composition root / factory uses to select the provider.
+/// Only <see cref="AzureBlob"/> is wired today; the enum exists so a second
+/// provider can be added without reshaping the configuration.
 /// </summary>
-public enum AzureAuthMethod
+public enum StorageProvider
+{
+    /// <summary>Azure Blob Storage (the only provider wired today).</summary>
+    AzureBlob
+}
+
+/// <summary>
+/// Authentication method for the configured storage provider.
+/// </summary>
+public enum StorageAuthMethod
 {
     /// <summary>
     /// Microsoft Entra ID (Azure AD) - for organizational/work accounts.
@@ -50,16 +62,23 @@ public enum AzureAuthMethod
 }
 
 /// <summary>
-/// Represents the configuration for Azure storage connection and backup settings.
+/// Represents the configuration for the storage-provider connection and backup settings.
 /// </summary>
 public class BackupConfiguration
 {
     public int Id { get; set; } = 1;
-    
+
     /// <summary>
-    /// The authentication method to use for Azure Storage.
+    /// The cloud storage provider this configuration targets. Defaults to
+    /// <see cref="StorageProvider.AzureBlob"/>. (Not yet persisted -- the schema
+    /// column + migration land in a later phase; today every config is AzureBlob.)
     /// </summary>
-    public AzureAuthMethod AuthMethod { get; set; } = AzureAuthMethod.ConnectionString;
+    public StorageProvider Provider { get; set; } = StorageProvider.AzureBlob;
+
+    /// <summary>
+    /// The authentication method to use for the storage provider.
+    /// </summary>
+    public StorageAuthMethod AuthMethod { get; set; } = StorageAuthMethod.ConnectionString;
     
     /// <summary>
     /// Azure Storage account name (e.g., "mystorageaccount").
@@ -124,9 +143,9 @@ public class BackupConfiguration
     public string? EntraIdUserName { get; set; }
     
     /// <summary>
-    /// Whether Azure storage is configured (either auth method).
+    /// Whether the storage provider is configured (either auth method).
     /// </summary>
-    public bool IsAzureConfigured => AuthMethod == AzureAuthMethod.EntraId 
+    public bool IsStorageConfigured => AuthMethod == StorageAuthMethod.EntraId 
         ? (IsEntraIdAuthenticated && !string.IsNullOrEmpty(StorageAccountName))
         : (EncryptedConnectionString != null);
     

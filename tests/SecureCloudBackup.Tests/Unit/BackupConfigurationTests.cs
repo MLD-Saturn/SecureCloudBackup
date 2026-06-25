@@ -11,7 +11,7 @@ namespace SecureCloudBackup.Tests;
 /// These properties were uncovered before this file. They drive
 /// connection setup (<see cref="BackupConfiguration.BlobServiceUri"/>)
 /// and the "is Azure ready?" gate
-/// (<see cref="BackupConfiguration.IsAzureConfigured"/>) that decides
+/// (<see cref="BackupConfiguration.IsStorageConfigured"/>) that decides
 /// whether backup/restore can run at all, so each branch is pinned.
 /// </para>
 /// </summary>
@@ -47,69 +47,81 @@ public class BackupConfigurationTests
 
     #endregion
 
-    #region IsAzureConfigured
+    #region IsStorageConfigured
 
     [Fact]
-    public void IsAzureConfiguredFalseForConnectionStringWhenNoEncryptedString()
+    public void IsStorageConfiguredFalseForConnectionStringWhenNoEncryptedString()
     {
         var config = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.ConnectionString,
+            AuthMethod = StorageAuthMethod.ConnectionString,
             EncryptedConnectionString = null
         };
 
-        Assert.False(config.IsAzureConfigured);
+        Assert.False(config.IsStorageConfigured);
     }
 
     [Fact]
-    public void IsAzureConfiguredTrueForConnectionStringWhenEncryptedStringPresent()
+    public void IsStorageConfiguredTrueForConnectionStringWhenEncryptedStringPresent()
     {
         var config = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.ConnectionString,
+            AuthMethod = StorageAuthMethod.ConnectionString,
             EncryptedConnectionString = [1, 2, 3]
         };
 
-        Assert.True(config.IsAzureConfigured);
+        Assert.True(config.IsStorageConfigured);
     }
 
     [Fact]
-    public void IsAzureConfiguredFalseForEntraIdWhenNotAuthenticated()
+    public void IsStorageConfiguredFalseForEntraIdWhenNotAuthenticated()
     {
         var config = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.EntraId,
+            AuthMethod = StorageAuthMethod.EntraId,
             IsEntraIdAuthenticated = false,
             StorageAccountName = "acct"
         };
 
-        Assert.False(config.IsAzureConfigured);
+        Assert.False(config.IsStorageConfigured);
     }
 
     [Fact]
-    public void IsAzureConfiguredFalseForEntraIdWhenAccountNameMissing()
+    public void IsStorageConfiguredFalseForEntraIdWhenAccountNameMissing()
     {
         var config = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.EntraId,
+            AuthMethod = StorageAuthMethod.EntraId,
             IsEntraIdAuthenticated = true,
             StorageAccountName = null
         };
 
-        Assert.False(config.IsAzureConfigured);
+        Assert.False(config.IsStorageConfigured);
     }
 
     [Fact]
-    public void IsAzureConfiguredTrueForEntraIdWhenAuthenticatedWithAccountName()
+    public void IsStorageConfiguredTrueForEntraIdWhenAuthenticatedWithAccountName()
     {
         var config = new BackupConfiguration
         {
-            AuthMethod = AzureAuthMethod.EntraId,
+            AuthMethod = StorageAuthMethod.EntraId,
             IsEntraIdAuthenticated = true,
             StorageAccountName = "acct"
         };
 
-        Assert.True(config.IsAzureConfigured);
+        Assert.True(config.IsStorageConfigured);
+    }
+
+    #endregion
+
+    #region Provider discriminator
+
+    [Fact]
+    public void ProviderDefaultsToAzureBlob()
+    {
+        var config = new BackupConfiguration();
+
+        Assert.Equal(StorageProvider.AzureBlob, config.Provider);
     }
 
     #endregion

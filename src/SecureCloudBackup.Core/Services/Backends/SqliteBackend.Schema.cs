@@ -138,7 +138,7 @@ internal partial class SqliteBackend
             -- equivalent of `new BackupConfiguration()`.
             CREATE TABLE IF NOT EXISTS config (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
-                auth_method INTEGER NOT NULL DEFAULT 1,            -- AzureAuthMethod, 1 = ConnectionString
+                auth_method INTEGER NOT NULL DEFAULT 1,            -- StorageAuthMethod, 1 = ConnectionString
                 storage_account_name TEXT NULL,
                 encrypted_connection_string BLOB NULL,
                 container_name TEXT NULL DEFAULT 'backup',

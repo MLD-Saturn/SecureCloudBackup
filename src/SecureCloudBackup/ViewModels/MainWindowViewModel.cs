@@ -1015,7 +1015,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         var config = _databaseService.GetConfiguration();
         
         // Load authentication method
-        UseEntraIdAuth = config.AuthMethod == SecureCloudBackup.Core.Models.AzureAuthMethod.EntraId;
+        UseEntraIdAuth = config.AuthMethod == SecureCloudBackup.Core.Models.StorageAuthMethod.EntraId;
         
         // Load Entra ID settings
         StorageAccountName = config.StorageAccountName ?? string.Empty;

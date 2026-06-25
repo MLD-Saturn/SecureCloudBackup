@@ -84,7 +84,7 @@ public partial class BackupOrchestrator
         config.StorageAccountName = storageAccountName;
         config.ContainerName = bucketName;
         config.IsEntraIdAuthenticated = true;
-        config.AuthMethod = AzureAuthMethod.EntraId;
+        config.AuthMethod = StorageAuthMethod.EntraId;
         _databaseService.SaveConfiguration(config);
         Log("SaveStorageAccountAsync: Configuration saved");
         
@@ -150,7 +150,7 @@ public partial class BackupOrchestrator
         var config = _databaseService.GetConfiguration();
         config.EncryptedConnectionString = encrypted;
         config.ContainerName = bucketName;
-        config.AuthMethod = AzureAuthMethod.ConnectionString;
+        config.AuthMethod = StorageAuthMethod.ConnectionString;
         config.IsEntraIdAuthenticated = false;
         _databaseService.SaveConfiguration(config);
         Log("SaveConnectionStringAsync: Encrypted connection string saved");

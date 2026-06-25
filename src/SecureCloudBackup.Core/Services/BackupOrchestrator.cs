@@ -688,7 +688,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         var bucketName = config.ContainerName ?? "backup";
         Log($"ConnectToRemoteAsync: AuthMethod={config.AuthMethod}, Container={bucketName}");
         
-        if (config.AuthMethod == AzureAuthMethod.EntraId)
+        if (config.AuthMethod == StorageAuthMethod.EntraId)
         {
             // Entra ID authentication
             if (config.IsEntraIdAuthenticated && config.BlobServiceUri != null && _tokenProvider != null)
