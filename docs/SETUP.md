@@ -1,4 +1,4 @@
-# Azure Backup Tool — Setup Guide
+# SecureCloudBackup — Setup Guide
 
 Last verified against code at commit time of this file. If you find a discrepancy between this document and the running app or current source, update this document in the same commit as the code change that revealed the discrepancy. See `.github/copilot-instructions.md` "Documentation trust policy".
 

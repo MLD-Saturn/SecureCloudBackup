@@ -1,4 +1,4 @@
-# Azure Backup Tool — User Guide
+# SecureCloudBackup — User Guide
 
 This guide covers the everyday tasks: configuring the app, backing up files, restoring them, and getting useful diagnostic information when something goes wrong. For installation and the underlying technical design, see `docs/SETUP.md`.
 
