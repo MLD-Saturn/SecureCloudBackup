@@ -64,7 +64,7 @@ The password derives the AES-256 key that encrypts every byte before upload. **T
 
 Click **Initialize & Connect**. The app will:
 
-- Create the local database (`backup.db`), encrypted with SQLCipher using your password.
+- Create the local database (`backup.db`), an application-level AES-256-GCM encrypted snapshot keyed from your password.
 - Encrypt and store your connection string inside `backup.db`.
 - Connect to Azure Storage.
 
@@ -309,23 +309,23 @@ The scan computes its "no file references this chunk" verdict from a snapshot ta
 
 ### Catalog database file
 
-The **Catalog Database File** card runs a low-level diagnostic against the encrypted SQLite/SQLCipher catalog file on disk. This is **not** the same as the Data Integrity check — that one verifies your backed-up files in Azure, while this one verifies the local catalog file itself.
+The **Catalog Database File** card runs a low-level diagnostic against the local catalog. The catalog is an application-level AES-256-GCM encrypted snapshot (the `AZDB` envelope) that is decrypted into an in-memory SQLite database at unlock. This is **not** the same as the Data Integrity check — that one verifies your backed-up files in Azure, while this one verifies the local catalog itself.
 
 | Action | What it does |
 |---|---|
-| Verify Database File | Runs `PRAGMA cipher_integrity_check` (SQLCipher per-page HMAC) and `PRAGMA integrity_check` (SQLite b-tree structure) against the open catalog and shows the report below the button. |
-| Attempt Repair | Only enabled after Verify Database File reports REINDEX-safe index damage. Runs `REINDEX` against each affected index in place, then re-runs both pragmas and shows the before/after report. Refuses to act on cipher-pragma damage or any unfamiliar finding. |
+| Verify Database File | Runs `PRAGMA integrity_check` (SQLite b-tree structure) against the decrypted in-memory catalog and shows the report below the button. Ciphertext integrity is verified separately and automatically: the snapshot's AES-256-GCM authentication tag is checked when the catalog is unlocked, so a tampered or corrupt snapshot fails to decrypt and the app never opens it — reaching this check already proves the encrypted bytes are intact. |
+| Attempt Repair | Only enabled after Verify Database File reports REINDEX-safe index damage. Runs `REINDEX` against each affected index in place, then re-runs `PRAGMA integrity_check` and shows the before/after report. Refuses to act on any unfamiliar finding. |
 
 When to use it:
 
-- An action against the catalog (e.g. starting a Data Integrity check, saving a backed-up file row) fails with `SQLite Error 11: 'database disk image is malformed'` or a similar SQLite/SQLCipher error.
+- An action against the catalog (e.g. starting a Data Integrity check, saving a backed-up file row) fails with `SQLite Error 11: 'database disk image is malformed'` or a similar SQLite error.
 - The Data Integrity tab shows `Check could not start: The local backup catalog database file is corrupted on disk…` — that message is the typed signal that the catalog itself, not your backed-up files, is the problem.
 
 How to read the report:
 
-- A healthy catalog shows `ok (no failing pages)` for the cipher pragma and a single `ok` row for the SQLite pragma. SQLCipher emits zero rows on success, so the empty-list shape is what "healthy" looks like.
-- Any other lines describe the affected page or b-tree node. If every finding is an index-only message (`wrong # of entries in index …`, `row N missing from index …`, `non-unique entry in index …`) the **Attempt Repair** button enables and can rewrite the affected indexes in place.
-- For any other shape (cipher-pragma failures, page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until either restored from a recent backup or rebuilt from Azure via **Rebuild from Azure** above. **Rebuild from Azure** repopulates the chunk index, the reverse index, and the backed-up file records, so the rebuilt catalog matches what Azure actually holds; it is the recommended recovery path after a damaged catalog file is deleted and recreated.
+- A healthy catalog shows a single `ok` row for the `PRAGMA integrity_check` report. Any other lines describe the affected page or b-tree node.
+- If every finding is an index-only message (`wrong # of entries in index …`, `row N missing from index …`, `non-unique entry in index …`) the **Attempt Repair** button enables and can rewrite the affected indexes in place.
+- For any other shape (page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until either restored from a recent backup or rebuilt from Azure via **Rebuild from Azure** above. **Rebuild from Azure** repopulates the chunk index, the reverse index, and the backed-up file records, so the rebuilt catalog matches what Azure actually holds; it is the recommended recovery path after a damaged catalog file is deleted and recreated.
 
 ---
 
@@ -439,7 +439,7 @@ If the local catalog database is corrupt and you cannot unlock it (for example t
 
 Quarantine is intentionally **non-destructive**:
 
-- The corrupt bytes are **preserved** on disk under the timestamped suffix. They are not securely deleted; you (or a support engineer) can retrieve them later for forensic inspection. Because they remain SQLCipher-encrypted, retaining them is no worse from a secrets-exposure standpoint than the original file was.
+- The corrupt bytes are **preserved** on disk under the timestamped suffix. They are not securely deleted; you (or a support engineer) can retrieve them later for forensic inspection. Because they remain encrypted (the catalog is an AES-256-GCM snapshot, or a legacy SQLCipher database if you have not yet migrated), retaining them is no worse from a secrets-exposure standpoint than the original file was.
 - The next unlock creates a **fresh catalog** at the original path.
 - Your **files in Azure Storage are not affected**.
 
