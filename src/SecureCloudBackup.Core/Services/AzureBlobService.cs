@@ -225,6 +225,28 @@ public partial class AzureBlobService : IBlobStorageService
     private const int UploadRetryBaseDelayMs = 500;
     private const int UploadRetryMaxDelayMs = 30_000;
 
+    /// <summary>
+    /// Azure HTTP status codes the retry pipeline treats as transient (worth
+    /// retrying): request timeout (408), throttling (429), and the 5xx
+    /// server/gateway family. A single internal definition so the download-
+    /// boundary translation and the unit tests agree on one notion of "transient".
+    /// </summary>
+    internal static bool IsTransientStatus(int status) =>
+        status is 408 or 429 or 500 or 502 or 503 or 504;
+
+    /// <summary>
+    /// Translates a transient Azure <see cref="RequestFailedException"/> into the
+    /// provider-neutral <see cref="TransientStorageException"/> so retry policies
+    /// outside this Azure adapter (e.g. <see cref="RestoreService"/>) never depend
+    /// on the Azure SDK's exception types. Returns <see langword="null"/> for a
+    /// permanent failure (e.g. 401/403/409), which the caller should handle or
+    /// rethrow unchanged.
+    /// </summary>
+    internal static TransientStorageException? TryTranslateTransient(RequestFailedException ex)
+        => IsTransientStatus(ex.Status)
+            ? new TransientStorageException($"Transient storage error (HTTP {ex.Status})", ex.Status, ex)
+            : null;
+
     public bool IsConnected => _containerClient != null;
     public long TotalBytesUploaded { get; private set; }
     public int TotalOperations { get; private set; }

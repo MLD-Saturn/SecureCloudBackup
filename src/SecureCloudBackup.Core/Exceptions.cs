@@ -184,3 +184,40 @@ public class DatabaseFileCorruptException : Exception
         SqliteErrorCode = sqliteErrorCode;
     }
 }
+
+/// <summary>
+/// Base type for provider-neutral object-storage failures surfaced by an
+/// <see cref="SecureCloudBackup.Core.Services.IBlobStorageService"/>
+/// implementation. Provider adapters (Azure today, others later) translate their
+/// cloud SDK's exceptions into this hierarchy at the service boundary so
+/// consumers -- retry classification, error reporting -- never depend on a
+/// specific SDK's exception types.
+/// </summary>
+public class StorageException : Exception
+{
+    public StorageException(string message) : base(message)
+    {
+    }
+
+    public StorageException(string message, Exception innerException) : base(message, innerException)
+    {
+    }
+}
+
+/// <summary>
+/// A transient object-storage failure (HTTP 408/429/500/502/503/504, throttling,
+/// or a network blip) that is worth retrying. Provider adapters translate their
+/// SDK's transient errors into this type at the service boundary so retry
+/// policies stay provider-agnostic.
+/// </summary>
+public sealed class TransientStorageException : StorageException
+{
+    /// <summary>Provider HTTP status code when available; 0 otherwise.</summary>
+    public int Status { get; }
+
+    public TransientStorageException(string message, int status, Exception innerException)
+        : base(message, innerException)
+    {
+        Status = status;
+    }
+}

@@ -2,7 +2,6 @@ using System.Buffers;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Threading.Channels;
-using Azure;
 using SecureCloudBackup.Core.Models;
 
 namespace SecureCloudBackup.Core.Services;
@@ -589,17 +588,19 @@ public partial class RestoreService
     }
 
     /// <summary>
-    /// Determines whether an exception represents a transient Azure error worth retrying.
-    /// Covers HTTP 408/429/500/502/503/504 from Azure, I/O timeouts, and TaskCanceledException
-    /// caused by HttpClient timeouts (not user cancellation).
+    /// Determines whether an exception represents a transient storage error worth retrying.
+    /// Covers the provider-neutral <see cref="TransientStorageException"/> (HTTP
+    /// 408/429/500/502/503/504, throttling -- translated from the active provider's SDK at
+    /// the service boundary), I/O timeouts, and TaskCanceledException caused by HttpClient
+    /// timeouts (not user cancellation).
     /// </summary>
     private static bool IsTransientError(Exception ex)
     {
-        // Azure SDK wraps transient HTTP errors in RequestFailedException
-        if (ex is Azure.RequestFailedException rfe)
-        {
-            return rfe.Status is 408 or 429 or 500 or 502 or 503 or 504;
-        }
+        // The storage provider translates its SDK's transient HTTP errors into
+        // TransientStorageException at the service boundary, so this classifier
+        // never references a cloud SDK exception type.
+        if (ex is TransientStorageException)
+            return true;
 
         // HttpClient timeout surfaces as TaskCanceledException with an inner TimeoutException
         if (ex is TaskCanceledException { InnerException: TimeoutException })

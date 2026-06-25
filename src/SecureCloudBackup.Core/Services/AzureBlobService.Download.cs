@@ -108,6 +108,11 @@ public partial class AzureBlobService
         catch (RequestFailedException ex)
         {
             Log($"DownloadChunkAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            // Surface transient failures as the provider-neutral type so the restore
+            // retry classifier stays free of any Azure SDK dependency; permanent
+            // failures keep their original stack via a bare rethrow.
+            if (TryTranslateTransient(ex) is { } transient)
+                throw transient;
             throw;
         }
         catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
@@ -360,6 +365,10 @@ public partial class AzureBlobService
         catch (RequestFailedException ex)
         {
             Log($"DownloadChunkStreamingAsync: Azure request failed for {blobName}: HTTP {ex.Status} - {ex.Message}");
+            // See DownloadChunkAsync: translate transient failures to the neutral
+            // type for the retry classifier; rethrow permanent failures unchanged.
+            if (TryTranslateTransient(ex) is { } transient)
+                throw transient;
             throw;
         }
         catch (Exception ex) when (ex is not DataIntegrityException and not SecurityPolicyException)
