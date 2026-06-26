@@ -143,7 +143,7 @@ public partial class App : Application
         {
             foreach (var item in menu.Items.OfType<NativeMenuItem>())
             {
-                if (item.Header == "Show Azure Backup")
+                if (item.Header == "Show Cloud Backup")
                     item.Click += (_, _) => ShowMainWindow();
                 else if (item.Header == "Exit")
                     item.Click += (_, _) => desktop.Shutdown();

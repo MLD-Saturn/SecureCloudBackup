@@ -197,7 +197,6 @@ The data plane goes through `IObjectStorageService`, a provider-neutral interfac
 - [Azure Setup Guide](docs/SETUP.md) -- create a storage account and configure access
 - [User Guide](docs/USER_GUIDE.md) -- daily usage, restore, sync, and troubleshooting
 
-
 ## Local database
 
 The local catalog (chunk index, file metadata, configuration, encrypted connection

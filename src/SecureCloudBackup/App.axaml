@@ -37,10 +37,10 @@
     <TrayIcon.Icons>
         <TrayIcons>
             <TrayIcon Icon="/Assets/avalonia-logo.ico"
-                      ToolTipText="Azure Backup">
+                      ToolTipText="Cloud Backup">
                 <TrayIcon.Menu>
                     <NativeMenu>
-                        <NativeMenuItem Header="Show Azure Backup" />
+                        <NativeMenuItem Header="Show Cloud Backup" />
                         <NativeMenuItemSeparator />
                         <NativeMenuItem Header="Exit" />
                     </NativeMenu>

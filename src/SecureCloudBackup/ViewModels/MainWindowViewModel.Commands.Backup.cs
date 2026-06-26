@@ -38,11 +38,11 @@ public partial class MainWindowViewModel
         {
             if (UseEntraIdAuth)
             {
-                AddLog("Not connected to Azure Storage. Please sign in with Microsoft Entra ID in Settings.");
+                AddLog("Not connected to cloud storage. Please sign in with Microsoft Entra ID in Settings.");
             }
             else
             {
-                AddLog("Not connected to Azure Storage. Please configure your connection string in Settings.");
+                AddLog("Not connected to cloud storage. Please configure your connection string in Settings.");
             }
             return;
         }
@@ -142,7 +142,7 @@ public partial class MainWindowViewModel
 
         if (!_blobService.IsConnected)
         {
-            AddLog("Not connected to Azure Storage. Please check your connection settings.");
+            AddLog("Not connected to cloud storage. Please check your connection settings.");
             return;
         }
 

@@ -23,7 +23,7 @@
                     <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
                         <Button Content="Sync Selected" Command="{Binding SyncSelectedCommand}"
                                 IsEnabled="{Binding CanSyncSelected}"
-                                ToolTip.Tip="Backup selected local files AND restore selected Azure files"
+                                ToolTip.Tip="Backup selected local files AND restore selected cloud files"
                                 Classes="primary"/>
                         <Button Content="Start Monitoring" Command="{Binding StartBackupCommand}"
                                 IsVisible="{Binding !IsBackupRunning}"
@@ -33,7 +33,7 @@
                                 IsVisible="{Binding IsBackupRunning}"
                                 ToolTip.Tip="Stop backup monitoring"/>
                         <Button Content="Refresh" Command="{Binding RefreshBothPanelsCommand}"
-                                ToolTip.Tip="Refresh both local and Azure file lists"
+                                ToolTip.Tip="Refresh both local and cloud file lists"
                                 IsEnabled="{Binding IsInitialized}"/>
                         <Button Content="{Binding UseTreeView, Converter={StaticResource BoolToViewModeConverter}}"
                                 Command="{Binding ToggleViewModeCommand}"
@@ -41,8 +41,8 @@
                                 Padding="8,4"/>
                     </StackPanel>
 
-                    <!-- Right: Azure summary -->
-                    <TextBlock Grid.Column="2" Text="{Binding AzureFilesSummary}" VerticalAlignment="Center" Opacity="0.7"/>
+                    <!-- Right: cloud summary -->
+                    <TextBlock Grid.Column="2" Text="{Binding CloudFilesSummary}" VerticalAlignment="Center" Opacity="0.7"/>
                 </Grid>
                 
                 <!-- Row 2: Status indicators -->
@@ -146,12 +146,12 @@
                                 ToolTip.Tip="Remove selected folder from watch list"
                                 Padding="8,2" FontSize="12" FontWeight="Bold" Margin="4,0,0,0"
                                 IsEnabled="{Binding CanRemoveSelectedLocalFolder}"/>
-                        <TextBlock Grid.Column="4" Text="Drop Azure files here to restore" FontSize="10" Opacity="0.5" 
+                        <TextBlock Grid.Column="4" Text="Drop cloud files here to restore" FontSize="10" Opacity="0.5" 
                                    VerticalAlignment="Center" FontStyle="Italic"
                                    IsVisible="{Binding !IsDragOverLocalPanel}"/>
                         <Border Grid.Column="4" Background="#2196F3" CornerRadius="4" Padding="8,4"
                                 IsVisible="{Binding IsDragOverLocalPanel}">
-                            <TextBlock Text="Drop to RESTORE from Azure" FontSize="11" FontWeight="SemiBold" 
+                            <TextBlock Text="Drop to RESTORE from cloud" FontSize="11" FontWeight="SemiBold" 
                                        Foreground="White"/>
                         </Border>
                     </Grid>
@@ -184,7 +184,7 @@
                                           Command="{Binding ForceReuploadSelectedLocalFilesCommand}"
                                           IsEnabled="{Binding HasSelectedLocalFiles}"
                                           ToolTip.Tip="Bypasses dedup and the metadata-skip fast path. Use after an integrity-check non-repairable failure or to recover suspected remote corruption for files whose local copy is known-good."/>
-                                <MenuItem Header="Mirror Sync to Azure" Command="{Binding MirrorSyncToRemoteCommand}"
+                                <MenuItem Header="Mirror Sync to Cloud" Command="{Binding MirrorSyncToRemoteCommand}"
                                           IsEnabled="{Binding CanMirrorSyncToRemote}"/>
                                 <Separator/>
                                 <MenuItem Header="Add Watched Folder..." Command="{Binding AddWatchedFolderCommand}"/>
@@ -259,9 +259,9 @@
             <!-- Splitter -->
             <GridSplitter Grid.Column="1" ResizeDirection="Columns" Background="Transparent"/>
 
-            <!-- Right Panel: Azure Backup Files -->
+            <!-- Right Panel: Cloud Backup Files -->
             <Border Grid.Column="2" Classes="card"
-                    x:Name="AzureFilesPanel"
+                    x:Name="CloudFilesPanel"
                     DragDrop.AllowDrop="True"
                     BorderThickness="{Binding IsDragOverRemotePanel, Converter={x:Static local:DragDropConverters.BoolToBorderThickness}}"
                     BorderBrush="{Binding IsDragOverRemotePanel, Converter={StaticResource BoolToColorConverter}}">
@@ -269,15 +269,14 @@
                     <!-- Panel header -->
                     <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,0,0,8">
                         <StackPanel Orientation="Horizontal" Spacing="8">
-                            <TextBlock Text="Azure Backup" FontSize="16" FontWeight="SemiBold"/>
-                            <TextBlock Text="(Cloud Storage)" FontSize="12" Opacity="0.7" VerticalAlignment="Center"/>
+                            <TextBlock Text="Cloud Backup" FontSize="16" FontWeight="SemiBold"/>
                         </StackPanel>
                         <TextBlock Grid.Column="2" Text="Drop local files here to backup" FontSize="10" Opacity="0.5" 
                                    VerticalAlignment="Center" FontStyle="Italic"
                                    IsVisible="{Binding !IsDragOverRemotePanel}"/>
                         <Border Grid.Column="2" Background="#4CAF50" CornerRadius="4" Padding="8,4"
                                 IsVisible="{Binding IsDragOverRemotePanel}">
-                            <TextBlock Text="Drop to BACKUP to Azure" FontSize="11" FontWeight="SemiBold" 
+                            <TextBlock Text="Drop to BACKUP to cloud" FontSize="11" FontWeight="SemiBold" 
                                        Foreground="White"/>
                         </Border>
                     </Grid>
@@ -315,8 +314,8 @@
                         <TextBlock Grid.Column="3" Text="Modified" FontWeight="SemiBold" Opacity="0.7" FontSize="11"/>
                     </Grid>
 
-                    <!-- Azure file tree -->
-                    <TreeView Grid.Row="3" x:Name="AzureFilesTreeView"
+                    <!-- Cloud file tree -->
+                    <TreeView Grid.Row="3" x:Name="CloudFilesTreeView"
                               ItemsSource="{Binding FileTreeRoots}"
                               SelectedItem="{Binding SelectedTreeNode, Mode=TwoWay}"
                               IsVisible="{Binding UseTreeView}">
@@ -332,7 +331,7 @@
                                 <MenuItem Header="Mirror Sync" Command="{Binding MirrorSyncToLocalCommand}"
                                           IsEnabled="{Binding CanSetCustomRestorePath}"/>
                                 <Separator/>
-                                <MenuItem Header="Delete from Azure" Command="{Binding DeleteSelectedFilesCommand}"
+                                <MenuItem Header="Delete from Cloud" Command="{Binding DeleteSelectedFilesCommand}"
                                           IsEnabled="{Binding CanDeleteFromRemote}"
                                           ToolTip.Tip="Delete checked files, or if none checked, delete the right-clicked item"/>
                                 <Separator/>
@@ -342,7 +341,7 @@
                                 <MenuItem Header="Expand All" Command="{Binding ExpandAllTreeNodesCommand}"/>
                                 <MenuItem Header="Collapse All" Command="{Binding CollapseAllTreeNodesCommand}"/>
                                 <Separator/>
-                                <MenuItem Header="Refresh from Azure" Command="{Binding RefreshFromRemoteUiCommand}"/>
+                                <MenuItem Header="Refresh from Cloud" Command="{Binding RefreshFromRemoteUiCommand}"/>
                             </ContextMenu>
                         </TreeView.ContextMenu>
                         <TreeView.ItemTemplate>
@@ -366,7 +365,7 @@
                                     <Border Grid.Column="3" Background="{DynamicResource AppAccentLight3Brush}" 
                                              CornerRadius="3" Padding="4,1" Margin="4,0" VerticalAlignment="Center"
                                              IsVisible="{Binding HasStorageTier}"
-                                             ToolTip.Tip="Azure Storage Tier">
+                                             ToolTip.Tip="Cloud storage tier">
                                          <TextBlock Text="{Binding StorageTierText}" FontSize="9" Opacity="0.9"/>
                                      </Border>
                                      <TextBlock Grid.Column="4" Text="{Binding File.FileSize, Converter={StaticResource BytesToStringConverter}}"
@@ -378,7 +377,7 @@
                     </TreeView>
 
                     <!-- Flat list view -->
-                    <ListBox Grid.Row="3" x:Name="AzureFilesListBox"
+                    <ListBox Grid.Row="3" x:Name="CloudFilesListBox"
                              ItemsSource="{Binding FilteredRestorableFiles}"
                              SelectedItem="{Binding SelectedRestoreFile}"
                              IsVisible="{Binding ShowFlatList}">
@@ -392,7 +391,7 @@
                                     <Border Grid.Column="2" Background="{DynamicResource AppAccentLight3Brush}"
                                             CornerRadius="3" Padding="4,1" Margin="4,0" VerticalAlignment="Center"
                                             IsVisible="{Binding HasStorageTier}"
-                                            ToolTip.Tip="Azure Storage Tier">
+                                            ToolTip.Tip="Cloud storage tier">
                                         <TextBlock Text="{Binding StorageTierText}" FontSize="9" Opacity="0.9"/>
                                     </Border>
                                     <TextBlock Grid.Column="3" Text="{Binding FileSizeText}" Opacity="0.7" FontSize="11"
@@ -405,15 +404,15 @@
 
                     <!-- Empty state -->
                     <StackPanel Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                IsVisible="{Binding ShowAzureEmptyState}">
-                        <TextBlock Text="No files in Azure" FontSize="18" Opacity="0.5" HorizontalAlignment="Center"/>
+                                IsVisible="{Binding ShowCloudEmptyState}">
+                        <TextBlock Text="No files in cloud backup" FontSize="18" Opacity="0.5" HorizontalAlignment="Center"/>
                         <TextBlock Text="Start a backup to upload files" FontSize="14" Opacity="0.4" HorizontalAlignment="Center"/>
                     </StackPanel>
                     
                     <!-- Panel footer with summary -->
                     <Border Grid.Row="4" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" 
                             CornerRadius="4" Padding="8,4" Margin="0,8,0,0">
-                        <TextBlock Text="{Binding AzureFilesSummary}" FontSize="11" Opacity="0.8"/>
+                        <TextBlock Text="{Binding CloudFilesSummary}" FontSize="11" Opacity="0.8"/>
                     </Border>
                 </Grid>
             </Border>
@@ -438,17 +437,17 @@
                 </StackPanel>
                 <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8">
                     <Button Content="Backup Selected" Command="{Binding BackupSelectedLocalFilesCommand}"
-                            Classes="primary" ToolTip.Tip="Backup selected local files to Azure"
+                            Classes="primary" ToolTip.Tip="Backup selected local files to cloud storage"
                             IsEnabled="{Binding HasSelectedLocalFiles}"/>
-                    <Button Content="Mirror Sync to Azure" Command="{Binding MirrorSyncToRemoteCommand}"
-                            ToolTip.Tip="Mirror sync: backup new/modified files from the selected watched folder to Azure and mark deleted files"
+                    <Button Content="Mirror Sync to Cloud" Command="{Binding MirrorSyncToRemoteCommand}"
+                            ToolTip.Tip="Mirror sync: backup new/modified files from the selected watched folder to cloud storage and mark deleted files"
                             IsEnabled="{Binding CanMirrorSyncToRemote}"
                             Foreground="DodgerBlue"/>
                 </StackPanel>
             </Grid>
         </Border>
 
-        <!-- Actions panel: Azure files (shown when Azure files are selected) -->
+        <!-- Actions panel: Cloud files (shown when cloud files are selected) -->
         <Border Grid.Row="5" Classes="card" Margin="0,8,0,0"
                 IsVisible="{Binding HasSelectedFiles}">
             <Grid ColumnDefinitions="Auto,*,Auto">
@@ -479,8 +478,8 @@
                     <Button Content="Restore Selected" Command="{Binding RestoreSelectedTreeFilesCommand}"
                             Classes="primary" ToolTip.Tip="Restore selected files to the destination"
                             IsEnabled="{Binding HasSelectedFiles}"/>
-                    <Button Content="Delete from Azure" Command="{Binding DeleteSelectedFilesCommand}"
-                            ToolTip.Tip="Delete selected files from Azure Storage (cannot be undone!)"
+                    <Button Content="Delete from Cloud" Command="{Binding DeleteSelectedFilesCommand}"
+                            ToolTip.Tip="Delete selected files from cloud storage (cannot be undone!)"
                             Foreground="IndianRed"
                             IsEnabled="{Binding HasSelectedFiles}"/>
                 </StackPanel>

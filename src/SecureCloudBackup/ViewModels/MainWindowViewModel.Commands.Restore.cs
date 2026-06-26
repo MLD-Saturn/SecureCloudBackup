@@ -102,7 +102,7 @@ public partial class MainWindowViewModel
             return;
         }
 
-        AddLog($"Deleting {filesToDelete.Count} file(s) from Azure...");
+        AddLog($"Deleting {filesToDelete.Count} file(s) from cloud storage...");
         IsOperationInProgress = true;
         CreateOperationCts();
 

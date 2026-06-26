@@ -56,7 +56,7 @@
             <Border Classes="card">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Authentication Method" FontSize="18" FontWeight="SemiBold"/>
-                    <TextBlock Text="Choose how to connect to Azure Storage:" FontSize="12" Opacity="0.8"/>
+                    <TextBlock Text="Choose how to connect to your cloud storage:" FontSize="12" Opacity="0.8"/>
                     
                     <StackPanel Orientation="Horizontal" Spacing="12">
                         <RadioButton GroupName="AuthMethod" 
@@ -335,7 +335,7 @@
                 <!-- Unified unlock/initialize and connect button -->
                 <Button Command="{Binding UnlockAndConnectCommand}" Classes="primary"
                         IsEnabled="{Binding !IsInitialized}"
-                        ToolTip.Tip="Unlock encryption and connect to Azure Storage">
+                        ToolTip.Tip="Unlock encryption and connect to cloud storage">
                     <TextBlock Text="{Binding UnlockAndConnectButtonText}"/>
                 </Button>
                 <TextBlock Text="[OK] Unlocked and Connected" Foreground="LimeGreen" FontWeight="SemiBold" 
@@ -346,7 +346,7 @@
             <Border Classes="card" Margin="0,24,0,0" BorderBrush="IndianRed" BorderThickness="1">
                 <StackPanel Spacing="12">
                     <TextBlock Text="Danger Zone" FontSize="16" FontWeight="SemiBold" Foreground="IndianRed"/>
-                    <TextBlock Text="Reset the application to start fresh. This will securely delete all local settings, credentials, and file tracking data. Your files in Azure Storage will NOT be affected."
+                    <TextBlock Text="Reset the application to start fresh. This will securely delete all local settings, credentials, and file tracking data. Your files in cloud storage will NOT be affected."
                                TextWrapping="Wrap" Opacity="0.8"/>
 
                     <!-- Normal state: Show reset button -->
@@ -372,7 +372,7 @@
                     <Separator Margin="0,8,0,0"/>
                     <TextBlock Text="Catalog quarantine (recovery)" FontWeight="SemiBold" Margin="0,8,0,0"/>
                     <TextBlock TextWrapping="Wrap" Opacity="0.8"
-                               Text="If the local catalog database is corrupt and you cannot unlock it, quarantine moves the catalog file (and its companion -wal / -shm / -journal / .salt files) aside under a timestamped suffix. The bytes are PRESERVED on disk for forensic inspection -- they are not deleted. After quarantining you must set a new password and re-enter your Azure connection string by hand because the encrypted connection string lives inside the quarantined catalog and is treated as unrecoverable. Once reconnected you can use 'Rebuild from Azure' on the Storage Health tab to repopulate the catalog from Azure metadata; your files in Azure Storage are unaffected."/>
+                               Text="If the local catalog database is corrupt and you cannot unlock it, quarantine moves the catalog file (and its companion -wal / -shm / -journal / .salt files) aside under a timestamped suffix. The bytes are PRESERVED on disk for forensic inspection -- they are not deleted. After quarantining you must set a new password and re-enter your Azure connection string by hand because the encrypted connection string lives inside the quarantined catalog and is treated as unrecoverable. Once reconnected you can use 'Rebuild from Cloud' on the Storage Health tab to repopulate the catalog from cloud metadata; your files in cloud storage are unaffected."/>
 
                     <StackPanel Orientation="Horizontal" Spacing="8" IsVisible="{Binding !IsQuarantinePending}">
                         <Button Content="Quarantine Catalog..." Command="{Binding RequestQuarantineCommand}"
@@ -430,7 +430,7 @@
                             <Button Content="Confirm Rebuild"
                                     Command="{Binding ConfirmRebuildFromQuarantineCommand}"
                                     Background="SteelBlue" Foreground="White"
-                                    ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from Azure metadata."/>
+                                    ToolTip.Tip="Open the quarantined catalog read-only, recover the encryption salt, then rebuild the local catalog from cloud metadata."/>
                         </StackPanel>
                     </StackPanel>
                 </StackPanel>

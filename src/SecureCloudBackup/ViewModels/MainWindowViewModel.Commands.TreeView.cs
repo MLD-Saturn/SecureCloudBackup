@@ -778,7 +778,7 @@ public partial class MainWindowViewModel
             {
                 FileTreeRoots.Add(root);
             }
-            OnPropertyChanged(nameof(ShowAzureEmptyState));
+            OnPropertyChanged(nameof(ShowCloudEmptyState));
             
             // Ensure selection state is updated after tree rebuild
             NotifySelectionChanged();

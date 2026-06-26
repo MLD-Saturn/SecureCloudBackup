@@ -386,24 +386,22 @@ public partial class MainWindowViewModel
             // Step 6: Update status and load files
             IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
 
-            // Check if Azure connection failed during initialization
-            if (_orchestrator.AzureConnectionError != null)
+            // Check if cloud connection failed during initialization
+            if (_orchestrator.RemoteConnectionError != null)
             {
-                AddLog($"Warning: Azure connection failed - {_orchestrator.AzureConnectionError}");
+                AddLog($"Warning: cloud connection failed - {_orchestrator.RemoteConnectionError}");
                 AddLog("You can update connection settings in the Settings tab.");
             }
-
-            // Reload config to check for stored connection
             var finalConfig = _databaseService.GetConfiguration();
             var hasEntraIdConfig = IsEntraIdAuthenticated && !string.IsNullOrEmpty(finalConfig.StorageAccountName);
             var hasConnectionStringConfig = !UseEntraIdAuth && finalConfig.EncryptedConnectionString != null;
 
             if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
-                AddLog("Loading files from Azure...");
+                AddLog("Loading files from cloud storage...");
                 await RefreshFromRemoteAsync();
             }
-            else if (_orchestrator.AzureConnectionError == null && !isNewSetup)
+            else if (_orchestrator.RemoteConnectionError == null && !isNewSetup)
             {
                 // Returning user but no storage configured yet
                 if (UseEntraIdAuth)
@@ -500,33 +498,33 @@ public partial class MainWindowViewModel
             IsInitialized = true;
             AddLog("Unlocked successfully!");
 
-            // Check if Azure connection failed during initialization
-            if (_orchestrator.AzureConnectionError != null)
+            // Check if cloud connection failed during initialization
+            if (_orchestrator.RemoteConnectionError != null)
             {
-                AddLog($"Warning: Azure connection failed - {_orchestrator.AzureConnectionError}");
+                AddLog($"Warning: cloud connection failed - {_orchestrator.RemoteConnectionError}");
                 AddLog("You can update connection settings in the Settings tab.");
             }
 
             // Update Entra ID status
             IsEntraIdAuthenticated = _orchestrator.IsEntraIdAuthenticated;
             
-            // Check if Azure storage is configured and load files
+            // Check if cloud storage is configured and load files
             var config = _databaseService.GetConfiguration();
             var hasEntraIdConfig = IsEntraIdAuthenticated && !string.IsNullOrEmpty(config.StorageAccountName);
             var hasConnectionStringConfig = !UseEntraIdAuth && config.EncryptedConnectionString != null;
 
             if (_blobService.IsConnected && (hasEntraIdConfig || hasConnectionStringConfig))
             {
-                AddLog("Loading files from Azure...");
+                AddLog("Loading files from cloud storage...");
                 await RefreshFromRemoteAsync();
             }
 
             await RefreshLocalFilesAsync();
 
-            // Return success with optional Azure warning
-            var azureWarning = _orchestrator.AzureConnectionError;
-            return azureWarning != null
-                ? (true, $"Unlocked, but Azure is unavailable: {azureWarning}")
+            // Return success with optional cloud warning
+            var cloudWarning = _orchestrator.RemoteConnectionError;
+            return cloudWarning != null
+                ? (true, $"Unlocked, but cloud storage is unavailable: {cloudWarning}")
                 : (true, null);
         }
         catch (SecureCloudBackup.Core.SecurityPolicyException ex)

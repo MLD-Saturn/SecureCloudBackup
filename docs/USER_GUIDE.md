@@ -14,7 +14,7 @@ Last verified against code at commit time of this file. If you find a discrepanc
 4. [Backing up files](#backing-up-files)
 5. [Restoring files](#restoring-files)
 6. [Mirror sync](#mirror-sync)
-7. [Deleting files from Azure](#deleting-files-from-azure)
+7. [Deleting files from the cloud](#deleting-files-from-the-cloud)
 8. [Managing watched folders](#managing-watched-folders)
 9. [Storage Health view](#storage-health-view)
 10. [Tier Migration view](#tier-migration-view)
@@ -70,9 +70,9 @@ Click **Initialize & Connect**. The app will:
 
 - Create the local database (`backup.db`), an application-level AES-256-GCM encrypted snapshot keyed from your password.
 - Encrypt and store your connection string inside `backup.db`.
-- Connect to Azure Storage.
+- Connect to cloud storage.
 
-You should see a green **Unlocked and Connected** indicator. The app then auto-loads any pre-existing watched folders and Azure files.
+You should see a green **Unlocked and Connected** indicator. The app then auto-loads any pre-existing watched folders and cloud files.
 
 ### Step 6 — Add folders to watch
 
@@ -88,7 +88,7 @@ Once added, you can configure each folder's storage tier and exclusion patterns 
 
 ## Returning users (daily unlock)
 
-Whenever the app launches and finds an existing `backup.db`, a **password dialog** appears immediately. Type your password and press **Enter** (or click **OK**). The app unlocks the database, reconnects to Azure, and loads your files.
+Whenever the app launches and finds an existing `backup.db`, a **password dialog** appears immediately. Type your password and press **Enter** (or click **OK**). The app unlocks the database, reconnects to cloud storage, and loads your files.
 
 If you cancel the dialog, the app opens in the locked state. You can unlock later from Settings by entering your password and clicking **Unlock**.
 
@@ -105,7 +105,7 @@ The Sync view is the main workspace. It shows two side-by-side panels with a res
 | **Toolbar** (top) | Summary counts, primary actions, status indicator |
 | **View controls** (below toolbar) | Tree/list toggle, expand/collapse, search filter, selection controls |
 | **Local Files** (left panel) | Files in your watched folders, with backup status per file |
-| **Azure Backup** (right panel) | Files stored in Azure, with storage-tier badges |
+| **Cloud Backup** (right panel) | Files stored in the cloud, with storage-tier badges |
 | **Progress panel** (when active) | Overall and per-file progress, speed, ETA, cancel button |
 | **Actions panel** (when files are selected) | Contextual actions for the current selection |
 
@@ -122,9 +122,9 @@ The Sync view is the main workspace. It shows two side-by-side panels with a res
 
 | Button | What it does |
 |---|---|
-| **Sync Selected** | Backup the checked local files AND restore the checked Azure files in one operation |
+| **Sync Selected** | Backup the checked local files AND restore the checked cloud files in one operation |
 | **Start Monitoring** / **Stop Monitoring** | Start or stop the real-time file watcher |
-| **Refresh** | Reload both local and Azure file lists |
+| **Refresh** | Reload both local and cloud file lists |
 | **Tree / List** | Switch between hierarchical folder tree and flat scrollable list |
 
 ### View controls
@@ -158,11 +158,11 @@ The watcher waits up to **5 minutes** for files that are temporarily locked by a
 
 | Item | What it does |
 |---|---|
-| Backup Selected | Upload checked files to Azure |
+| Backup Selected | Upload checked files to cloud storage |
 | Force Re-upload Selected (B43) | Re-upload checked files even when nothing changed; bypasses dedup AND the metadata-skip fast path. Use after an integrity-check non-repairable failure or when remote bytes are suspected of being corrupt for a known-good local file. The Preview Dialog still runs so you can confirm the byte volume. |
-| Mirror Sync to Azure | Mirror the selected single watched root to Azure (single-root selection only) |
+| Mirror Sync to Cloud | Mirror the selected single watched root to cloud storage (single-root selection only) |
 | Add Watched Folder... | Add a new folder to the watch list |
-| Remove from Watch List | Remove the selected folder (does not delete from Azure) |
+| Remove from Watch List | Remove the selected folder (does not delete from cloud storage) |
 | Select All / Deselect All | Bulk selection |
 | Expand All / Collapse All | Tree navigation |
 | Refresh | Reload local file list |
@@ -173,14 +173,14 @@ The watcher waits up to **5 minutes** for files that are temporarily locked by a
 
 ### Restore selected files
 
-1. In the **Azure Backup** panel, check the files to restore.
+1. In the **Cloud Backup** panel, check the files to restore.
 2. Either tick **Restore to original location** to put them back where they were, or click **Browse...** for a different destination folder.
 3. Click **Restore Selected**.
 4. The Preview Dialog shows what will be created or overwritten. Review and click **Proceed**.
 
 ### Path remapping
 
-When you select a folder node in the Azure tree, a **Remap path** panel appears. This redirects an entire subtree to a different location:
+When you select a folder node in the cloud tree, a **Remap path** panel appears. This redirects an entire subtree to a different location:
 
 1. Select a folder node.
 2. Click **Browse...** in the remap panel, or type a target path.
@@ -190,7 +190,7 @@ When you select a folder node in the Azure tree, a **Remap path** panel appears.
 
 ### What happens during restore
 
-1. Encrypted chunks are downloaded from Azure in parallel.
+1. Encrypted chunks are downloaded from cloud storage in parallel.
 2. Each chunk is decrypted (AES-256-GCM) using the key derived from your password. Tampered or corrupt chunks fail the GCM tag check immediately.
 3. The original file is reassembled from its chunks.
 4. A SHA-256 hash check verifies end-to-end integrity against the stored metadata.
@@ -204,9 +204,9 @@ You need the same password that was used during backup. There is no password rec
 
 ## Mirror sync
 
-Mirror sync makes a local folder match the Azure backup exactly: missing files are restored, outdated files are updated, and **extra local files are deleted**.
+Mirror sync makes a local folder match the cloud backup exactly: missing files are restored, outdated files are updated, and **extra local files are deleted**.
 
-1. Select a folder node in the Azure tree.
+1. Select a folder node in the cloud tree.
 2. Use the **Remap path** panel to set the target local folder.
 3. Click **Mirror Sync** (or right-click → Mirror Sync).
 4. The Preview Dialog shows every planned action (create, overwrite, delete, skip).
@@ -215,13 +215,13 @@ Mirror sync makes a local folder match the Azure backup exactly: missing files a
 
 ---
 
-## Deleting files from Azure
+## Deleting files from the cloud
 
-1. Check the files or folders to remove in the **Azure Backup** panel.
-2. Click **Delete from Azure** in the actions panel (or right-click → Delete from Azure).
+1. Check the files or folders to remove in the **Cloud Backup** panel.
+2. Click **Delete from Cloud** in the actions panel (or right-click → Delete from Cloud).
 3. Review the Preview Dialog and click **Proceed**.
 
-Deleted files cannot be recovered from Azure after this operation. Local copies are not touched.
+Deleted files cannot be recovered from cloud storage after this operation. Local copies are not touched.
 
 ---
 
@@ -238,7 +238,7 @@ Deleted files cannot be recovered from Azure after this operation. Local copies 
 1. Select the folder in the Local Files tree.
 2. Click the **-** button in the panel header (or right-click → Remove from Watch List).
 
-Removing a folder does not delete its backed-up files from Azure; they remain available for restore.
+Removing a folder does not delete its backed-up files from cloud storage; they remain available for restore.
 
 ### Configure a folder
 
@@ -277,11 +277,11 @@ The **Storage Health** view gives visibility into your chunk-level storage and t
 
 | Metric | What it means |
 |---|---|
-| Total Chunks | Number of content-addressed chunks stored in Azure |
+| Total Chunks | Number of content-addressed chunks stored in cloud storage |
 | Orphaned | Chunks no longer referenced by any file (wasted space) |
 | Deduplicated | Chunks shared by multiple files (storage saved) |
 
-The card also shows the timestamp of the last catalog rebuild and the last Azure sync.
+The card also shows the timestamp of the last catalog rebuild and the last cloud sync.
 
 ### Storage tier breakdown
 
@@ -294,12 +294,12 @@ Visual cards per tier showing chunk count and total bytes stored:
 
 ### Orphan detection and cleanup
 
-Orphaned chunks are blobs in Azure that no file references. They waste storage.
+Orphaned chunks are chunks in cloud storage that no file references. They waste storage.
 
 1. Click **Scan for Orphans**.
 2. Review the list (hash, size, tier, upload date, original file).
 3. Use **Select All** or check individual rows.
-4. Click **Delete Selected** to remove them from Azure.
+4. Click **Delete Selected** to remove them from cloud storage.
 
 The scan computes its "no file references this chunk" verdict from a snapshot taken when you click **Scan for Orphans**. If a backup runs (or a deduplication hit re-references a chunk) between the scan and the delete, the cleanup step re-checks the authoritative reference count for each chunk immediately before deleting it. Any chunk that became referenced again in the meantime is skipped rather than deleted — this prevents accidentally deleting a chunk a file still depends on, which would otherwise surface much later as an unexplained missing-blob restore failure. Skipped chunks are reported in the cleanup summary and a warning is written to the application log so the skip is visible.
 
@@ -307,13 +307,13 @@ The scan computes its "no file references this chunk" verdict from a snapshot ta
 
 | Action | What it does |
 |---|---|
-| Backup to Azure | Upload the chunk index to Azure for disaster recovery |
-| Restore from Azure | Download the index from Azure (e.g. after reinstalling) |
-| Rebuild from Azure | Rebuild the entire local catalog from Azure metadata. Repopulates the chunk index, the reverse index, and the backed-up file records (paths, sizes, hashes, chunk graph). Use this if the catalog is corrupted, was deleted and recreated from scratch, or has drifted out of sync with Azure. Files whose metadata blob exists in Azure but whose chunks are missing are deleted from Azure during the rebuild and are not carried into the rebuilt catalog. |
+| Backup to Cloud | Upload the chunk index to cloud storage for disaster recovery |
+| Restore from Cloud | Download the index from cloud storage (e.g. after reinstalling) |
+| Rebuild from Cloud | Rebuild the entire local catalog from cloud metadata. Repopulates the chunk index, the reverse index, and the backed-up file records (paths, sizes, hashes, chunk graph). Use this if the catalog is corrupted, was deleted and recreated from scratch, or has drifted out of sync with the cloud. Files whose metadata blob exists in cloud storage but whose chunks are missing are deleted from cloud storage during the rebuild and are not carried into the rebuilt catalog. |
 
 ### Catalog database file
 
-The **Catalog Database File** card runs a low-level diagnostic against the local catalog. The catalog is an application-level AES-256-GCM encrypted snapshot (the `AZDB` envelope) that is decrypted into an in-memory SQLite database at unlock. This is **not** the same as the Data Integrity check — that one verifies your backed-up files in Azure, while this one verifies the local catalog itself.
+The **Catalog Database File** card runs a low-level diagnostic against the local catalog. The catalog is an application-level AES-256-GCM encrypted snapshot (the `AZDB` envelope) that is decrypted into an in-memory SQLite database at unlock. This is **not** the same as the Data Integrity check — that one verifies your backed-up files in cloud storage, while this one verifies the local catalog itself.
 
 | Action | What it does |
 |---|---|
@@ -329,7 +329,7 @@ How to read the report:
 
 - A healthy catalog shows a single `ok` row for the `PRAGMA integrity_check` report. Any other lines describe the affected page or b-tree node.
 - If every finding is an index-only message (`wrong # of entries in index …`, `row N missing from index …`, `non-unique entry in index …`) the **Attempt Repair** button enables and can rewrite the affected indexes in place.
-- For any other shape (page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until either restored from a recent backup or rebuilt from Azure via **Rebuild from Azure** above. **Rebuild from Azure** repopulates the chunk index, the reverse index, and the backed-up file records, so the rebuilt catalog matches what Azure actually holds; it is the recommended recovery path after a damaged catalog file is deleted and recreated.
+- For any other shape (page-level damage, freelist damage, or unfamiliar text) Attempt Repair stays disabled. Copy the report into a support request and treat the catalog as untrustworthy until either restored from a recent backup or rebuilt from cloud storage via **Rebuild from Cloud** above. **Rebuild from Cloud** repopulates the chunk index, the reverse index, and the backed-up file records, so the rebuilt catalog matches what the cloud actually holds; it is the recommended recovery path after a damaged catalog file is deleted and recreated.
 
 ---
 
@@ -439,7 +439,7 @@ A slider that scales the whole UI, with a reset button next to it.
 
 ### Danger Zone — Reset Application
 
-Securely deletes all local settings, credentials, and file-tracking data. **Files in Azure Storage are not affected.** Requires explicit confirmation. Use this if you want to start over from scratch on the same machine.
+Securely deletes all local settings, credentials, and file-tracking data. **Files in cloud storage are not affected.** Requires explicit confirmation. Use this if you want to start over from scratch on the same machine.
 
 ### Danger Zone — Quarantine Catalog (recovery)
 
@@ -449,20 +449,20 @@ Quarantine is intentionally **non-destructive**:
 
 - The corrupt bytes are **preserved** on disk under the timestamped suffix. They are not securely deleted; you (or a support engineer) can retrieve them later for forensic inspection. Because they remain encrypted (the catalog is an AES-256-GCM snapshot, or a legacy SQLCipher database if you have not yet migrated), retaining them is no worse from a secrets-exposure standpoint than the original file was.
 - The next unlock creates a **fresh catalog** at the original path.
-- Your **files in Azure Storage are not affected**.
+- Your **files in cloud storage are not affected**.
 
 After confirming, you must:
 
 1. Set a **new password** when the unlock screen reappears.
 2. Re-enter your **Azure connection string** (or storage account / container) in Settings — the encrypted connection string lives inside the quarantined catalog and is treated as **unrecoverable** for this workflow.
 3. Re-add your **watched folders** and any custom **exclusion patterns** — they too lived inside the quarantined catalog.
-4. Once reconnected, use **Storage Health → Rebuild from Azure** to repopulate the local catalog (chunk index plus backed-up file records) from Azure metadata. This restores the link between local files and their existing backups so you do not have to re-upload anything that is already in Azure.
+4. Once reconnected, use **Storage Health → Rebuild from Cloud** to repopulate the local catalog (chunk index plus backed-up file records) from cloud metadata. This restores the link between local files and their existing backups so you do not have to re-upload anything that is already in the cloud.
 
 If a companion file cannot be moved (typically because an antivirus scanner is holding it open), the Logs view shows a `WARNING -- companion NOT moved` line for each one. The main database file is always moved first; if its move fails, the operation aborts and surfaces the underlying error.
 
 ### Danger Zone — Rebuild From Quarantined Catalog (recovery)
 
-If you previously quarantined a catalog with the button above (or kept the `.quarantine-yyyyMMdd-HHmmss` file from a past quarantine event), the **Rebuild From Quarantined Catalog...** button rebuilds a fresh local catalog at the active path using the quarantined snapshot plus your Azure connection details. This recovers the bridge between your local files and the existing Azure backups *without* forcing you to start completely from scratch.
+If you previously quarantined a catalog with the button above (or kept the `.quarantine-yyyyMMdd-HHmmss` file from a past quarantine event), the **Rebuild From Quarantined Catalog...** button rebuilds a fresh local catalog at the active path using the quarantined snapshot plus your Azure connection details. This recovers the bridge between your local files and the existing cloud backups *without* forcing you to start completely from scratch.
 
 The quarantined catalog is opened **read-only** (decrypted into memory only); its bytes are never modified. If the password you supply does not match the quarantined catalog, the rebuild fails with `Invalid password` and the active catalog path is left untouched.
 
@@ -477,10 +477,10 @@ After clicking **Confirm Rebuild** the app:
 
 1. Decrypts the quarantined snapshot into a throwaway in-memory database and recovers the in-database password salt that was used to encrypt your Azure blobs.
 2. Initializes a fresh catalog at the active path with the password you supplied, then reseeds it with the recovered salt so the new catalog can decrypt blobs that were encrypted with the old key.
-3. Reconnects to Azure with the connection string and container you supplied.
-4. Repopulates the chunk index, the reverse index, and the backed-up-file graph from Azure metadata (the same work the **Storage Health → Rebuild from Azure** button performs).
+3. Reconnects to cloud storage with the connection string and container you supplied.
+4. Repopulates the chunk index, the reverse index, and the backed-up-file graph from cloud metadata (the same work the **Storage Health → Rebuild from Cloud** button performs).
 
-When the rebuild completes you can unlock the active catalog with the same password you used for the quarantined one. Your files in Azure Storage are unaffected throughout the process.
+When the rebuild completes you can unlock the active catalog with the same password you used for the quarantined one. Your files in cloud storage are unaffected throughout the process.
 
 If a catalog already exists at the active path when you click **Confirm Rebuild**, it is itself quarantined first (under a fresh timestamp) so the rebuild never silently overwrites in-progress state. Failure modes (wrong password, missing file, corrupted snapshot) are surfaced as user-readable lines in the Logs view; on any failure the active catalog file is **not** created.
 
@@ -507,8 +507,8 @@ For repeatable bug reports the recommended sequence is:
 
 The Sync view supports drag and drop between panels:
 
-- Drag files from the **Azure** panel to the **Local** panel to restore them.
-- Drag files from the **Local** panel to the **Azure** panel to back them up.
+- Drag files from the **Cloud** panel to the **Local** panel to restore them.
+- Drag files from the **Local** panel to the **Cloud** panel to back them up.
 
 Drop targets highlight with a colored border and label while you drag over them.
 
@@ -560,7 +560,7 @@ The password does not match what was used during initial setup. Passwords are ca
 
 ### Restore fails with an integrity error
 
-The backed-up data may be corrupted, or your local metadata is out of sync with what is actually in Azure. Open the **Data Integrity Check** view and run a verification scope including the affected files. The history expander captures previous failures for comparison. For a deeper analysis use **Export Bundle** in Logs and attach the ZIP to a bug report.
+The backed-up data may be corrupted, or your local metadata is out of sync with what is actually in the cloud. Open the **Data Integrity Check** view and run a verification scope including the affected files. The history expander captures previous failures for comparison. For a deeper analysis use **Export Bundle** in Logs and attach the ZIP to a bug report.
 
 ### Application closes unexpectedly
 
@@ -581,4 +581,4 @@ The crash log lives in the data directory (`%LOCALAPPDATA%\SecureCloudBackup\` i
 5. Keep the password in a password manager. Do not store it in plain text next to the encrypted database.
 6. Do not modify files during a restore to prevent conflicts.
 7. Use the **Storage Health** view to spot and clean up orphaned chunks.
-8. **Backup the chunk index to Azure** (Storage Health → Backup to Azure) for disaster recovery — it lets you reconstruct the local database after a reinstall.
+8. **Backup the chunk index to the cloud** (Storage Health → Backup to Cloud) for disaster recovery — it lets you reconstruct the local database after a reinstall.

@@ -264,7 +264,7 @@ public partial class MainWindowViewModel
 
         if (!_blobService.IsConnected)
         {
-            AddLog("Not connected to Azure Storage. Please check your connection settings.");
+            AddLog("Not connected to cloud storage. Please check your connection settings.");
             return;
         }
 
@@ -299,7 +299,7 @@ public partial class MainWindowViewModel
 
         if (!_blobService.IsConnected)
         {
-            AddLog("Not connected to Azure Storage. Please check your connection settings.");
+            AddLog("Not connected to cloud storage. Please check your connection settings.");
             return;
         }
 
@@ -350,7 +350,7 @@ public partial class MainWindowViewModel
     {
         if (!IsInitialized || !_blobService.IsConnected)
         {
-            AddLog("Please initialize and connect to Azure first");
+            AddLog("Please initialize and connect to cloud storage first");
             return;
         }
 
@@ -377,11 +377,11 @@ public partial class MainWindowViewModel
 
         try
         {
-            AddLog($"Mirror sync to Azure: {watchedFolder.Path}");
+            AddLog($"Mirror sync to cloud storage: {watchedFolder.Path}");
 
             var totalFiles = selectedRoot.TotalFileCount;
-            StartProgressTab("Mirror syncing to Azure", totalFiles, 0, totalFiles, 0);
-            StartProgressTracking("Mirror syncing to Azure", totalFiles, 0);
+            StartProgressTab("Mirror syncing to cloud storage", totalFiles, 0, totalFiles, 0);
+            StartProgressTracking("Mirror syncing to cloud storage", totalFiles, 0);
 
             Progress<(int current, int total, string file, string action)> progress = new(p =>
             {
@@ -393,7 +393,7 @@ public partial class MainWindowViewModel
 
             ProgressTab.CompleteOperation(result.FilesTransferred, result.FilesErrored, 0, result.BytesTransferred);
 
-            AddLog($"Mirror sync to Azure complete: {result.FilesTransferred} backed up, " +
+            AddLog($"Mirror sync to cloud storage complete: {result.FilesTransferred} backed up, " +
                    $"{result.FilesDeleted} marked deleted, {result.FilesUnchanged} unchanged" +
                    (result.FilesErrored > 0 ? $", {result.FilesErrored} errors" : ""));
 
@@ -407,12 +407,12 @@ public partial class MainWindowViewModel
         }
         catch (OperationCanceledException)
         {
-            AddLog("Mirror sync to Azure cancelled");
+            AddLog("Mirror sync to cloud storage cancelled");
             ProgressTab.MarkCancelled();
         }
         catch (Exception ex)
         {
-            AddLog($"Mirror sync to Azure failed: {ex.Message}");
+            AddLog($"Mirror sync to cloud storage failed: {ex.Message}");
         }
         finally
         {
@@ -459,7 +459,7 @@ public partial class MainWindowViewModel
 
         if (!_blobService.IsConnected)
         {
-            AddLog("Not connected to Azure Storage. Please check your connection settings.");
+            AddLog("Not connected to cloud storage. Please check your connection settings.");
             return;
         }
 
@@ -508,8 +508,8 @@ public partial class MainWindowViewModel
             // Phase 2: Restore Azure files
             if (azureFilesCount > 0)
             {
-                CurrentOperationType = "Restoring from Azure";
-                AddLog($"Phase 2: Restoring {azureFilesCount} file(s) from Azure...");
+                CurrentOperationType = "Restoring from cloud storage";
+                AddLog($"Phase 2: Restoring {azureFilesCount} file(s) from cloud storage...");
 
                 var filesWithPaths = UseTreeView
                     ? azureTreeFiles

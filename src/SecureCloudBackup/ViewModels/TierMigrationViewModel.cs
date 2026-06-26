@@ -109,9 +109,9 @@ public partial class TierMigrationViewModel : ViewModelBase
     [RelayCommand(CanExecute = nameof(CanRunOperations))]
     private async Task LoadFilesAsync()
     {
-        Log("LoadFilesAsync: Starting load of file metadata from Azure");
+        Log("LoadFilesAsync: Starting load of file metadata from cloud storage");
         IsOperationInProgress = true;
-        StatusMessage = "Loading file metadata from Azure...";
+        StatusMessage = "Loading file metadata from cloud storage...";
         ProgressValue = 0;
         ProgressText = string.Empty;
 

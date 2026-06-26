@@ -19,17 +19,17 @@
         <!-- Navigation Header -->
         <Border Grid.Row="0" Background="{DynamicResource AppAccentBrush}" Padding="16">
             <Grid ColumnDefinitions="Auto,*,Auto">
-                <TextBlock Text="Azure Backup" FontSize="24" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
-                
+                <TextBlock Text="Cloud Backup" FontSize="24" FontWeight="Bold" Foreground="White" VerticalAlignment="Center"/>
+
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" Spacing="8">
                     <Button Content="Sync" Command="{Binding NavigateToCommand}" CommandParameter="Sync" Classes="nav"
-                            ToolTip.Tip="View and sync local and Azure files"/>
+                            ToolTip.Tip="View and sync local and cloud files"/>
                     <Button Content="Migration" Command="{Binding NavigateToCommand}" CommandParameter="Migration" Classes="nav"
                             ToolTip.Tip="Move files between storage tiers (Hot, Cool, Cold, Archive)"/>
                     <Button Content="Storage Health" Command="{Binding NavigateToCommand}" CommandParameter="StorageHealth" Classes="nav"
                             ToolTip.Tip="View chunk index and manage orphaned storage"/>
                     <Button Content="Settings" Command="{Binding NavigateToCommand}" CommandParameter="Settings" Classes="nav"
-                            ToolTip.Tip="Configure Azure connection and watched folders"/>
+                            ToolTip.Tip="Configure the cloud connection and watched folders"/>
                     <Button Content="Logs" Command="{Binding NavigateToCommand}" CommandParameter="Logs" Classes="nav"
                             ToolTip.Tip="View application logs"/>
                     <!-- Data Integrity tab (D2): hidden until first opened from Storage Health, then persists. -->

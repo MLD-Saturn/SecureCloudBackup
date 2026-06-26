@@ -400,11 +400,11 @@ public partial class BackupOrchestrator : IAsyncDisposable
     public bool IsPaused => _isPaused;
 
     /// <summary>
-    /// Non-null if the last InitializeAsync succeeded (password valid) but the Azure
-    /// connection failed. The UI should show this as a warning, not a login failure.
+    /// Non-null if the last InitializeAsync succeeded (password valid) but the cloud
+    /// storage connection failed. The UI should show this as a warning, not a login failure.
     /// Cleared on successful connection or when the user reconfigures.
     /// </summary>
-    public string? AzureConnectionError { get; private set; }
+    public string? RemoteConnectionError { get; private set; }
 
     /// <summary>
     /// Directory where per-file .diag logs are written on error.
@@ -597,7 +597,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
         catch (Exception ex)
         {
             Log($"InitializeAsync: Azure connection failed (non-fatal): {ex.Message}");
-            AzureConnectionError = ex.Message;
+            RemoteConnectionError = ex.Message;
             ErrorOccurred?.Invoke(this,
                 $"Password accepted but Azure connection failed: {ex.Message}. " +
                 "You can fix connection settings and retry from Settings.");
@@ -684,7 +684,7 @@ public partial class BackupOrchestrator : IAsyncDisposable
     /// </summary>
     private async Task ConnectToRemoteAsync(BackupConfiguration config)
     {
-        AzureConnectionError = null;
+        RemoteConnectionError = null;
         var bucketName = config.ContainerName ?? "backup";
         Log($"ConnectToRemoteAsync: AuthMethod={config.AuthMethod}, Container={bucketName}");
         

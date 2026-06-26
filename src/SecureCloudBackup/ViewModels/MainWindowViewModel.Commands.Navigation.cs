@@ -280,7 +280,7 @@ public partial class MainWindowViewModel
                 // Notify property changes
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
-                OnPropertyChanged(nameof(ShowAzureEmptyState));
+                OnPropertyChanged(nameof(ShowCloudEmptyState));
                 OnPropertyChanged(nameof(HasSelectedFiles));
                 OnPropertyChanged(nameof(SelectedFilesCount));
                 OnPropertyChanged(nameof(SelectedFilesText));
@@ -293,7 +293,7 @@ public partial class MainWindowViewModel
                 OnPropertyChanged(nameof(BackupStatusText));
             });
 
-            AddLog("? Application reset complete. You can now set up a new password and configure Azure connection.");
+            AddLog("? Application reset complete. You can now set up a new password and configure your cloud connection.");
             AddLog("Enter a new password and your Azure connection details to get started.");
 
             // Switch to Settings view so user can set up fresh
@@ -410,7 +410,7 @@ public partial class MainWindowViewModel
 
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
-                OnPropertyChanged(nameof(ShowAzureEmptyState));
+                OnPropertyChanged(nameof(ShowCloudEmptyState));
                 OnPropertyChanged(nameof(HasSelectedFiles));
                 OnPropertyChanged(nameof(SelectedFilesCount));
                 OnPropertyChanged(nameof(SelectedFilesText));
@@ -424,9 +424,9 @@ public partial class MainWindowViewModel
             });
 
             AddLog("Quarantine complete. Set a new password and re-enter your Azure connection string " +
-                   "to start fresh. Your backed-up files in Azure are unaffected; once you reconnect, " +
-                   "you can use 'Rebuild from Azure' on the Storage Health tab to repopulate the local " +
-                   "catalog from Azure metadata.");
+                   "to start fresh. Your backed-up files in cloud storage are unaffected; once you reconnect, " +
+                   "you can use 'Rebuild from Cloud' on the Storage Health tab to repopulate the local " +
+                   "catalog from cloud metadata.");
 
             CurrentView = "Settings";
         }
@@ -645,18 +645,18 @@ public partial class MainWindowViewModel
         {
             if (UseEntraIdAuth)
             {
-                AddLog("Not connected to Azure Storage. Please sign in with Microsoft Entra ID in Settings.");
+                AddLog("Not connected to cloud storage. Please sign in with Microsoft Entra ID in Settings.");
             }
             else
             {
-                AddLog("Not connected to Azure Storage. Please configure your connection string in Settings.");
+                AddLog("Not connected to cloud storage. Please configure your connection string in Settings.");
             }
             return;
         }
 
         try
         {
-            AddLog("Loading files from Azure Storage...");
+            AddLog("Loading files from cloud storage...");
             
             Progress<(int completed, int total)> progress = new(p =>
             {
@@ -688,7 +688,7 @@ public partial class MainWindowViewModel
                 RestorableFiles.ReplaceAll(ordered.Select(f => new BackedUpFileViewModel(f)));
                 OnPropertyChanged(nameof(RestorableFilesEmpty));
                 OnPropertyChanged(nameof(RestorableFilesCount));
-                OnPropertyChanged(nameof(ShowAzureEmptyState));
+                OnPropertyChanged(nameof(ShowCloudEmptyState));
                 OnPropertyChanged(nameof(FilteredRestorableFiles)); // Update flat list view
 
                 // Update statistics to reflect actual Azure storage
@@ -701,13 +701,13 @@ public partial class MainWindowViewModel
                     BuildFileTree();
                 }
 
-                AddLog($"Loaded {files.Count} files from Azure Storage");
-                OnPropertyChanged(nameof(AzureFilesSummary));
+                AddLog($"Loaded {files.Count} files from cloud storage");
+                OnPropertyChanged(nameof(CloudFilesSummary));
             });
         }
         catch (Exception ex)
         {
-            AddLog($"Failed to load files from Azure: {ex.Message}");
+            AddLog($"Failed to load files from cloud storage: {ex.Message}");
         }
     }
 

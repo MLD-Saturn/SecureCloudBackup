@@ -98,7 +98,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// <summary>
     /// Window title including mode indicator (Portable or Installed).
     /// </summary>
-    public string WindowTitle => $"Azure Backup - Encrypted Cloud Backup{AppMode.WindowTitleSuffix}";
+    public string WindowTitle => $"Cloud Backup - Encrypted Cloud Backup{AppMode.WindowTitleSuffix}";
 
     /// <summary>
     /// Gets whether the app is running in portable mode.
@@ -433,16 +433,16 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
 
     /// <summary>
     /// Dynamic tooltip text for the system tray icon.
-    /// Shows "Azure Backup — Idle" or "Azure Backup — Syncing — speed — ETA".
+    /// Shows "Cloud Backup — Idle" or "Cloud Backup — Syncing — speed — ETA".
     /// </summary>
     public string TrayTooltipText
     {
         get
         {
             if (!IsTransferInProgress)
-                return "Azure Backup \u2014 Idle";
+                return "Cloud Backup \u2014 Idle";
 
-            var text = "Azure Backup \u2014 Syncing";
+            var text = "Cloud Backup \u2014 Syncing";
             if (!string.IsNullOrEmpty(OperationSpeed))
                 text += $" \u2014 {OperationSpeed}";
             if (!string.IsNullOrEmpty(EstimatedTimeRemaining))
@@ -490,7 +490,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     /// True if the Azure files panel should show the empty state.
     /// Shows empty state when there are no files AND we're not in tree view with tree nodes.
     /// </summary>
-    public bool ShowAzureEmptyState => RestorableFiles.Count == 0 && FileTreeRoots.Count == 0;
+    public bool ShowCloudEmptyState => RestorableFiles.Count == 0 && FileTreeRoots.Count == 0;
 
     /// <summary>
     /// Display text showing count of restorable files.
@@ -714,14 +714,14 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
     }
 
     /// <summary>
-    /// Summary statistics for Azure backup files.
+    /// Summary statistics for cloud backup files.
     /// </summary>
-    public string AzureFilesSummary
+    public string CloudFilesSummary
     {
         get
         {
             var count = RestorableFiles.Count;
-            if (count == 0) return "No files in Azure backup";
+            if (count == 0) return "No files in cloud backup";
             var totalSize = RestorableFiles.Sum(f => f.Model.FileSize);
             return $"{count} files ({SecureCloudBackup.Core.FormatHelper.FormatBytes(totalSize)})";
         }
@@ -882,7 +882,7 @@ public partial class MainWindowViewModel : ViewModelBase, IAsyncDisposable
         // user is prompted to sign in again instead of watching silent retry stalls.
         _orchestrator.AuthenticationFailed += (s, ex) =>
         {
-            AddLog($"Azure authentication failed (HTTP {ex.Status}). Please sign in again from Settings.");
+            AddLog($"Cloud authentication failed (HTTP {ex.Status}). Please sign in again from Settings.");
             IsEntraIdAuthenticated = false;
             EntraIdStatus = "Not signed in";
         };

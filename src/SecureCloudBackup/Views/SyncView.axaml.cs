@@ -181,36 +181,36 @@ public partial class SyncView : UserControl
     {
         // Find panels and attach drag-drop handlers
         var localPanel = this.FindControl<Border>("LocalFilesPanel");
-        var azurePanel = this.FindControl<Border>("AzureFilesPanel");
+        var cloudPanel = this.FindControl<Border>("CloudFilesPanel");
         var localTreeView = this.FindControl<TreeView>("LocalFilesTreeView");
-        var azureTreeView = this.FindControl<TreeView>("AzureFilesTreeView");
-        
+        var cloudTreeView = this.FindControl<TreeView>("CloudFilesTreeView");
+
         if (localPanel != null)
         {
             localPanel.AddHandler(DragDrop.DropEvent, OnDropToLocal);
             localPanel.AddHandler(DragDrop.DragOverEvent, OnDragOverLocal);
             localPanel.AddHandler(DragDrop.DragLeaveEvent, OnDragLeaveLocal);
         }
-        
-        if (azurePanel != null)
+
+        if (cloudPanel != null)
         {
-            azurePanel.AddHandler(DragDrop.DropEvent, OnDropToAzure);
-            azurePanel.AddHandler(DragDrop.DragOverEvent, OnDragOverAzure);
-            azurePanel.AddHandler(DragDrop.DragLeaveEvent, OnDragLeaveAzure);
+            cloudPanel.AddHandler(DragDrop.DropEvent, OnDropToAzure);
+            cloudPanel.AddHandler(DragDrop.DragOverEvent, OnDragOverAzure);
+            cloudPanel.AddHandler(DragDrop.DragLeaveEvent, OnDragLeaveAzure);
         }
-        
+
         // Wire up drag initiation for local files tree - use Bubble strategy to allow checkboxes to work
         if (localTreeView != null)
         {
             localTreeView.AddHandler(PointerMovedEvent, OnLocalTreePointerMoved, RoutingStrategies.Tunnel);
             localTreeView.AddHandler(PointerReleasedEvent, OnTreePointerReleased, RoutingStrategies.Tunnel);
         }
-        
-        // Wire up drag initiation for Azure files tree
-        if (azureTreeView != null)
+
+        // Wire up drag initiation for the cloud files tree
+        if (cloudTreeView != null)
         {
-            azureTreeView.AddHandler(PointerMovedEvent, OnAzureTreePointerMoved, RoutingStrategies.Tunnel);
-            azureTreeView.AddHandler(PointerReleasedEvent, OnTreePointerReleased, RoutingStrategies.Tunnel);
+            cloudTreeView.AddHandler(PointerMovedEvent, OnAzureTreePointerMoved, RoutingStrategies.Tunnel);
+            cloudTreeView.AddHandler(PointerReleasedEvent, OnTreePointerReleased, RoutingStrategies.Tunnel);
         }
         
         // Global handler to reset drag state when pointer is released anywhere
@@ -648,9 +648,9 @@ public partial class SyncView : UserControl
             var filePaths = e.Data.Get(AzureFileDragFormat) as List<string>;
             if (filePaths != null && filePaths.Count > 0)
             {
-                vm.AddLogMessage($"Restoring {filePaths.Count} file(s) from Azure...");
-                
-                // Trigger restore for selected Azure files
+                vm.AddLogMessage($"Restoring {filePaths.Count} file(s) from cloud storage...");
+
+                // Trigger restore for selected cloud files
                 if (vm.RestoreSelectedTreeFilesCommand.CanExecute(null))
                 {
                     await vm.RestoreSelectedTreeFilesCommand.ExecuteAsync(null);
@@ -663,7 +663,7 @@ public partial class SyncView : UserControl
         var files = e.Data.GetFiles();
         if (files != null && files.Any())
         {
-            vm.AddLogMessage("Note: To restore files from Azure, drag from the Azure panel (right) to here.");
+            vm.AddLogMessage("Note: To restore files from the cloud, drag from the cloud panel (right) to here.");
         }
 #pragma warning restore CS0618
     }
@@ -692,7 +692,7 @@ public partial class SyncView : UserControl
             var filePaths = e.Data.Get(LocalFileDragFormat) as List<string>;
             if (filePaths != null && filePaths.Count > 0)
             {
-                vm.AddLogMessage($"Backing up {filePaths.Count} file(s) to Azure...");
+                vm.AddLogMessage($"Backing up {filePaths.Count} file(s) to cloud storage...");
                 await vm.BackupFilePathsAsync(filePaths);
             }
             return;

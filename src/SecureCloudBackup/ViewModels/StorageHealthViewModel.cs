@@ -351,7 +351,7 @@ public partial class StorageHealthViewModel : ViewModelBase
     {
         IsOperationInProgress = true;
         var ct = BeginOperation();
-        StatusMessage = "Rebuilding catalog from Azure...";
+        StatusMessage = "Rebuilding catalog from cloud storage...";
 
         try
         {
@@ -384,13 +384,13 @@ public partial class StorageHealthViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Backs up the chunk index to Azure.
+    /// Backs up the chunk index to cloud storage.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanRunOperations))]
     private async Task BackupIndexAsync()
     {
         IsOperationInProgress = true;
-        StatusMessage = "Backing up index to Azure...";
+        StatusMessage = "Backing up index to cloud storage...";
 
         try
         {
@@ -409,13 +409,13 @@ public partial class StorageHealthViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// Restores the chunk index from Azure backup.
+    /// Restores the chunk index from the cloud backup.
     /// </summary>
     [RelayCommand(CanExecute = nameof(CanRunOperations))]
     private async Task RestoreIndexAsync()
     {
         IsOperationInProgress = true;
-        StatusMessage = "Restoring index from Azure...";
+        StatusMessage = "Restoring index from cloud storage...";
 
         try
         {
@@ -428,7 +428,7 @@ public partial class StorageHealthViewModel : ViewModelBase
             }
             else
             {
-                StatusMessage = "No index backup found in Azure";
+                StatusMessage = "No index backup found in cloud storage";
             }
         }
         catch (Exception ex)
@@ -572,7 +572,7 @@ public partial class StorageHealthViewModel : ViewModelBase
                 $"{Environment.NewLine}" +
                 $"This usually means the catalog file is so badly corrupted that even the " +
                 $"SQLCipher / SQLite integrity pragmas cannot read it. Restore the catalog " +
-                $"from a recent backup, or rebuild it from Azure metadata via the " +
+                $"from a recent backup, or rebuild it from cloud metadata via the " +
                 $"\"Rebuild Index\" action above.";
             StatusMessage = $"Verification failed: {ex.Message}";
         }
